@@ -1,3 +1,8 @@
+--extra-index-url https://download.pytorch.org/whl/cu124
+torch==2.5.1+cu124
+torchvision==0.20.1+cu124
+xformers==0.0.28.post3
+
 accelerate==1.2.1
 av==14.0.1
 bitsandbytes==0.45.0
@@ -13,6 +18,22 @@ transformers==4.46.3
 voluptuous==0.15.2
 
 # optional dependencies
-# ascii-magic==2.3.0
-# matplotlib==3.10.0
-# tensorboard
+ascii-magic==2.3.0
+matplotlib==3.10.0
+tensorboard
+wandb
+pillow-avif-plugin
+
+# optimizer
+pytorch-optimizer
+prodigy-plus-schedule-free
+prodigyopt
+dadaptation
+heavyball>=0.24.4
+schedulefree>=1.4.0
+torch-optimi==0.2.1
+adam-mini>=1.1.1
+
+https://github.com/bdashore3/flash-attention/releases/download/v2.7.1.post1/flash_attn-2.7.1.post1+cu124torch2.5.1cxx11abiFALSE-cp310-cp310-win_amd64.whl
+https://github.com/sdbds/SageAttention-for-windows/releases/download/2.0.1_20250102/sageattention-2.0.1+cu124torch2.5.1-cp310-cp310-win_amd64.whl
+https://github.com/woct0rdho/triton-windows/releases/download/v3.1.0-windows.post5/triton-3.1.0-cp310-cp310-win_amd64.whl
