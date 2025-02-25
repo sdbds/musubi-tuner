@@ -5,7 +5,7 @@ xformers==0.0.28.post3
 
 accelerate==1.2.1
 av==14.0.1
-bitsandbytes==0.45.0
+bitsandbytes==0.45.2
 diffusers==0.32.1
 einops==0.7.0
 huggingface-hub==0.26.5
@@ -34,8 +34,8 @@ schedulefree>=1.4.0
 torch-optimi==0.2.1
 adam-mini>=1.1.1
 
-https://github.com/kingbri1/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu124torch2.5.1cxx11abiFALSE-cp310-cp310-win_amd64.whl ; sys_platform == 'win32'
+https://github.com/sdbds/flash-attention-for-windows/releases/download/2.7.4.post1/flash_attn-2.7.4.post1+cu124torch2.5.1cxx11abiFALSEfullbackward-cp310-cp310-win_amd64.whl ; sys_platform == 'win32'
 https://github.com/sdbds/SageAttention-for-windows/releases/download/2.1.1/sageattention-2.1.1+cu124torch2.5.1-cp310-cp310-win_amd64.whl ; sys_platform == 'win32'
-https://github.com/woct0rdho/triton-windows/releases/download/v3.2.0-windows.post9/triton-3.2.0-cp310-cp310-win_amd64.whl ; sys_platform == 'win32'
+https://github.com/woct0rdho/triton-windows/releases/download/v3.2.0-windows.post10/triton-3.2.0-cp310-cp310-win_amd64.whl ; sys_platform == 'win32'
 flash-attn; sys_platform == 'linux'
 sageattention; sys_platform == 'linux'
