@@ -17,6 +17,10 @@ tqdm==4.67.1
 transformers==4.46.3
 voluptuous==0.15.2
 
+# Wan2.1
+ftfy==6.3.1
+easydict==1.13
+
 # optional dependencies
 ascii-magic==2.3.0
 matplotlib==3.10.0

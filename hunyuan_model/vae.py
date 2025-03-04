@@ -19,7 +19,7 @@ logging.basicConfig(level=logging.INFO)
 
 
 SCALING_FACTOR = 0.476986
-VAE_VER = "884-16c-hy"
+VAE_VER = "884-16c-hy"  # We don't support other versions currently
 
 
 def load_vae(
@@ -93,9 +93,13 @@ def load_vae(
     # vae_ckpt = Path(vae_path) / "pytorch_model.pt"
     # assert vae_ckpt.exists(), f"VAE checkpoint not found: {vae_ckpt}"
 
-    ckpt = torch.load(vae_path, map_location=vae.device, weights_only=True)
-    if "state_dict" in ckpt:
-        ckpt = ckpt["state_dict"]
+    if vae_path.endswith(".safetensors"):
+        from safetensors.torch import load_file
+        ckpt = load_file(vae_path)
+    else:
+        ckpt = torch.load(vae_path, map_location=vae.device, weights_only=True)
+        if "state_dict" in ckpt:
+            ckpt = ckpt["state_dict"]
     if any(k.startswith("vae.") for k in ckpt.keys()):
         ckpt = {k.replace("vae.", ""): v for k, v in ckpt.items() if k.startswith("vae.")}
     vae.load_state_dict(ckpt)

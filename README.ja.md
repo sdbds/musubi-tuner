@@ -2,52 +2,94 @@
 
 [English](./README.md) | [日本語](./README.ja.md)
 
-このリポジトリは、HunyuanVideoのLoRA学習のためのスクリプトを提供します。
+## 目次
 
-__リポジトリは開発中です。__
+- [はじめに](#はじめに)
+    - [最近の更新](#最近の更新)
+    - [リリースについて](#リリースについて)
+- [概要](#概要)
+    - [ハードウェア要件](#ハードウェア要件)
+    - [特徴](#特徴)
+- [インストール](#インストール)
+- [モデルのダウンロード](#モデルのダウンロード)
+    - [HunyuanVideoの公式モデルを使う](#HunyuanVideoの公式モデルを使う)
+    - [Text EncoderにComfyUI提供のモデルを使う](#Text-EncoderにComfyUI提供のモデルを使う)
+- [使い方](#使い方)
+    - [データセット設定](#データセット設定)
+    - [latentの事前キャッシュ](#latentの事前キャッシュ)
+    - [Text Encoder出力の事前キャッシュ](#Text-Encoder出力の事前キャッシュ)
+    - [学習](#学習)
+    - [LoRAの重みのマージ](#LoRAの重みのマージ)
+    - [推論](#推論)
+    - [SkyReels V1での推論](#SkyReels-V1での推論)
+    - [LoRAの形式の変換](#LoRAの形式の変換)
+- [その他](#その他)
+    - [SageAttentionのインストール方法](#SageAttentionのインストール方法)
+- [免責事項](#免責事項)
+- [コントリビューションについて](#コントリビューションについて)
+- [ライセンス](#ライセンス)
+
+## はじめに
+
+このリポジトリは、HunyuanVideoのLoRA学習用のコマンドラインツールです。このリポジトリは非公式であり、公式のHunyuanVideoリポジトリとは関係ありません。
+
+*リポジトリは開発中です。*
 
 ### 最近の更新
 
-- 2025/01/10
-    - `--split_attn`を指定しない場合でも、`--split_attn`が適用された状態になっていた不具合を修正しました。
-    - 学習および推論でxformersが利用可能になりました。xformers利用時は`--split_attn`の指定が必要です。
-    - `flash`モードでの不具合を修正し、動作を確認しました。また推論時に、`--split_attn`を指定可能にしました。
-    - 学習時の簡易な速度比較を行うと、1280x720解像度の画像による学習、batch size=3、RTX 4090、Windows 10の環境では、`flash`  > `flash` + `--split_attn` == `xformers` + `--split_attn` > `sdpa` > `sdpa` + `--split_attn` となりました（`flash`が最も高速）。
-        - `sdpa`は`flash`より12%程度遅く、`xformers` + `--split_attn`は`flash`より4%程度遅いようです。
-    - 推論時は `flash` >= `sageattn` > `xformers` > `sdpa` となりました（いずれも`--split_attn`を指定）。ただし、`sdpa`と`flash`の速度差は10%程度です。またメモリ使用量はほぼ同じでした。
+- 2025/03/04
+    - Wan 2.1の推論をサポートしました。`wan_generate_video.py`を使用してください。詳細は[こちら](./docs/wan.md)を参照してください。
+        - `requirements.txt`が更新されました。`pip install -r requirements.txt`を実行してください。
 
-- 2025/01/08
-    - __重要な更新__：latentsがキャッシュ時と学習時の二回、scalingされる不具合を修正しました。お手数ですが、cache_latents.pyを（`--skip_existing`を指定せずに）再度実行して、latentsを再キャッシュしてください。
+- 2025/02/26
+    - SkyReels V1のI2Vモデルの学習をサポートしました。この機能は実験的なものです。
+        - `hv_train_network.py`に以下のI2V学習用のオプションを追加しました。`--guidance_scale`はI2V学習時には1.0に設定してください。
+        ```bash
+        --dit_in_channels 32  --guidance_scale 1.0
+        ```
+        - 学習動画の最初のフレームがI2Vモデルへの入力として使用されます。
+        - プロンプトファイルにオプションが追加されました。
+            - `--n negative prompt...`: classifier free guidanceのためのネガティブプロンプト。
+            - `--l 6.0`: classifier free guidanceスケール。SkyReels V1モデルの場合は6.0に設定してください。
+            - `--i path/to/image.png`: image2video推論用の画像パス。
+            - `--g 1.0`: （このオプションは既存です）埋め込みガイダンススケール。SkyReels V1モデルの場合は1.0に設定してください。
+          - `--n`、`--l`、`--g`はSkyReels V1 T2Vモデルでも使用できます。
 
-- 2025/01/06
-    - `hv_train_network.py`と`hv_generate_video.py`に、attentionを分割して処理する`--split_attn`オプションを追加しました。推論時にはSageAttention利用時に10%程度の高速化が見込まれます。学習時にはほぼ影響ありません。`--split_attn`を指定しない場合は、従来の方法で処理されます。`attn_mode`が`flash`の場合は指定できません。
+- 2025/02/24
+    - `hv_generate_video.py`に`--exclude_single_blocks`オプションが追加されました。指定すると、single blockのLoRAが適用されなくなります。PR [#69](https://github.com/kohya-ss/musubi-tuner/pull/69) maybleMyers 氏に感謝いたします。
 
-- 2025/01/05
-    - `hv_generate_video.py`で保存形式に `images` を追加しました。`--latent_path`に保存されたlatentを指定して、latentから画像を生成できます。また `--latent_path`に複数のlatentを指定できるようになりました（VRAM使用量は増加します）。
+- 2025/02/22
+    - SkyReels V1のT2VとI2Vモデルでの推論がサポートされました。詳細は[こちら](#SkyReels-V1での推論)を参照してください。ご助力いただいた sdbds 氏に感謝いたします。
 
-- 2025/01/04
-    - Text Encoderの重みを .safetensors ファイルから読み込めるようにしました。[モデルのダウンロード](#モデルのダウンロード)の手順を参照してください。
-    - `hv_generate_video.py`でのlatentsの保存形式を.safetensorsに変更しました。またプロンプト等のメタデータが.safetensorsに保存されます。メタデータを保存したくない場合には、`--no_metadata`を指定してください。
+### リリースについて
 
-- 2025/01/03: 推論時のノイズ初期化方法が変わりました。同じseedを指定した時、生成フレーム数が異なっても、共通するフレーム分は同じになります。更新前とは同じseedでも推論結果が異なります。ご了承ください。
+Musubi Tunerの解説記事執筆や、関連ツールの開発に取り組んでくださる方々に感謝いたします。このプロジェクトは開発中のため、互換性のない変更や機能追加が起きる可能性があります。想定外の互換性問題を避けるため、参照用として[リリース](https://github.com/kohya-ss/musubi-tuner/releases)をお使いください。
 
-（たとえば、25フレームを指定した時のlatentの時間長は7、45を指定した時のlatentの時間長は12ですが、両者の最初の7つは、同じseedを指定した時には同じノイズ値になります。）
+最新のリリースとバージョン履歴は[リリースページ](https://github.com/kohya-ss/musubi-tuner/releases)で確認できます。
+
+## 概要
 
 ### ハードウェア要件
 
 - VRAM: 静止画での学習は12GB以上推奨、動画での学習は24GB以上推奨。
-    - 解像度等により異なります。12GBでは解像度 960x544 以下とし、`--blocks_to_swap`、`--fp8_llm`等の省メモリオプションを使用してください。
+    - *解像度等の学習設定により異なります。*12GBでは解像度 960x544 以下とし、`--blocks_to_swap`、`--fp8_llm`等の省メモリオプションを使用してください。
 - メインメモリ: 64GB以上を推奨、32GB+スワップで動作するかもしれませんが、未検証です。
 
 ### 特徴
 
 - 省メモリに特化
-- Windows対応、Linuxでの動作は未確認
+- Windows対応（Linuxでの動作報告もあります）
 - マルチGPUには対応していません
 
 ## インストール
 
-適当な仮想環境を作成し、ご利用のCUDAバージョンに合わせたPyTorchとtorchvisionをインストールしてください。2.5.1で動作確認済みです。
+### pipによるインストール
+
+Python 3.10以上を使用してください（3.10で動作確認済み）。
+
+適当な仮想環境を作成し、ご利用のCUDAバージョンに合わせたPyTorchとtorchvisionをインストールしてください。
+
+PyTorchはバージョン2.5.1以上を使用してください（[補足](#PyTorchのバージョンについて)）。
 
 ```bash
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
@@ -59,13 +101,32 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 pip install -r requirements.txt
 ```
 
-オプションとして、FlashAttention、SageAttention（推論にのみ使用、インストール方法は[こちら](#SagaAttentionのインストール方法)を参照）を使用できます。
+オプションとして、FlashAttention、SageAttention（推論にのみ使用、インストール方法は[こちら](#SageAttentionのインストール方法)を参照）を使用できます。
 
 また、`ascii-magic`（データセットの確認に使用）、`matplotlib`（timestepsの可視化に使用）、`tensorboard`（学習ログの記録に使用）を必要に応じてインストールしてください。
 
 ```bash
 pip install ascii-magic matplotlib tensorboard
 ```
+### uvによるインストール
+
+uvを使用してインストールすることもできますが、uvによるインストールは試験的なものです。フィードバックを歓迎します。
+
+#### Linux/MacOS
+
+```sh
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+表示される指示に従い、pathを設定してください。
+
+#### Windows
+
+```powershell
+powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+表示される指示に従い、PATHを設定するか、この時点でシステムを再起動してください。
 
 ## モデルのダウンロード
 
@@ -93,6 +154,8 @@ https://huggingface.co/tencent/HunyuanVideo/tree/main/hunyuan-video-t2v-720p/tra
 
 （同じページにfp8のモデルもありますが、未検証です。）
 
+`--fp8_base`を指定して学習する場合は、`mp_rank_00_model_states.pt`の代わりに、[こちら](https://huggingface.co/kohya-ss/HunyuanVideo-fp8_e4m3fn-unofficial)の`mp_rank_00_model_states_fp8.safetensors`を使用可能です。（このファイルは非公式のもので、重みを単純にfloat8_e4m3fnに変換したものです。）
+
 また、https://huggingface.co/tencent/HunyuanVideo/tree/main/hunyuan-video-t2v-720p/vae から、[pytorch_model.pt](https://huggingface.co/tencent/HunyuanVideo/resolve/main/hunyuan-video-t2v-720p/vae/pytorch_model.pt) をダウンロードし、任意のディレクトリに配置します。
 
 Text EncoderにはComfyUI提供のモデルを使用させていただきます。[ComyUIのページ](https://comfyanonymous.github.io/ComfyUI_examples/hunyuan_video/)を参考に、https://huggingface.co/Comfy-Org/HunyuanVideo_repackaged/tree/main/split_files/text_encoders から、llava_llama3_fp16.safetensors （Text Encoder 1、LLM）と、clip_l.safetensors （Text Encoder 2、CLIP）をダウンロードし、任意のディレクトリに配置します。
@@ -107,17 +170,21 @@ Text EncoderにはComfyUI提供のモデルを使用させていただきます�
 
 ### latentの事前キャッシュ
 
-latentの事前キャッシュは必須です。以下のコマンドを使用して、事前キャッシュを作成してください。
+latentの事前キャッシュは必須です。以下のコマンドを使用して、事前キャッシュを作成してください。（pipによるインストールの場合）
 
 ```bash
 python cache_latents.py --dataset_config path/to/toml --vae path/to/ckpts/hunyuan-video-t2v-720p/vae/pytorch_model.pt --vae_chunk_size 32 --vae_tiling
 ```
+
+uvでインストールした場合は、`uv run python cache_latents.py ...`のように、`uv run`を先頭につけてください。以下のコマンドも同様です。
 
 その他のオプションは`python cache_latents.py --help`で確認できます。
 
 VRAMが足りない場合は、`--vae_spatial_tile_sample_min_size`を128程度に減らし、`--batch_size`を小さくしてください。
 
 `--debug_mode image` を指定するとデータセットの画像とキャプションが新規ウィンドウに表示されます。`--debug_mode console`でコンソールに表示されます（`ascii-magic`が必要）。
+
+デフォルトではデータセットに含まれないキャッシュファイルは自動的に削除されます。`--keep_cache`を指定すると、キャッシュファイルを残すことができます。
 
 ### Text Encoder出力の事前キャッシュ
 
@@ -133,6 +200,8 @@ python cache_text_encoder_outputs.py --dataset_config path/to/toml  --text_encod
 
 VRAMが足りない場合（16GB程度未満の場合）は、`--fp8_llm`を指定して、fp8でLLMを実行してください。
 
+デフォルトではデータセットに含まれないキャッシュファイルは自動的に削除されます。`--keep_cache`を指定すると、キャッシュファイルを残すことができます。
+
 ### 学習
 
 以下のコマンドを使用して、学習を開始します（実際には一行で入力してください）。
@@ -141,13 +210,17 @@ VRAMが足りない場合（16GB程度未満の場合）は、`--fp8_llm`を指�
 accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 hv_train_network.py 
     --dit path/to/ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states.pt 
     --dataset_config path/to/toml --sdpa --mixed_precision bf16 --fp8_base 
-    --optimizer_type adamw8bit --learning_rate 1e-3 --gradient_checkpointing 
-     --max_data_loader_n_workers 2 --persistent_data_loader_workers 
-    --network_module=networks.lora --network_dim=32 
-    --timestep_sampling sigmoid --discrete_flow_shift 1.0 
-    --max_train_epochs 16 --save_every_n_epochs=1 --seed 42
+    --optimizer_type adamw8bit --learning_rate 2e-4 --gradient_checkpointing 
+    --max_data_loader_n_workers 2 --persistent_data_loader_workers 
+    --network_module networks.lora --network_dim 32 
+    --timestep_sampling shift --discrete_flow_shift 7.0 
+    --max_train_epochs 16 --save_every_n_epochs 1 --seed 42
     --output_dir path/to/output_dir --output_name name-of-lora
 ```
+
+__更新__：サンプルの学習率を1e-3から2e-4に、`--timestep_sampling`を`sigmoid`から`shift`に、`--discrete_flow_shift`を1.0から7.0に変更しました。より高速な学習が期待されます。ディテールが甘くなる場合は、discrete flow shiftを3.0程度に下げてみてください。
+
+ただ、適切な学習率、学習ステップ数、timestepsの分布、loss weightingなどのパラメータは、以前として不明な点が数多くあります。情報提供をお待ちしています。
 
 その他のオプションは`python hv_train_network.py --help`で確認できます（ただし多くのオプションは動作未確認です）。
 
@@ -161,13 +234,28 @@ VRAMが足りない場合は、`--blocks_to_swap`を指定して、一部のブ�
 
 `--split_attn`を指定すると、attentionを分割して処理します。速度が多少低下しますが、VRAM使用量はわずかに減ります。
 
-サンプル動画生成は現時点では実装されていません。
-
 学習されるLoRAの形式は、`sd-scripts`と同じです。
 
 `--show_timesteps`に`image`（`matplotlib`が必要）または`console`を指定すると、学習時のtimestepsの分布とtimestepsごとのloss weightingが確認できます。
 
-適切な学習率、学習ステップ数、timestepsの分布、loss weightingなどのパラメータは、現時点ではわかっていません。情報提供をお待ちしています。
+学習時のログの記録が可能です。[TensorBoard形式のログの保存と参照](./docs/advanced_config.md#save-and-view-logs-in-tensorboard-format--tensorboard形式のログの保存と参照)を参照してください。
+
+学習中のサンプル画像生成については、[こちらのドキュメント](./docs/sampling_during_training.md)を参照してください。その他の高度な設定については[こちらのドキュメント](./docs/advanced_config.md)を参照してください。
+
+### LoRAの重みのマージ
+
+```bash
+python merge_lora.py \
+    --dit path/to/ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states.pt \
+    --lora_weight path/to/lora.safetensors \
+    --save_merged_model path/to/merged_model.safetensors \
+    --device cpu \
+    --lora_multiplier 1.0
+```
+
+`--device`には計算を行うデバイス（`cpu`または`cuda`等）を指定してください。`cuda`を指定すると計算が高速化されます。
+
+`--lora_weight`にはマージするLoRAの重みを、`--lora_multiplier`にはLoRAの重みの係数を、それぞれ指定してください。複数個が指定可能で、両者の数は一致させてください。
 
 ### 推論
 
@@ -199,6 +287,34 @@ VRAMが足りない場合は、`--blocks_to_swap`を指定して、一部のブ�
 `--seed`は省略可能です。指定しない場合はランダムなシードが使用されます。
 
 `--video_length`は「4の倍数+1」を指定してください。
+
+`--flow_shift`にタイムステップのシフト値（discrete flow shift）を指定可能です。省略時のデフォルト値は7.0で、これは推論ステップ数が50の時の推奨値です。HunyuanVideoの論文では、ステップ数50の場合は7.0、ステップ数20未満（10など）で17.0が推奨されています。
+
+`--video_path`に読み込む動画を指定すると、video2videoの推論が可能です。動画ファイルを指定するか、複数の画像ファイルが入ったディレクトリを指定してください（画像ファイルはファイル名でソートされ、各フレームとして用いられます）。`--video_length`よりも短い動画を指定するとエラーになります。`--strength`で強度を指定できます。0~1.0で指定でき、大きいほど元の動画からの変化が大きくなります。
+
+なおvideo2video推論の処理は実験的なものです。
+
+`--save_merged_model`オプションで、LoRAマージ後のDiTモデルを保存できます。`--save_merged_model path/to/merged_model.safetensors`のように指定してください。なおこのオプションを指定すると推論は行われません。
+
+### SkyReels V1での推論
+
+SkyReels V1のT2VとI2Vモデルがサポートされています（推論のみ）。
+
+モデルは[こちら](https://huggingface.co/Kijai/SkyReels-V1-Hunyuan_comfy)からダウンロードできます。モデルを提供してくださったKijai氏に感謝します。`skyreels_hunyuan_i2v_bf16.safetensors`がI2Vモデル、`skyreels_hunyuan_t2v_bf16.safetensors`がT2Vモデルです。`bf16`以外の形式は未検証です（`fp8_e4m3fn`は動作するかもしれません）。
+
+T2V推論を行う場合、以下のオプションを推論コマンドに追加してください：
+
+```bash
+--guidance_scale 6.0 --embedded_cfg_scale 1.0 --negative_prompt "Aerial view, aerial view, overexposed, low quality, deformation, a poor composition, bad hands, bad teeth, bad eyes, bad limbs, distortion" --split_uncond
+```
+
+SkyReels V1はclassifier free guidance（ネガティブプロンプト）を必要とするようです。`--guidance_scale`はネガティブプロンプトのガイダンススケールです。公式リポジトリの推奨値は6.0です。デフォルトは1.0で、この場合はclassifier free guidanceは使用されません（ネガティブプロンプトは無視されます）。
+
+`--embedded_cfg_scale`は埋め込みガイダンスのスケールです。公式リポジトリの推奨値は1.0です（埋め込みガイダンスなしを意味すると思われます）。
+
+`--negative_prompt`はいわゆるネガティブプロンプトです。上記のサンプルは公式リポジトリのものです。`--guidance_scale`を指定し、`--negative_prompt`を指定しなかった場合は、空文字列が使用されます。
+
+`--split_uncond`を指定すると、モデル呼び出しをuncondとcond（ネガティブプロンプトとプロンプト）に分割します。VRAM使用量が減りますが、推論速度は低下する可能性があります。`--split_attn`が指定されている場合、`--split_uncond`は自動的に有効になります。
 
 ### LoRAの形式の変換
 
@@ -242,6 +358,12 @@ sdbds氏によるWindows対応のSageAttentionのwheelが https://github.com/sdb
 
 以上でSageAttentionのインストールが完了です。
 
+### PyTorchのバージョンについて
+
+`--attn_mode`に`torch`を指定する場合、2.5.1以降のPyTorchを使用してください（それより前のバージョンでは生成される動画が真っ黒になるようです）。
+
+古いバージョンを使う場合、xformersやSageAttentionを使用してください。
+
 ## 免責事項
 
 このリポジトリは非公式であり、公式のHunyuanVideoリポジトリとは関係ありません。また、このリポジトリは開発中で、実験的なものです。テストおよびフィードバックを歓迎しますが、以下の点にご注意ください：
@@ -273,5 +395,7 @@ sdbds氏によるWindows対応のSageAttentionのwheelが https://github.com/sdb
 ## ライセンス
 
 `hunyuan_model`ディレクトリ以下のコードは、[HunyuanVideo](https://github.com/Tencent/HunyuanVideo)のコードを一部改変して使用しているため、そちらのライセンスに従います。
+
+`wan`ディレクトリ以下のコードは、[Wan2.1](https://github.com/Wan-Video/Wan2.1)のコードを一部改変して使用しています。ライセンスはApache License 2.0です。
 
 他のコードはApache License 2.0に従います。一部Diffusersのコードをコピー、改変して使用しています。

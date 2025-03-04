@@ -183,6 +183,7 @@ class ModelOffloader(Offloader):
         super().__init__(block_type, num_blocks, blocks_to_swap, device, debug)
 
         self.supports_backward = supports_backward
+        self.forward_only = not supports_backward  # forward only offloading: can be changed to True for inference
 
         if self.supports_backward:
             # register backward hooks
@@ -192,6 +193,9 @@ class ModelOffloader(Offloader):
                 if hook is not None:
                     handle = block.register_full_backward_hook(hook)
                     self.remove_handles.append(handle)
+
+    def set_forward_only(self, forward_only: bool):
+        self.forward_only = forward_only
 
     def __del__(self):
         if self.supports_backward:
@@ -252,8 +256,8 @@ class ModelOffloader(Offloader):
         if self.blocks_to_swap is None or self.blocks_to_swap == 0:
             return
 
-        # if supports_backward, we swap blocks more than blocks_to_swap in backward pass
-        if self.supports_backward and block_idx >= self.blocks_to_swap:
+        # if supports_backward and backward is enabled, we swap blocks more than blocks_to_swap in backward pass
+        if not self.forward_only and block_idx >= self.blocks_to_swap:
             return
 
         block_idx_to_cpu = block_idx

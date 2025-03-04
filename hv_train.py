@@ -1,6 +1,6 @@
 import ast
 import asyncio
-from datetime import datetime
+from datetime import timedelta
 import gc
 import importlib
 import argparse
@@ -131,7 +131,7 @@ def prepare_accelerator(args: argparse.Namespace) -> Accelerator:
                 init_method=(
                     "env://?use_libuv=False" if os.name == "nt" and Version(torch.__version__) >= Version("2.4.0") else None
                 ),
-                timeout=datetime.timedelta(minutes=args.ddp_timeout) if args.ddp_timeout else None,
+                timeout=timedelta(minutes=args.ddp_timeout) if args.ddp_timeout else None,
             )
             if torch.cuda.device_count() > 1
             else None
@@ -803,7 +803,7 @@ class FineTuningTrainer:
             raise ValueError(
                 f"either --sdpa, --flash-attn, --sage-attn or --xformers must be specified / --sdpa, --flash-attn, --sage-attn, --xformersのいずれかを指定してください"
             )
-        transformer = load_transformer(args.dit, attn_mode, args.split_attn, loading_device, None)  # load as is
+        transformer = load_transformer(args.dit, attn_mode, args.split_attn, loading_device, None, in_channels=args.dit_in_channels)  # load as is
 
         if blocks_to_swap > 0:
             logger.info(f"enable swap {blocks_to_swap} blocks to CPU from device: {accelerator.device}")
@@ -818,9 +818,21 @@ class FineTuningTrainer:
 
         # prepare optimizer, data loader etc.
         accelerator.print("prepare optimizer, data loader etc.")
+        
+        transformer.requires_grad_(False)
+        if accelerator.is_main_process:
+            accelerator.print(
+                f"Trainable modules '{args.trainable_modules}'."
+            )
+        for name, param in transformer.named_parameters():
+            for trainable_module_name in args.trainable_modules:
+                if trainable_module_name in name:
+                    param.requires_grad = True
+                    break
 
-        trainable_params = list(transformer.parameters())
-        logger.info(f"number of trainable parameters: {sum(p.numel() for p in trainable_params)}")
+        total_params = list(transformer.parameters())
+        trainable_params = list(filter(lambda p: p.requires_grad, transformer.parameters()))
+        logger.info(f"number of trainable parameters: {sum(p.numel() for p in trainable_params) / 1e6} M, total paramters: {sum(p.numel() for p in total_params) / 1e6} M")
         optimizer_name, optimizer_args, optimizer, optimizer_train_fn, optimizer_eval_fn = self.get_optimizer(
             args, trainable_params
         )
@@ -972,7 +984,7 @@ class FineTuningTrainer:
                 is_lora=False,
             )
 
-            save_file(transformer.state_dict(), ckpt_name, sai_metadata)
+            save_file(unwrapped_nw.state_dict(), ckpt_file, sai_metadata)
             if args.huggingface_repo_id is not None:
                 huggingface_utils.upload(args, ckpt_file, "/" + ckpt_name, force_sync_upload=force_sync_upload)
 
@@ -1033,7 +1045,7 @@ class FineTuningTrainer:
 
                     pos_emb_shape = latents.shape[1:]
                     if pos_emb_shape not in pos_embed_cache:
-                        freqs_cos, freqs_sin = get_rotary_pos_embed_by_shape(transformer, latents.shape[2:])
+                        freqs_cos, freqs_sin = get_rotary_pos_embed_by_shape(accelerator.unwrap_model(transformer), latents.shape[2:])
                         # freqs_cos = freqs_cos.to(device=accelerator.device, dtype=dit_dtype)
                         # freqs_sin = freqs_sin.to(device=accelerator.device, dtype=dit_dtype)
                         pos_embed_cache[pos_emb_shape] = (freqs_cos, freqs_sin)
@@ -1267,6 +1279,12 @@ def setup_parser() -> argparse.ArgumentParser:
         choices=["no", "fp16", "bf16"],
         help="use mixed precision / 混合精度を使う場合、その精度",
     )
+    parser.add_argument(
+        "--trainable_modules",
+        nargs='+', 
+        default=".",
+        help='Enter a list of trainable modules'
+    )
 
     parser.add_argument(
         "--logging_dir",
@@ -1430,6 +1448,7 @@ def setup_parser() -> argparse.ArgumentParser:
     # model settings
     parser.add_argument("--dit", type=str, required=True, help="DiT checkpoint path / DiTのチェックポイントのパス")
     parser.add_argument("--dit_dtype", type=str, default=None, help="data type for DiT, default is bfloat16")
+    parser.add_argument("--dit_in_channels", type=int, default=16, help="input channels for DiT, default is 16, skyreels I2V is 32")
     parser.add_argument("--vae", type=str, help="VAE checkpoint path / VAEのチェックポイントのパス")
     parser.add_argument("--vae_dtype", type=str, default=None, help="data type for VAE, default is float16")
     parser.add_argument(

@@ -3,8 +3,10 @@
 # https://github.com/microsoft/LoRA/blob/main/loralib/layers.py
 # https://github.com/cloneofsimo/lora/blob/master/lora_diffusion/lora.py
 
+import ast
 import math
 import os
+import re
 from typing import Dict, List, Optional, Type, Union
 from diffusers import AutoencoderKL
 from transformers import CLIPTextModel
@@ -191,7 +193,7 @@ class LoRAInfModule(LoRAModule):
     #         torch.cuda.empty_cache()
     #     else:
     #         self._merge_to(sd, dtype, device, non_blocking)
-        
+
     def merge_to(self, sd, dtype, device, non_blocking=False):
         # extract weight from org_module
         org_sd = self.org_module.state_dict()
@@ -304,6 +306,18 @@ def create_network_hunyuan_video(
     neuron_dropout: Optional[float] = None,
     **kwargs,
 ):
+    # add default exclude patterns
+    exclude_patterns = kwargs.get("exclude_patterns", None)
+    if exclude_patterns is None:
+        exclude_patterns = []
+    else:
+        exclude_patterns = ast.literal_eval(exclude_patterns)
+
+    # exclude if 'img_mod', 'txt_mod' or 'modulation' in the name
+    exclude_patterns.append(r".*(img_mod|txt_mod|modulation).*")
+
+    kwargs["exclude_patterns"] = exclude_patterns
+
     return create_network(
         HUNYUAN_TARGET_REPLACE_MODULES,
         "lora_unet",
@@ -360,6 +374,14 @@ def create_network(
     if verbose is not None:
         verbose = True if verbose == "True" else False
 
+    # regular expression for module selection: exclude and include
+    exclude_patterns = kwargs.get("exclude_patterns", None)
+    if exclude_patterns is not None and isinstance(exclude_patterns, str):
+        exclude_patterns = ast.literal_eval(exclude_patterns)
+    include_patterns = kwargs.get("include_patterns", None)
+    if include_patterns is not None and isinstance(include_patterns, str):
+        include_patterns = ast.literal_eval(include_patterns)
+
     # too many arguments ( ^ω^)･･･
     network = LoRANetwork(
         target_replace_modules,
@@ -374,6 +396,8 @@ def create_network(
         module_dropout=module_dropout,
         conv_lora_dim=conv_dim,
         conv_alpha=conv_alpha,
+        exclude_patterns=exclude_patterns,
+        include_patterns=include_patterns,
         verbose=verbose,
     )
 
@@ -409,6 +433,8 @@ class LoRANetwork(torch.nn.Module):
         module_class: Type[object] = LoRAModule,
         modules_dim: Optional[Dict[str, int]] = None,
         modules_alpha: Optional[Dict[str, int]] = None,
+        exclude_patterns: Optional[List[str]] = None,
+        include_patterns: Optional[List[str]] = None,
         verbose: Optional[bool] = False,
     ) -> None:
         super().__init__()
@@ -442,12 +468,33 @@ class LoRANetwork(torch.nn.Module):
         # if train_t5xxl:
         #     logger.info(f"train T5XXL as well")
 
+        # compile regular expression if specified
+        exclude_re_patterns = []
+        if exclude_patterns is not None:
+            for pattern in exclude_patterns:
+                try:
+                    re_pattern = re.compile(pattern)
+                except re.error as e:
+                    logger.error(f"Invalid exclude pattern '{pattern}': {e}")
+                    continue
+                exclude_re_patterns.append(re_pattern)
+
+        include_re_patterns = []
+        if include_patterns is not None:
+            for pattern in include_patterns:
+                try:
+                    re_pattern = re.compile(pattern)
+                except re.error as e:
+                    logger.error(f"Invalid include pattern '{pattern}': {e}")
+                    continue
+                include_re_patterns.append(re_pattern)
+
         # create module instances
         def create_modules(
             is_unet: bool,
             pfx: str,
             root_module: torch.nn.Module,
-            target_replace_mods: List[str],
+            target_replace_mods: Optional[List[str]] = None,
             filter: Optional[str] = None,
             default_dim: Optional[int] = None,
         ) -> List[LoRAModule]:
@@ -467,6 +514,23 @@ class LoRANetwork(torch.nn.Module):
                             original_name = (name + "." if name else "") + child_name
                             lora_name = f"{pfx}.{original_name}".replace(".", "_")
 
+                            # exclude/include filter
+                            excluded = False
+                            for pattern in exclude_re_patterns:
+                                if pattern.match(original_name):
+                                    excluded = True
+                                    break
+                            included = False
+                            for pattern in include_re_patterns:
+                                if pattern.match(original_name):
+                                    included = True
+                                    break
+                            if excluded and not included:
+                                if verbose:
+                                    logger.info(f"exclude: {original_name}")
+                                continue
+
+                            # filter by name (not used in the current implementation)
                             if filter is not None and not filter in lora_name:
                                 continue
 
@@ -602,7 +666,7 @@ class LoRANetwork(torch.nn.Module):
     def merge_to(self, text_encoders, unet, weights_sd, dtype=None, device=None, non_blocking=False):
         from concurrent.futures import ThreadPoolExecutor
 
-        with ThreadPoolExecutor(max_workers=2) as executor: # 2 workers is enough
+        with ThreadPoolExecutor(max_workers=2) as executor:  # 2 workers is enough
             futures = []
             for lora in self.text_encoder_loras + self.unet_loras:
                 sd_for_lora = {}

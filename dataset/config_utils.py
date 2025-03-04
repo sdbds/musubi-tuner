@@ -31,6 +31,7 @@ class BaseDatasetParams:
     bucket_no_upscale: bool = False
     caption_extension: Optional[str] = None
     batch_size: int = 1
+    num_repeats: int = 1
     cache_directory: Optional[str] = None
     debug_dataset: bool = False
 
@@ -88,6 +89,7 @@ class ConfigSanitizer:
     DATASET_ASCENDABLE_SCHEMA = {
         "caption_extension": str,
         "batch_size": int,
+        "num_repeats": int,
         "resolution": functools.partial(__validate_and_convert_scalar_or_twodim.__func__, int),
         "enable_bucket": bool,
         "bucket_no_upscale": bool,
@@ -259,6 +261,7 @@ def generate_dataset_group_by_blueprint(dataset_group_blueprint: DatasetGroupBlu
         is_image_dataset: {is_image_dataset}
         resolution: {dataset.resolution}
         batch_size: {dataset.batch_size}
+        num_repeats: {dataset.num_repeats}
         caption_extension: "{dataset.caption_extension}"
         enable_bucket: {dataset.enable_bucket}
         bucket_no_upscale: {dataset.bucket_no_upscale}

@@ -27,7 +27,15 @@ from hunyuan_model.vae import load_vae
 from hunyuan_model.models import load_transformer, get_rotary_pos_embed
 from modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
 from networks import lora
+
+try:
+    from lycoris.kohya import create_network_from_weights
+except:
+    pass
+
 from utils.model_utils import str_to_dtype
+from utils.safetensors_utils import mem_eff_save_file
+from dataset.image_video_dataset import load_video, glob_images, resize_image_to_bucket
 
 import logging
 
@@ -114,7 +122,9 @@ def save_videos_grid(videos: torch.Tensor, path: str, rescale=False, n_rows=1, f
     container.close()
 
 
-def save_images_grid(videos: torch.Tensor, parent_dir: str, image_name: str, rescale: bool = False, n_rows: int = 1):
+def save_images_grid(
+    videos: torch.Tensor, parent_dir: str, image_name: str, rescale: bool = False, n_rows: int = 1, create_subdir=True
+):
     videos = rearrange(videos, "b c t h w -> t b c h w")
     outputs = []
     for x in videos:
@@ -126,7 +136,11 @@ def save_images_grid(videos: torch.Tensor, parent_dir: str, image_name: str, res
         x = (x * 255).numpy().astype(np.uint8)
         outputs.append(x)
 
-    output_dir = os.path.join(parent_dir, image_name)
+    if create_subdir:
+        output_dir = os.path.join(parent_dir, image_name)
+    else:
+        output_dir = parent_dir
+
     os.makedirs(output_dir, exist_ok=True)
     for i, x in enumerate(outputs):
         image_path = os.path.join(output_dir, f"{image_name}_{i:03d}.png")
@@ -186,7 +200,7 @@ def encode_prompt(prompt: Union[str, list[str]], device: torch.device, num_video
     return prompt_embeds, attention_mask
 
 
-def encode_input_prompt(prompt, args, device, fp8_llm=False, accelerator=None):
+def encode_input_prompt(prompt: Union[str, list[str]], args, device, fp8_llm=False, accelerator=None):
     # constants
     prompt_template_video = "dit-llm-encode-video"
     prompt_template = "dit-llm-encode"
@@ -299,7 +313,24 @@ def encode_input_prompt(prompt, args, device, fp8_llm=False, accelerator=None):
 # endregion
 
 
-def decode_latents(args, latents, device):
+def load_images(image_dir, video_length, bucket_reso):
+    image_files = glob_images(image_dir)
+    if len(image_files) == 0:
+        raise ValueError(f"No image files found in {image_dir}")
+    if len(image_files) < video_length:
+        raise ValueError(f"Number of images in {image_dir} is less than {video_length}")
+
+    image_files.sort()
+    images = []
+    for image_file in image_files[:video_length]:
+        image = Image.open(image_file)
+        image = resize_image_to_bucket(image, bucket_reso)  # returns a numpy array
+        images.append(image)
+
+    return images
+
+
+def prepare_vae(args, device):
     vae_dtype = torch.float16 if args.vae_dtype is None else str_to_dtype(args.vae_dtype)
     vae, _, s_ratio, t_ratio = load_vae(vae_dtype=vae_dtype, device=device, vae_path=args.vae)
     vae.eval()
@@ -310,6 +341,36 @@ def decode_latents(args, latents, device):
     if chunk_size is not None:
         vae.set_chunk_size_for_causal_conv_3d(chunk_size)
         logger.info(f"Set chunk_size to {chunk_size} for CausalConv3d")
+
+    if args.vae_spatial_tile_sample_min_size is not None:
+        vae.enable_spatial_tiling(True)
+        vae.tile_sample_min_size = args.vae_spatial_tile_sample_min_size
+        vae.tile_latent_min_size = args.vae_spatial_tile_sample_min_size // 8
+    # elif args.vae_tiling:
+    else:
+        vae.enable_spatial_tiling(True)
+
+    return vae, vae_dtype
+
+
+def encode_to_latents(args, video, device):
+    vae, vae_dtype = prepare_vae(args, device)
+
+    video = video.to(device=device, dtype=vae_dtype)
+    video = video * 2 - 1  # 0, 1 -> -1, 1
+    with torch.no_grad():
+        latents = vae.encode(video).latent_dist.sample()
+
+    if hasattr(vae.config, "shift_factor") and vae.config.shift_factor:
+        latents = (latents - vae.config.shift_factor) * vae.config.scaling_factor
+    else:
+        latents = latents * vae.config.scaling_factor
+
+    return latents
+
+
+def decode_latents(args, latents, device):
+    vae, vae_dtype = prepare_vae(args, device)
 
     expand_temporal_dim = False
     if len(latents.shape) == 4:
@@ -325,18 +386,11 @@ def decode_latents(args, latents, device):
     else:
         latents = latents / vae.config.scaling_factor
 
-    latents = latents.to(device=device, dtype=vae.dtype)
-    if args.vae_spatial_tile_sample_min_size is not None:
-        vae.enable_spatial_tiling(True)
-        vae.tile_sample_min_size = args.vae_spatial_tile_sample_min_size
-        vae.tile_latent_min_size = args.vae_spatial_tile_sample_min_size // 8
-    # elif args.vae_tiling:
-    else:
-        vae.enable_spatial_tiling(True)
+    latents = latents.to(device=device, dtype=vae_dtype)
     with torch.no_grad():
         image = vae.decode(latents, return_dict=False)[0]
 
-    if expand_temporal_dim or image.shape[2] == 1:
+    if expand_temporal_dim:
         image = image.squeeze(2)
 
     image = (image / 2 + 0.5).clamp(0, 1)
@@ -350,6 +404,12 @@ def parse_args():
     parser = argparse.ArgumentParser(description="HunyuanVideo inference script")
 
     parser.add_argument("--dit", type=str, required=True, help="DiT checkpoint path or directory")
+    parser.add_argument(
+        "--dit_in_channels",
+        type=int,
+        default=None,
+        help="input channels for DiT, default is None (automatically detect). 32 for SkyReels-I2V, 16 for others",
+    )
     parser.add_argument("--vae", type=str, required=True, help="VAE checkpoint path or directory")
     parser.add_argument("--vae_dtype", type=str, default=None, help="data type for VAE, default is float16")
     parser.add_argument("--text_encoder1", type=str, required=True, help="Text Encoder 1 directory")
@@ -358,14 +418,40 @@ def parse_args():
     # LoRA
     parser.add_argument("--lora_weight", type=str, nargs="*", required=False, default=None, help="LoRA weight path")
     parser.add_argument("--lora_multiplier", type=float, nargs="*", default=1.0, help="LoRA multiplier")
+    parser.add_argument(
+        "--save_merged_model",
+        type=str,
+        default=None,
+        help="Save merged model to path. If specified, no inference will be performed.",
+    )
+    parser.add_argument("--exclude_single_blocks", action="store_true", help="Exclude single blocks when loading LoRA weights")
 
+    # inference
     parser.add_argument("--prompt", type=str, required=True, help="prompt for generation")
+    parser.add_argument("--negative_prompt", type=str, default=None, help="negative prompt for generation")
     parser.add_argument("--video_size", type=int, nargs=2, default=[256, 256], help="video size")
     parser.add_argument("--video_length", type=int, default=129, help="video length")
+    parser.add_argument("--fps", type=int, default=24, help="video fps")
     parser.add_argument("--infer_steps", type=int, default=50, help="number of inference steps")
     parser.add_argument("--save_path", type=str, required=True, help="path to save generated video")
     parser.add_argument("--seed", type=int, default=None, help="Seed for evaluation.")
+    parser.add_argument(
+        "--guidance_scale",
+        type=float,
+        default=1.0,
+        help="Guidance scale for classifier free guidance. Default is 1.0 (means no guidance)",
+    )
     parser.add_argument("--embedded_cfg_scale", type=float, default=6.0, help="Embeded classifier free guidance scale.")
+    parser.add_argument("--video_path", type=str, default=None, help="path to video for video2video inference")
+    parser.add_argument(
+        "--image_path", type=str, default=None, help="path to image for image2video inference, only works for SkyReels-I2V model"
+    )
+    parser.add_argument(
+        "--split_uncond",
+        action="store_true",
+        help="split unconditional call for classifier free guidance, slower but less memory usage",
+    )
+    parser.add_argument("--strength", type=float, default=0.8, help="strength for video2video inference")
 
     # Flow Matching
     parser.add_argument("--flow_shift", type=float, default=7.0, help="Shift factor for flow matching schedulers.")
@@ -378,7 +464,9 @@ def parse_args():
     parser.add_argument(
         "--attn_mode", type=str, default="torch", choices=["flash", "torch", "sageattn", "xformers", "sdpa"], help="attention mode"
     )
-    parser.add_argument("--split_attn", action="store_true", help="use split attention")
+    parser.add_argument(
+        "--split_attn", action="store_true", help="use split attention, default is False. if True, --split_uncond becomes True"
+    )
     parser.add_argument("--vae_chunk_size", type=int, default=None, help="chunk size for CausalConv3d in VAE")
     parser.add_argument(
         "--vae_spatial_tile_sample_min_size", type=int, default=None, help="spatial tile sample min size for VAE, default 256"
@@ -390,6 +478,7 @@ def parse_args():
     )
     parser.add_argument("--no_metadata", action="store_true", help="do not save metadata")
     parser.add_argument("--latent_path", type=str, nargs="*", default=None, help="path to latent for decode. no inference")
+    parser.add_argument("--lycoris", action="store_true", help="use lycoris for inference")
 
     args = parser.parse_args()
 
@@ -460,18 +549,80 @@ def main():
 
         # encode prompt with LLM and Text Encoder
         logger.info(f"Encoding prompt: {prompt}")
+
+        do_classifier_free_guidance = args.guidance_scale != 1.0
+        if do_classifier_free_guidance:
+            negative_prompt = args.negative_prompt
+            if negative_prompt is None:
+                logger.info("Negative prompt is not provided, using empty prompt")
+                negative_prompt = ""
+            logger.info(f"Encoding negative prompt: {negative_prompt}")
+            prompt = [negative_prompt, prompt]
+        else:
+            if args.negative_prompt is not None:
+                logger.warning("Negative prompt is provided but guidance_scale is 1.0, negative prompt will be ignored.")
+
         prompt_embeds, prompt_mask, prompt_embeds_2, prompt_mask_2 = encode_input_prompt(
             prompt, args, device, args.fp8_llm, accelerator
         )
 
+        # encode latents for video2video inference
+        video_latents = None
+        if args.video_path is not None:
+            # v2v inference
+            logger.info(f"Video2Video inference: {args.video_path}")
+
+            if os.path.isfile(args.video_path):
+                video = load_video(args.video_path, 0, video_length, bucket_reso=(width, height))  # list of frames
+            else:
+                video = load_images(args.video_path, video_length, bucket_reso=(width, height))  # list of frames
+
+            if len(video) < video_length:
+                raise ValueError(f"Video length is less than {video_length}")
+            video = np.stack(video, axis=0)  # F, H, W, C
+            video = torch.from_numpy(video).permute(3, 0, 1, 2).unsqueeze(0).float()  # 1, C, F, H, W
+            video = video / 255.0
+
+            logger.info(f"Encoding video to latents")
+            video_latents = encode_to_latents(args, video, device)
+            video_latents = video_latents.to(device=device, dtype=dit_dtype)
+
+            clean_memory_on_device(device)
+
+        # encode latents for image2video inference
+        image_latents = None
+        if args.image_path is not None:
+            # i2v inference
+            logger.info(f"Image2Video inference: {args.image_path}")
+
+            image = Image.open(args.image_path)
+            image = resize_image_to_bucket(image, (width, height))  # returns a numpy array
+            image = torch.from_numpy(image).permute(2, 0, 1).unsqueeze(0).unsqueeze(2).float()  # 1, C, 1, H, W
+            image = image / 255.0
+
+            logger.info(f"Encoding image to latents")
+            image_latents = encode_to_latents(args, image, device)  # 1, C, 1, H, W
+            image_latents = image_latents.to(device=device, dtype=dit_dtype)
+
+            clean_memory_on_device(device)
+
         # load DiT model
         blocks_to_swap = args.blocks_to_swap if args.blocks_to_swap else 0
-        loading_device = "cpu" if blocks_to_swap > 0 else device
+        loading_device = "cpu"  # if blocks_to_swap > 0 else device
 
         logger.info(f"Loading DiT model from {args.dit}")
         if args.attn_mode == "sdpa":
             args.attn_mode = "torch"
-        transformer = load_transformer(args.dit, args.attn_mode, args.split_attn, loading_device, dit_dtype)
+
+        # if image_latents is given, the model should be I2V model, so the in_channels should be 32
+        dit_in_channels = args.dit_in_channels if args.dit_in_channels is not None else (32 if image_latents is not None else 16)
+
+        # if we use LoRA, weigths should be bf16 instead of fp8, because merging should be done in bf16
+        # the model is too large, so we load the model to cpu. in addition, the .pt file is loaded to cpu anyway
+        # on the fly merging will be a solution for this issue for .safetenors files (not implemented yet)
+        transformer = load_transformer(
+            args.dit, args.attn_mode, args.split_attn, loading_device, dit_dtype, in_channels=dit_in_channels
+        )
         transformer.eval()
 
         # load LoRA weights
@@ -484,15 +635,50 @@ def main():
 
                 logger.info(f"Loading LoRA weights from {lora_weight} with multiplier {lora_multiplier}")
                 weights_sd = load_file(lora_weight)
-                network = lora.create_network_from_weights_hunyuan_video(
-                    lora_multiplier, weights_sd, unet=transformer, for_inference=True
-                )
+                if args.lycoris:
+                    lycoris_net, _ = create_network_from_weights(
+                        multiplier=lora_multiplier,
+                        file=None,
+                        weights_sd=weights_sd,
+                        unet=transformer,
+                        text_encoder=None,
+                        vae=None,
+                        for_inference=True,
+                    )
+
+                # Filter to exclude keys that are part of single_blocks
+                if args.exclude_single_blocks:
+                    filtered_weights = {k: v for k, v in weights_sd.items() if "single_blocks" not in k}
+                    weights_sd = filtered_weights
+
+                else:
+                    network = lora.create_network_from_weights_hunyuan_video(
+                        lora_multiplier, weights_sd, unet=transformer, for_inference=True
+                    )
                 logger.info("Merging LoRA weights to DiT model")
-                network.merge_to(None, transformer, weights_sd, device=device, non_blocking=True)
+
+                # try:
+                #     network.apply_to(None, transformer, apply_text_encoder=False, apply_unet=True)
+                #     info = network.load_state_dict(weights_sd, strict=True)
+                #     logger.info(f"Loaded LoRA weights from {weights_file}: {info}")
+                #     network.eval()
+                #     network.to(device)
+                # except Exception as e:
+                if args.lycoris:
+                    lycoris_net.merge_to(None, transformer, weights_sd, dtype=None, device=device)
+                else:
+                    network.merge_to(None, transformer, weights_sd, device=device, non_blocking=True)
 
                 synchronize_device(device)
 
                 logger.info("LoRA weights loaded")
+
+            # save model here before casting to dit_weight_dtype
+            if args.save_merged_model:
+                logger.info(f"Saving merged model to {args.save_merged_model}")
+                mem_eff_save_file(transformer.state_dict(), args.save_merged_model)  # save_file needs a lot of memory
+                logger.info("Merged model saved")
+                return
 
         if blocks_to_swap > 0:
             logger.info(f"Casting model to {dit_weight_dtype}")
@@ -518,7 +704,7 @@ def main():
         timesteps = scheduler.timesteps
 
         # Prepare generator
-        num_videos_per_prompt = 1  # args.num_videos
+        num_videos_per_prompt = 1  # args.num_videos # currently only support 1 video per prompt, this is a batch size
         seed = args.seed
         if seed is None:
             seeds = [random.randint(0, 2**32 - 1) for _ in range(num_videos_per_prompt)]
@@ -528,7 +714,7 @@ def main():
             raise ValueError(f"Seed must be an integer or None, got {seed}.")
         generator = [torch.Generator(device).manual_seed(seed) for seed in seeds]
 
-        # Prepare latents
+        # Prepare noisy latents
         num_channels_latents = 16  # transformer.config.in_channels
         vae_scale_factor = 2 ** (4 - 1)  # len(self.vae.config.block_out_channels) == 4
 
@@ -549,12 +735,32 @@ def main():
         # )
         # latents = randn_tensor(shape, generator=generator, device=device, dtype=dit_dtype)
 
-        # make first N frames to be the same
-        shape_or_frame = (num_videos_per_prompt, num_channels_latents, 1, height // vae_scale_factor, width // vae_scale_factor)
+        # make first N frames to be the same if the given seed is same
+        shape_of_frame = (num_videos_per_prompt, num_channels_latents, 1, height // vae_scale_factor, width // vae_scale_factor)
         latents = []
         for i in range(latent_video_length):
-            latents.append(randn_tensor(shape_or_frame, generator=generator, device=device, dtype=dit_dtype))
+            latents.append(randn_tensor(shape_of_frame, generator=generator, device=device, dtype=dit_dtype))
         latents = torch.cat(latents, dim=2)
+
+        # pad image_latents to match the length of video_latents
+        if image_latents is not None:
+            zero_latents = torch.zeros_like(latents)
+            zero_latents[:, :, :1, :, :] = image_latents
+            image_latents = zero_latents
+
+        if args.video_path is not None:
+            # v2v inference
+            noise = latents
+            assert noise.shape == video_latents.shape, f"noise shape {noise.shape} != video_latents shape {video_latents.shape}"
+
+            num_inference_steps = int(num_inference_steps * args.strength)
+            timestep_start = scheduler.timesteps[-num_inference_steps]  # larger strength, less inference steps and more start time
+            t = timestep_start / 1000.0
+            latents = noise * t + video_latents * (1 - t)
+
+            timesteps = timesteps[-num_inference_steps:]
+
+            logger.info(f"strength: {args.strength}, num_inference_steps: {num_inference_steps}, timestep_start: {timestep_start}")
 
         # FlowMatchDiscreteScheduler does not have init_noise_sigma
 
@@ -563,9 +769,11 @@ def main():
         if embedded_guidance_scale is not None:
             guidance_expand = torch.tensor([embedded_guidance_scale * 1000.0] * latents.shape[0], dtype=torch.float32, device="cpu")
             guidance_expand = guidance_expand.to(device=device, dtype=dit_dtype)
+            if do_classifier_free_guidance:
+                guidance_expand = torch.cat([guidance_expand, guidance_expand], dim=0)
         else:
             guidance_expand = None
-        freqs_cos, freqs_sin = get_rotary_pos_embed(vae.VAE_VER, transformer, video_length, height, width)
+        freqs_cos, freqs_sin = get_rotary_pos_embed(vae_ver, transformer, video_length, height, width)
         # n_tokens = freqs_cos.shape[0]
 
         # move and cast all inputs to the correct device and dtype
@@ -573,10 +781,17 @@ def main():
         prompt_mask = prompt_mask.to(device=device)
         prompt_embeds_2 = prompt_embeds_2.to(device=device, dtype=dit_dtype)
         prompt_mask_2 = prompt_mask_2.to(device=device)
+
         freqs_cos = freqs_cos.to(device=device, dtype=dit_dtype)
         freqs_sin = freqs_sin.to(device=device, dtype=dit_dtype)
 
-        num_warmup_steps = len(timesteps) - num_inference_steps * scheduler.order
+        num_warmup_steps = len(timesteps) - num_inference_steps * scheduler.order  # this should be 0 in v2v inference
+
+        # assert split_uncond and split_attn
+        if args.split_attn and do_classifier_free_guidance and not args.split_uncond:
+            logger.warning("split_attn is enabled, split_uncond will be enabled as well.")
+            args.split_uncond = True
+
         # with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]) as p:
         with tqdm(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
@@ -584,17 +799,44 @@ def main():
 
                 # predict the noise residual
                 with torch.no_grad(), accelerator.autocast():
-                    noise_pred = transformer(  # For an input image (129, 192, 336) (1, 256, 256)
-                        latents,  # [1, 16, 33, 24, 42]
-                        t.repeat(latents.shape[0]).to(device=device, dtype=dit_dtype),  # [1]
-                        text_states=prompt_embeds,  # [1, 256, 4096]
-                        text_mask=prompt_mask,  # [1, 256]
-                        text_states_2=prompt_embeds_2,  # [1, 768]
-                        freqs_cos=freqs_cos,  # [seqlen, head_dim]
-                        freqs_sin=freqs_sin,  # [seqlen, head_dim]
-                        guidance=guidance_expand,
-                        return_dict=True,
-                    )["x"]
+                    latents_input = latents if not do_classifier_free_guidance else torch.cat([latents, latents], dim=0)
+                    if image_latents is not None:
+                        latents_image_input = (
+                            image_latents if not do_classifier_free_guidance else torch.cat([image_latents, image_latents], dim=0)
+                        )
+                        latents_input = torch.cat([latents_input, latents_image_input], dim=1)  # 1 or 2, C*2, F, H, W
+
+                    batch_size = 1 if args.split_uncond else latents_input.shape[0]
+
+                    noise_pred_list = []
+                    for j in range(0, latents_input.shape[0], batch_size):
+                        noise_pred = transformer(  # For an input image (129, 192, 336) (1, 256, 256)
+                            latents_input[j : j + batch_size],  # [1, 16, 33, 24, 42]
+                            t.repeat(batch_size).to(device=device, dtype=dit_dtype),  # [1]
+                            text_states=prompt_embeds[j : j + batch_size],  # [1, 256, 4096]
+                            text_mask=prompt_mask[j : j + batch_size],  # [1, 256]
+                            text_states_2=prompt_embeds_2[j : j + batch_size],  # [1, 768]
+                            freqs_cos=freqs_cos,  # [seqlen, head_dim]
+                            freqs_sin=freqs_sin,  # [seqlen, head_dim]
+                            guidance=guidance_expand[j : j + batch_size],  # [1]
+                            return_dict=True,
+                        )["x"]
+                        noise_pred_list.append(noise_pred)
+                    noise_pred = torch.cat(noise_pred_list, dim=0)
+
+                # perform classifier free guidance
+                if do_classifier_free_guidance:
+                    noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
+                    noise_pred = noise_pred_uncond + args.guidance_scale * (noise_pred_cond - noise_pred_uncond)
+
+                    # # SkyReels' rescale noise config is omitted for now
+                    # if guidance_rescale > 0.0:
+                    #     # Based on 3.4. in https://arxiv.org/pdf/2305.08891.pdf
+                    #     noise_pred = rescale_noise_cfg(
+                    #         noise_pred,
+                    #         noise_pred_cond,
+                    #         guidance_rescale=self.guidance_rescale,
+                    #     )
 
                 # compute the previous noisy sample x_t -> x_t-1
                 latents = scheduler.step(noise_pred, t, latents, return_dict=False)[0]
@@ -627,12 +869,16 @@ def main():
             else:
                 metadata = {
                     "seeds": f"{seeds[i]}",
-                    "prompt": prompt,
+                    "prompt": f"{args.prompt}",
                     "height": f"{height}",
                     "width": f"{width}",
                     "video_length": f"{video_length}",
                     "infer_steps": f"{num_inference_steps}",
+                    "guidance_scale": f"{args.guidance_scale}",
+                    "embedded_cfg_scale": f"{args.embedded_cfg_scale}",
                 }
+                if args.negative_prompt is not None:
+                    metadata["negative_prompt"] = f"{args.negative_prompt}"
             sd = {"latent": latent}
             save_file(sd, latent_path, metadata=metadata)
 
@@ -644,7 +890,7 @@ def main():
             original_name = "" if original_base_names is None else f"_{original_base_names[i]}"
             sample = sample.unsqueeze(0)
             video_path = f"{save_path}/{time_flag}_{i}_{seeds[i]}{original_name}.mp4"
-            save_videos_grid(sample, video_path, fps=24)
+            save_videos_grid(sample, video_path, fps=args.fps)
             logger.info(f"Sample save to: {video_path}")
     elif output_type == "images":
         # save images

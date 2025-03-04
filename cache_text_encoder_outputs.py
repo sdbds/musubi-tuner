@@ -75,12 +75,30 @@ def main(args):
     # define encode function
     num_workers = args.num_workers if args.num_workers is not None else max(1, os.cpu_count() - 1)
 
+    all_cache_files_for_dataset = []  # exisiting cache files
+    all_cache_paths_for_dataset = []  # all cache paths in the dataset
+    for dataset in datasets:
+        all_cache_files = [os.path.normpath(file) for file in dataset.get_all_text_encoder_output_cache_files()]
+        all_cache_files = set(all_cache_files)
+        all_cache_files_for_dataset.append(all_cache_files)
+
+        all_cache_paths_for_dataset.append(set())
+
     def encode_for_text_encoder(text_encoder: TextEncoder, is_llm: bool):
         for i, dataset in enumerate(datasets):
-            print(f"Encoding dataset [{i}]")
+            logger.info(f"Encoding dataset [{i}]")
+            all_cache_files = all_cache_files_for_dataset[i]
+            all_cache_paths = all_cache_paths_for_dataset[i]
             for batch in tqdm(dataset.retrieve_text_encoder_output_cache_batches(num_workers)):
+                # update cache files (it's ok if we update it multiple times)
+                all_cache_paths.update([os.path.normpath(item.text_encoder_output_cache_path) for item in batch])
+
+                # skip existing cache files
                 if args.skip_existing:
-                    filtered_batch = [item for item in batch if not os.path.exists(item.text_encoder_output_cache_path)]
+                    filtered_batch = [
+                        item for item in batch if not os.path.normpath(item.text_encoder_output_cache_path) in all_cache_files
+                    ]
+                    # print(f"Filtered {len(batch) - len(filtered_batch)} existing cache files")
                     if len(filtered_batch) == 0:
                         continue
                     batch = filtered_batch
@@ -110,6 +128,18 @@ def main(args):
     encode_for_text_encoder(text_encoder_2, is_llm=False)
     del text_encoder_2
 
+    # remove cache files not in dataset
+    for i, dataset in enumerate(datasets):
+        all_cache_files = all_cache_files_for_dataset[i]
+        all_cache_paths = all_cache_paths_for_dataset[i]
+        for cache_file in all_cache_files:
+            if cache_file not in all_cache_paths:
+                if args.keep_cache:
+                    logger.info(f"Keep cache file not in the dataset: {cache_file}")
+                else:
+                    os.remove(cache_file)
+                    logger.info(f"Removed old cache file: {cache_file}")
+
 
 def setup_parser():
     parser = argparse.ArgumentParser()
@@ -125,6 +155,7 @@ def setup_parser():
     )
     parser.add_argument("--num_workers", type=int, default=None, help="number of workers for dataset. default is cpu count-1")
     parser.add_argument("--skip_existing", action="store_true", help="skip existing cache files")
+    parser.add_argument("--keep_cache", action="store_true", help="keep cache files not in dataset")
     return parser
 
 

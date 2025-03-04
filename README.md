@@ -2,52 +2,101 @@
 
 [English](./README.md) | [日本語](./README.ja.md)
 
-This repository provides scripts for training LoRA (Low-Rank Adaptation) models with HunyuanVideo.
+## Table of Contents
 
-__This repository is under development.__
+- [Musubi Tuner](#musubi-tuner)
+  - [Table of Contents](#table-of-contents)
+  - [Introduction](#introduction)
+    - [Recent Updates](#recent-updates)
+    - [Releases](#releases)
+  - [Overview](#overview)
+    - [Hardware Requirements](#hardware-requirements)
+    - [Features](#features)
+  - [Installation](#installation)
+    - [pip based installation](#pip-based-installation)
+    - [uv based installation](#uv-based-installation)
+    - [Linux/MacOS](#linuxmacos)
+    - [Windows](#windows)
+  - [Model Download](#model-download)
+    - [Use the Official HunyuanVideo Model](#use-the-official-hunyuanvideo-model)
+    - [Using ComfyUI Models for Text Encoder](#using-comfyui-models-for-text-encoder)
+  - [Usage](#usage)
+    - [Dataset Configuration](#dataset-configuration)
+    - [Latent Pre-caching](#latent-pre-caching)
+    - [Text Encoder Output Pre-caching](#text-encoder-output-pre-caching)
+    - [Training](#training)
+    - [Merging LoRA Weights](#merging-lora-weights)
+    - [Inference](#inference)
+    - [Inference with SkyReels V1](#inference-with-skyreels-v1)
+    - [Convert LoRA to another format](#convert-lora-to-another-format)
+  - [Miscellaneous](#miscellaneous)
+    - [SageAttention Installation](#sageattention-installation)
+    - [PyTorch version](#pytorch-version)
+  - [Disclaimer](#disclaimer)
+  - [Contributing](#contributing)
+  - [License](#license)
+
+## Introduction
+
+This repository provides scripts for training LoRA (Low-Rank Adaptation) models with HunyuanVideo. This repository is unofficial and not affiliated with the official HunyanVideo repository.
+
+*This repository is under development.*
 
 ### Recent Updates
 
-- 10, Jan, 2025
-    - Fixed a bug where `--split_attn` was applied even when not specified.
-    - xformers is now available for training and inference. `--split_attn` is required when using xformers.
-    - Fixed a bug in `flash` mode and confirmed operation. `--split_attn` can now be specified during inference for `flash` mode.
-    - A simple speed comparison during training showed that for training with 1280x720 resolution images, batch size=3, RTX 4090, and Windows 10, the order of speed was `flash` > `flash` + `--split_attn` == `xformers` + `--split_attn` > `sdpa` > `sdpa` + `--split_attn` (`flash` was the fastest).
-        - `sdpa` was about 12% slower than `flash`, and `xformers` + `--split_attn` was about 4% slower than `flash`.
-    - During inference, `flash` >= `sageattn` > `xformers` > `sdpa` (all with `--split_attn`). However, the speed difference between `sdpa` and `flash` is about 10%. Memory usage was almost the same.
+- Mar 4, 2025
+    - Added support for Wan 2.1 inference. Please use `wan_generate_video.py`. For details, please refer to [here](./docs/wan.md).
+        - `requirements.txt` has been updated. Please run `pip install -r requirements.txt` again.
 
-- 08, Jan, 2025
-    - __Important Update__: Fixed a bug where latents were scaled twice during caching and training. Please re-run `cache_latents.py` (without specifying `--skip_existing`) to re-cache latents.
+- Feb 26, 2025
+    - Support I2V model training with SkyReels V1. This feature is highly experimental.
+        - Add following options for I2V training in `hv_train_network.py`. `--guidance_scale` should be set to 1.0 for I2V training. 
+        ```bash
+        --dit_in_channels 32  --guidance_scale 1.0
+        ```
+        - The first frame of the traiing video is used as the input to the I2V model. 
+        - The prompt file has the following additional options.
+            - `--n negative prompt...`: the negative prompt for the classifier free guidance.
+            - `--l 6.0`: the classifier free guidance scale. Should be set to 6.0 for SkyReels V1 models.
+            - `--i path/to/image.png`: the image path for image2video inference.
+            - `--g 1.0`: (this option already exists) the embedded guidance scale. Should be set to 1.0 for SkyReels V1 models.
+          - `--n`, `--l` and `--g` can be used SkyReels V1 T2V model as well.
 
-- 06, Jan, 2025
-    - Added `--split_attn` option to `hv_train_network.py` and `hv_generate_video.py` to process attention in chunks. Inference with SageAttention is expected to be about 10% faster. There is almost no impact during training. If `--split_attn` is not specified, it will be processed in the conventional way. Cannot be specified when `attn_mode` is `flash`.
+- Feb 24, 2025
+    - Added `--exclude_single_blocks` option to `hv_generate_video.py`. When specified, single block LoRA will not be applied. Thanks to maybleMyers for PR [#69](https://github.com/kohya-ss/musubi-tuner/pull/69)
 
-- 05, Jan, 2025
-    - Added `images` to the save format in `hv_generate_video.py`. You can generate images from latents saved with `--latent_path`. You can also specify multiple latents with `--latent_path` for batch processing (increases VRAM usage).
+- Feb 22, 2025
+    - Added support for inference with SkyReels V1 T2V and I2V models. For details, please refer to [Inference with SkyReels V1](#inference-with-skyreels-v1). Thank you to sdbds for the contribution.
 
-- 04, Jan, 2025
-    - Added support for loading Text Encoder weights from .safetensors files. See [Model Download](#model-download) for instructions.
-    - Changed the format of latents saved by `hv_generate_video.py` to .safetensors. Metadata such as prompts will be saved in the .safetensors file. Use `--no_metadata` to disable saving metadata.
+### Releases
 
-- 03, Jan, 2025: The noise initialization method during inference has changed. When the same seed is specified, the common frames will be the same even if the number of generated frames is different. Please note that the inference results will be different from before even with the same seed.
+We are grateful to everyone who has been contributing to the Musubi Tuner ecosystem through documentation and third-party tools. To support these valuable contributions, we recommend working with our [releases](https://github.com/kohya-ss/musubi-tuner/releases) as stable reference points, as this project is under active development and breaking changes may occur.
 
-(For example, when 25 frames are specified, the time length of the latent is 7, and when 45 frames are specified, the time length of the latent is 12, but the first 7 frames of both will have the same noise value when the same seed is specified.)
+You can find the latest release and version history in our [releases page](https://github.com/kohya-ss/musubi-tuner/releases).
+
+## Overview
 
 ### Hardware Requirements
 
-- VRAM: 12GB or more recommended for image training, 24GB or more recommended for video training
-    - Depends on resolution, etc. For 12GB, use a resolution of 960x544 or lower and use memory-saving options such as `--blocks_to_swap`, `--fp8_llm`, etc.
+- VRAM: 12GB or more recommended for image training, 24GB or more for video training
+    - *Actual requirements depend on resolution and training settings.* For 12GB, use a resolution of 960x544 or lower and use memory-saving options such as `--blocks_to_swap`, `--fp8_llm`, etc.
 - Main Memory: 64GB or more recommended, 32GB + swap may work
 
 ### Features
 
 - Memory-efficient implementation
-- Windows compatible (Linux compatibility not yet verified)
+- Windows compatibility confirmed (Linux compatibility confirmed by community)
 - Multi-GPU support not implemented
 
 ## Installation
 
-Create a virtual environment and install PyTorch and torchvision matching your CUDA version. Verified to work with version 2.5.1.
+### pip based installation
+
+Python 3.10 or later is required (verified with 3.10).
+
+Create a virtual environment and install PyTorch and torchvision matching your CUDA version. 
+
+PyTorch 2.5.1 or later is required (see [note](#PyTorch-version)).
 
 ```bash
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
@@ -61,11 +110,36 @@ pip install -r requirements.txt
 
 Optionally, you can use FlashAttention and SageAttention (for inference only; see [SageAttention Installation](#sageattention-installation) for installation instructions).
 
-Additionally, install `ascii-magic` (used for dataset verification), `matplotlib` (used for timestep visualization), and `tensorboard` (used for logging training progress) as needed:
+Optional dependencies for additional features:
+- `ascii-magic`: Used for dataset verification
+- `matplotlib`: Used for timestep visualization
+- `tensorboard`: Used for logging training progress
 
 ```bash
 pip install ascii-magic matplotlib tensorboard
 ```
+
+### uv based installation (experimenal)
+
+You can also install using uv, but installation with uv is experimental. Feedback is welcome.
+
+1. Install uv (if not already present on your OS).
+
+#### Linux/MacOS
+
+```sh
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+Follow the instructions to add the uv path manually until you restart your session...
+
+#### Windows
+
+```powershell
+powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+Follow the instructions to add the uv path manually until you reboot your system... or just reboot your system at this point.
 
 ## Model Download
 
@@ -95,6 +169,8 @@ From https://huggingface.co/tencent/HunyuanVideo/tree/main/hunyuan-video-t2v-720
 
 (Note: The fp8 model on the same page is unverified.)
 
+If you are training with `--fp8_base`, you can use `mp_rank_00_model_states_fp8.safetensors` from [here](https://huggingface.co/kohya-ss/HunyuanVideo-fp8_e4m3fn-unofficial) instead of `mp_rank_00_model_states.pt`. (This file is unofficial and simply converts the weights to float8_e4m3fn.)
+
 From https://huggingface.co/tencent/HunyuanVideo/tree/main/hunyuan-video-t2v-720p/vae, download [pytorch_model.pt](https://huggingface.co/tencent/HunyuanVideo/resolve/main/hunyuan-video-t2v-720p/vae/pytorch_model.pt) and place it in your chosen directory.
 
 For the Text Encoder, use the models provided by ComfyUI. Refer to [ComfyUI's page](https://comfyanonymous.github.io/ComfyUI_examples/hunyuan_video/), from https://huggingface.co/Comfy-Org/HunyuanVideo_repackaged/tree/main/split_files/text_encoders, download `llava_llama3_fp16.safetensors` (Text Encoder 1, LLM) and `clip_l.safetensors` (Text Encoder 2, CLIP)  and place them in your chosen directory.
@@ -111,8 +187,16 @@ Please refer to [dataset configuration guide](./dataset/dataset_config.md).
 
 Latent pre-caching is required. Create the cache using the following command:
 
+If you have installed using pip:
+
 ```bash
 python cache_latents.py --dataset_config path/to/toml --vae path/to/ckpts/hunyuan-video-t2v-720p/vae/pytorch_model.pt --vae_chunk_size 32 --vae_tiling
+```
+
+If you have installed with `uv`, you can use `uv run` to run the script. Other scripts can be run in the same way. (Note that the installation with `uv` is experimental. Feedback is welcome. If you encounter any issues, please use the pip-based installation.)
+
+```bash
+uv run cache_latents.py --dataset_config path/to/toml --vae path/to/ckpts/hunyuan-video-t2v-720p/vae/pytorch_model.pt --vae_chunk_size 32 --vae_tiling
 ```
 
 For additional options, use `python cache_latents.py --help`.
@@ -120,6 +204,8 @@ For additional options, use `python cache_latents.py --help`.
 If you're running low on VRAM, reduce `--vae_spatial_tile_sample_min_size` to around 128 and lower the `--batch_size`.
 
 Use `--debug_mode image` to display dataset images and captions in a new window, or `--debug_mode console` to display them in the console (requires `ascii-magic`).
+
+By default, cache files not included in the dataset are automatically deleted. You can still keep cache files as before by specifying `--keep_cache`.
 
 ### Text Encoder Output Pre-caching
 
@@ -129,11 +215,19 @@ Text Encoder output pre-caching is required. Create the cache using the followin
 python cache_text_encoder_outputs.py --dataset_config path/to/toml  --text_encoder1 path/to/ckpts/text_encoder --text_encoder2 path/to/ckpts/text_encoder_2 --batch_size 16
 ```
 
+or for uv:
+
+```bash
+uv run cache_text_encoder_outputs.py --dataset_config path/to/toml  --text_encoder1 path/to/ckpts/text_encoder --text_encoder2 path/to/ckpts/text_encoder_2 --batch_size 16
+```
+
 For additional options, use `python cache_text_encoder_outputs.py --help`.
 
 Adjust `--batch_size` according to your available VRAM.
 
 For systems with limited VRAM (less than ~16GB), use `--fp8_llm` to run the LLM in fp8 mode.
+
+By default, cache files not included in the dataset are automatically deleted. You can still keep cache files as before by specifying `--keep_cache`.
 
 ### Training
 
@@ -143,13 +237,31 @@ Start training using the following command (input as a single line):
 accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 hv_train_network.py 
     --dit path/to/ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states.pt 
     --dataset_config path/to/toml --sdpa --mixed_precision bf16 --fp8_base 
-    --optimizer_type adamw8bit --learning_rate 1e-3 --gradient_checkpointing 
-     --max_data_loader_n_workers 2 --persistent_data_loader_workers 
-    --network_module=networks.lora --network_dim=32 
-    --timestep_sampling sigmoid --discrete_flow_shift 1.0 
-    --max_train_epochs 16 --save_every_n_epochs=1 --seed 42
+    --optimizer_type adamw8bit --learning_rate 2e-4 --gradient_checkpointing 
+    --max_data_loader_n_workers 2 --persistent_data_loader_workers 
+    --network_module networks.lora --network_dim 32 
+    --timestep_sampling shift --discrete_flow_shift 7.0 
+    --max_train_epochs 16 --save_every_n_epochs 1 --seed 42
     --output_dir path/to/output_dir --output_name name-of-lora
 ```
+
+or for uv:
+
+```bash
+uv run accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 hv_train_network.py 
+    --dit path/to/ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states.pt 
+    --dataset_config path/to/toml --sdpa --mixed_precision bf16 --fp8_base 
+    --optimizer_type adamw8bit --learning_rate 2e-4 --gradient_checkpointing 
+    --max_data_loader_n_workers 2 --persistent_data_loader_workers 
+    --network_module networks.lora --network_dim 32 
+    --timestep_sampling shift --discrete_flow_shift 7.0 
+    --max_train_epochs 16 --save_every_n_epochs 1 --seed 42
+    --output_dir path/to/output_dir --output_name name-of-lora
+```
+
+__Update__: Changed the sample training settings to a learning rate of 2e-4, `--timestep_sampling` to `shift`, and `--discrete_flow_shift` to 7.0. Faster training is expected. If the details of the image are not learned well, try lowering the discete flow shift to around 3.0.
+
+However, the training settings are still experimental. Appropriate learning rates, training steps, timestep distribution, loss weighting, etc. are not yet known. Feedback is welcome.
 
 For additional options, use `python hv_train_network.py --help` (note that many options are unverified).
 
@@ -163,13 +275,39 @@ Use `--sdpa` for PyTorch's scaled dot product attention. Use `--flash_attn` for 
 
 `--split_attn` processes attention in chunks. Speed may be slightly reduced, but VRAM usage is slightly reduced.
 
-Sample video generation is not yet implemented.
-
 The format of LoRA trained is the same as `sd-scripts`.
 
 `--show_timesteps` can be set to `image` (requires `matplotlib`) or `console` to display timestep distribution and loss weighting during training.
 
-Appropriate learning rates, training steps, timestep distribution, loss weighting, etc. are not yet known. Feedback is welcome.
+You can record logs during training. Refer to [Save and view logs in TensorBoard format](./docs/advanced_config.md#save-and-view-logs-in-tensorboard-format--tensorboard形式のログの保存と参照).
+
+For sample image generation during training, refer to [this document](./docs/sampling_during_training.md). For advanced configuration, refer to [this document](./docs/advanced_config.md).
+
+### Merging LoRA Weights
+
+```bash
+python merge_lora.py \
+    --dit path/to/ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states.pt \
+    --lora_weight path/to/lora.safetensors \
+    --save_merged_model path/to/merged_model.safetensors \
+    --device cpu \
+    --lora_multiplier 1.0
+```
+
+or for uv:
+
+```bash
+uv run merge_lora.py \
+    --dit path/to/ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states.pt \
+    --lora_weight path/to/lora.safetensors \
+    --save_merged_model path/to/merged_model.safetensors \
+    --device cpu \
+    --lora_multiplier 1.0
+```
+
+Specify the device to perform the calculation (`cpu` or `cuda`, etc.) with `--device`. Calculation will be faster if `cuda` is specified.
+
+Specify the LoRA weights to merge with `--lora_weight` and the multiplier for the LoRA weights with `--lora_multiplier`. Multiple values can be specified, and the number of values must match.
 
 ### Inference
 
@@ -177,6 +315,19 @@ Generate videos using the following command:
 
 ```bash
 python hv_generate_video.py --fp8 --video_size 544 960 --video_length 5 --infer_steps 30 
+    --prompt "A cat walks on the grass, realistic style."  --save_path path/to/save/dir --output_type both 
+    --dit path/to/ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states.pt --attn_mode sdpa --split_attn
+    --vae path/to/ckpts/hunyuan-video-t2v-720p/vae/pytorch_model.pt 
+    --vae_chunk_size 32 --vae_spatial_tile_sample_min_size 128 
+    --text_encoder1 path/to/ckpts/text_encoder 
+    --text_encoder2 path/to/ckpts/text_encoder_2 
+    --seed 1234 --lora_multiplier 1.0 --lora_weight path/to/lora.safetensors
+```
+
+or for uv:
+
+```bash
+uv run hv_generate_video.py --fp8 --video_size 544 960 --video_length 5 --infer_steps 30 
     --prompt "A cat walks on the grass, realistic style."  --save_path path/to/save/dir --output_type both 
     --dit path/to/ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states.pt --attn_mode sdpa --split_attn
     --vae path/to/ckpts/hunyuan-video-t2v-720p/vae/pytorch_model.pt 
@@ -202,12 +353,52 @@ For `--output_type`, specify either `both`, `latent`, `video` or `images`. `both
 
 `--video_length` should be specified as "a multiple of 4 plus 1".
 
+`--flow_shift` can be specified to shift the timestep (discrete flow shift). The default value when omitted is 7.0, which is the recommended value for 50 inference steps. In the HunyuanVideo paper, 7.0 is recommended for 50 steps, and 17.0 is recommended for less than 20 steps (e.g. 10).
+
+By specifying `--video_path`, video2video inference is possible. Specify a video file or a directory containing multiple image files (the image files are sorted by file name and used as frames). An error will occur if the video is shorter than `--video_length`. You can specify the strength with `--strength`. It can be specified from 0 to 1.0, and the larger the value, the greater the change from the original video.
+
+Note that video2video inference is experimental.
+
+You can save the DiT model after LoRA merge with the `--save_merged_model` option. Specify `--save_merged_model path/to/merged_model.safetensors`. Note that inference will not be performed when this option is specified.
+
+### Inference with SkyReels V1
+
+SkyReels V1 T2V and I2V models are supported (inference only). 
+
+The model can be downloaded from [here](https://huggingface.co/Kijai/SkyReels-V1-Hunyuan_comfy). Many thanks to Kijai for providing the model. `skyreels_hunyuan_i2v_bf16.safetensors` is the I2V model, and `skyreels_hunyuan_t2v_bf16.safetensors` is the T2V model. The models other than bf16 are not tested (`fp8_e4m3fn` may work).
+
+For T2V inference, add the following options to the inference command:
+
+```bash
+--guidance_scale 6.0 --embedded_cfg_scale 1.0 --negative_prompt "Aerial view, aerial view, overexposed, low quality, deformation, a poor composition, bad hands, bad teeth, bad eyes, bad limbs, distortion" --split_uncond
+```
+
+SkyReels V1 seems to require a classfier free guidance (negative prompt).`--guidance_scale` is a guidance scale for the negative prompt. The recommended value is 6.0 from the official repository. The default is 1.0, it means no classifier free guidance.
+
+`--embedded_cfg_scale` is a scale of the embedded guidance. The recommended value is 1.0 from the official repository (it may mean no embedded guidance).
+
+`--negative_prompt` is a negative prompt for the classifier free guidance. The above sample is from the official repository. If you don't specify this, and specify `--guidance_scale` other than 1.0, an empty string will be used as the negative prompt.
+
+`--split_uncond` is a flag to split the model call into unconditional and conditional parts. This reduces VRAM usage but may slow down inference. If `--split_attn` is specified, `--split_uncond` is automatically set.
+
+You can also perform image2video inference with SkyReels V1 I2V model. Specify the image file path with `--image_path`. The image will be resized to the given `--video_size`.
+
+```bash
+--image_path path/to/image.jpg
+``` 
+
 ### Convert LoRA to another format
 
 You can convert LoRA to a format compatible with ComfyUI (presumed to be Diffusion-pipe) using the following command:
 
 ```bash
 python convert_lora.py --input path/to/musubi_lora.safetensors --output path/to/another_format.safetensors --target other
+```
+
+or for uv:
+
+```bash
+uv run convert_lora.py --input path/to/musubi_lora.safetensors --output path/to/another_format.safetensors --target other
 ```
 
 Specify the input and output file paths with `--input` and `--output`, respectively.
@@ -244,6 +435,11 @@ For reference, the build and installation instructions are as follows. You may n
 
 This completes the SageAttention installation.
 
+### PyTorch version
+
+If you specify `torch` for `--attn_mode`, use PyTorch 2.5.1 or later (earlier versions may result in black videos).
+
+If you use an earlier version, use xformers or SageAttention.
 
 ## Disclaimer
 
@@ -277,5 +473,7 @@ We welcome contributions! However, please note:
 ## License
 
 Code under the `hunyuan_model` directory is modified from [HunyuanVideo](https://github.com/Tencent/HunyuanVideo) and follows their license.
+
+Code under the `wan` directory is modified from [Wan2.1](https://github.com/Wan-Video/Wan2.1). The license is under the Apache License 2.0.
 
 Other code is under the Apache License 2.0. Some code is copied and modified from Diffusers.

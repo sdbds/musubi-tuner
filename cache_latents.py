@@ -1,5 +1,6 @@
 import argparse
 import os
+import glob
 from typing import Optional, Union
 
 import numpy as np
@@ -180,7 +181,7 @@ def main(args):
     vae_dtype = torch.float16 if args.vae_dtype is None else str_to_dtype(args.vae_dtype)
     vae, _, s_ratio, t_ratio = load_vae(vae_dtype=vae_dtype, device=device, vae_path=args.vae)
     vae.eval()
-    print(f"Loaded VAE: {vae.config}, dtype: {vae.dtype}")
+    logger.info(f"Loaded VAE: {vae.config}, dtype: {vae.dtype}")
 
     if args.vae_chunk_size is not None:
         vae.set_chunk_size_for_causal_conv_3d(args.vae_chunk_size)
@@ -195,8 +196,11 @@ def main(args):
     # Encode images
     num_workers = args.num_workers if args.num_workers is not None else max(1, os.cpu_count() - 1)
     for i, dataset in enumerate(datasets):
-        print(f"Encoding dataset [{i}]")
+        logger.info(f"Encoding dataset [{i}]")
+        all_latent_cache_paths = []
         for _, batch in tqdm(dataset.retrieve_latent_cache_batches(num_workers)):
+            all_latent_cache_paths.extend([item.latent_cache_path for item in batch])
+
             if args.skip_existing:
                 filtered_batch = [item for item in batch if not os.path.exists(item.latent_cache_path)]
                 if len(filtered_batch) == 0:
@@ -206,6 +210,20 @@ def main(args):
             bs = args.batch_size if args.batch_size is not None else len(batch)
             for i in range(0, len(batch), bs):
                 encode_and_save_batch(vae, batch[i : i + bs])
+
+        # normalize paths
+        all_latent_cache_paths = [os.path.normpath(p) for p in all_latent_cache_paths]
+        all_latent_cache_paths = set(all_latent_cache_paths)
+
+        # remove old cache files not in the dataset
+        all_cache_files = dataset.get_all_latent_cache_files()
+        for cache_file in all_cache_files:
+            if os.path.normpath(cache_file) not in all_latent_cache_paths:
+                if args.keep_cache:
+                    logger.info(f"Keep cache file not in the dataset: {cache_file}")
+                else:
+                    os.remove(cache_file)
+                    logger.info(f"Removed old cache file: {cache_file}")
 
 
 def setup_parser():
@@ -229,6 +247,7 @@ def setup_parser():
     )
     parser.add_argument("--num_workers", type=int, default=None, help="number of workers for dataset. default is cpu count-1")
     parser.add_argument("--skip_existing", action="store_true", help="skip existing cache files")
+    parser.add_argument("--keep_cache", action="store_true", help="keep cache files not in dataset")
     parser.add_argument("--debug_mode", type=str, default=None, choices=["image", "console"], help="debug mode")
     parser.add_argument("--console_width", type=int, default=80, help="debug mode: console width")
     parser.add_argument(
