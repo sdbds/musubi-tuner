@@ -24,6 +24,7 @@
     - [Dataset Configuration](#dataset-configuration)
     - [Latent Pre-caching](#latent-pre-caching)
     - [Text Encoder Output Pre-caching](#text-encoder-output-pre-caching)
+    - [Configuration of Accelerate](#configuration-of-accelerate)
     - [Training](#training)
     - [Merging LoRA Weights](#merging-lora-weights)
     - [Inference](#inference)
@@ -38,35 +39,59 @@
 
 ## Introduction
 
-This repository provides scripts for training LoRA (Low-Rank Adaptation) models with HunyuanVideo. This repository is unofficial and not affiliated with the official HunyanVideo repository.
+This repository provides scripts for training LoRA (Low-Rank Adaptation) models with HunyuanVideo or Wan2.1 models. 
+
+This repository is unofficial and not affiliated with the official HunyanVideo/Wan2.1 repository.
+
+For Wan2.1, please also refer to [Wan2.1 documentation](./docs/wan.md).
 
 *This repository is under development.*
 
 ### Recent Updates
 
-- Mar 4, 2025
-    - Added support for Wan 2.1 inference. Please use `wan_generate_video.py`. For details, please refer to [here](./docs/wan.md).
-        - `requirements.txt` has been updated. Please run `pip install -r requirements.txt` again.
+- **[NEW] GitHub Discussions Enabled**: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
-- Feb 26, 2025
-    - Support I2V model training with SkyReels V1. This feature is highly experimental.
-        - Add following options for I2V training in `hv_train_network.py`. `--guidance_scale` should be set to 1.0 for I2V training. 
-        ```bash
-        --dit_in_channels 32  --guidance_scale 1.0
-        ```
-        - The first frame of the traiing video is used as the input to the I2V model. 
-        - The prompt file has the following additional options.
-            - `--n negative prompt...`: the negative prompt for the classifier free guidance.
-            - `--l 6.0`: the classifier free guidance scale. Should be set to 6.0 for SkyReels V1 models.
-            - `--i path/to/image.png`: the image path for image2video inference.
-            - `--g 1.0`: (this option already exists) the embedded guidance scale. Should be set to 1.0 for SkyReels V1 models.
-          - `--n`, `--l` and `--g` can be used SkyReels V1 T2V model as well.
+- Mar 30, 2025
+    - Added experimental support for training Wan2.1-Fun's Control model (untested). See [here](./docs/wan.md#training--学習) for details.
+    - Added experimental support for inference with Wan2.1-Fun's Control model. Tested only with 14B I2V Control. See [here](./docs/wan.md#inference--推論) for details.
 
-- Feb 24, 2025
-    - Added `--exclude_single_blocks` option to `hv_generate_video.py`. When specified, single block LoRA will not be applied. Thanks to maybleMyers for PR [#69](https://github.com/kohya-ss/musubi-tuner/pull/69)
+- Mar 27, 2025
+    - Added `--cpu_noise` option to generate initial noise on CPU during Wan2.1 inference. This may result in the same output as ComfyUI with the same seed (depending on other settings).
 
-- Feb 22, 2025
-    - Added support for inference with SkyReels V1 T2V and I2V models. For details, please refer to [Inference with SkyReels V1](#inference-with-skyreels-v1). Thank you to sdbds for the contribution.
+- Mar 23, 2025
+    - Added an option to save the actual image and video data used in training as files during latent caching with `--debug_mode video`. PR [#187](https://github.com/kohya-ss/musubi-tuner/pull/187). See [here](#latent-pre-caching) for details. Available for both HunyuanVideo and Wan2.1.
+    - Added an option to use Skip Layer Guidance during Wan2.1 inference. PR [#186](https://github.com/kohya-ss/musubi-tuner/pull/186). See [here](./docs/wan.md#skip-layer-guidance) for details.
+    - Added the ability to specify the target modules for LoRA application during Wan2.1 inference using regular expressions. PR [#185](https://github.com/kohya-ss/musubi-tuner/pull/185). 
+        - See [here](./docs/wan.md#t2v-inference--t2v推論) for details.
+
+- Mar 22, 2025
+    - Added `full` to the frame extraction method for video datasets. This uses the entire video from start to finish. See [here](./dataset/dataset_config.md#frame_extraction-options) for details.
+        - `full` is recommended when each video represents a single complete motion. The frame extraction methods other than `full` are recommended when the video contains repeated actions. 
+    - If a value other than "4\*N+1" is specified for `target_frames` in the video dataset, it will be automatically converted to "4\*N+1".
+    - Corrected some errors in the dataset configuration documentation.
+    - Added an option to speed up inference by skipping CFG (classifier free guidance) at some steps during Wan2.1 inference. PR [#180](https://github.com/kohya-ss/musubi-tuner/pull/180) 
+        - Set with `--cfg_skip_mode` and `--cfg_apply_ratio`. See [here](./docs/wan.md#cfg-skip-mode--cfgスキップモード) for details.
+
+- Mar 21, 2025
+    - Fixed a bug where the image passed to CLIP during Wan2.1 inference was incorrectly in BGR format. PR [#176](https://github.com/kohya-ss/musubi-tuner/pull/176) 
+    - Added the ability to specify the last frame image during Wan2.1 inference. PR [#177](https://github.com/kohya-ss/musubi-tuner/pull/177) This feature is experimental.
+        - This feature is based on the implementation by raindrop313 in [ComfyUI-WanVideoStartEndFrames](https://github.com/raindrop313/ComfyUI-WanVideoStartEndFrames). Many thanks to raindrop313. Note that this is not a complete reproduction of the implementation, so there may be issues.
+        - Specify the last frame image with `--end_image_path`. Also, the `--trim_tail_frames` option has been added.
+        - See [here](./docs/wan.md#i2v-inference--i2v推論) for details.
+
+- Mar 18, 2025
+    - Updated SageAttention installation instructions to the latest version (no need to edit the source code). Thanks to fai-9 for PR [#165](https://github.com/kohya-ss/musubi-tuner/pull/165).
+
+- Mar 17, 2025
+    - Fixed a bug where the LoRA weights were corrupted when using float8_e4m3fn weights in Wan2.1 training.
+
+- Mar 16, 2025
+    - Fixed a bug where the weights were cast to bf16 even when using fp16 weights in Wan2.1 training. [PR #160](https://github.com/kohya-ss/musubi-tuner/pull/160)
+        - Also fixed a bug where black images were generated during sample image generation when using fp16 weights.
+        - If you encounter issues with fp16 training, please use bf16.
+    - Refactored the inference script for Wan2.1. Added `--fp8_fast` and `--compile` options. Please refer to [here](./docs/wan.md#inference--推論) for details. PR [#153](https://github.com/kohya-ss/musubi-tuner/pull/153)
+        - A major change has been made, so please let us know if you encounter any issues.
+    - The newly added `--fp8_scaled` option seems to work well for fp8 training and inference. If you are using `--fp8_base` for training, or `--fp8` for inference, please try to add `--fp8_scaled`. Please report any issues you encounter.
 
 ### Releases
 
@@ -203,7 +228,11 @@ For additional options, use `python cache_latents.py --help`.
 
 If you're running low on VRAM, reduce `--vae_spatial_tile_sample_min_size` to around 128 and lower the `--batch_size`.
 
-Use `--debug_mode image` to display dataset images and captions in a new window, or `--debug_mode console` to display them in the console (requires `ascii-magic`).
+Use `--debug_mode image` to display dataset images and captions in a new window, or `--debug_mode console` to display them in the console (requires `ascii-magic`). 
+
+With `--debug_mode video`, images or videos will be saved in the cache directory (please delete them after checking). The bitrate of the saved video is set to 1Mbps for preview purposes. The images decoded from the original video (not degraded) are used for the cache (for training).
+
+When `--debug_mode` is specified, the actual caching process is not performed.
 
 By default, cache files not included in the dataset are automatically deleted. You can still keep cache files as before by specifying `--keep_cache`.
 
@@ -228,6 +257,24 @@ Adjust `--batch_size` according to your available VRAM.
 For systems with limited VRAM (less than ~16GB), use `--fp8_llm` to run the LLM in fp8 mode.
 
 By default, cache files not included in the dataset are automatically deleted. You can still keep cache files as before by specifying `--keep_cache`.
+
+### Configuration of Accelerate
+
+Run `accelerate config` to configure Accelerate. Choose appropriate values for each question based on your environment (either input values directly or use arrow keys and enter to select; uppercase is default, so if the default value is fine, just press enter without inputting anything). For training with a single GPU, answer the questions as follows:
+
+
+```txt
+- In which compute environment are you running?: This machine
+- Which type of machine are you using?: No distributed training
+- Do you want to run your training on CPU only (even if a GPU / Apple Silicon / Ascend NPU device is available)?[yes/NO]: NO
+- Do you wish to optimize your script with torch dynamo?[yes/NO]: NO
+- Do you want to use DeepSpeed? [yes/NO]: NO
+- What GPU(s) (by id) should be used for training on this machine as a comma-seperated list? [all]: all
+- Would you like to enable numa efficiency? (Currently only supported on NVIDIA hardware). [yes/NO]: NO
+- Do you wish to use mixed precision?: bf16
+```
+
+*Note*: In some cases, you may encounter the error `ValueError: fp16 mixed precision requires a GPU`. If this happens, answer "0" to the sixth question (`What GPU(s) (by id) should be used for training on this machine as a comma-separated list? [all]:`). This means that only the first GPU (id `0`) will be used.
 
 ### Training
 
@@ -285,6 +332,8 @@ For sample image generation during training, refer to [this document](./docs/sam
 
 ### Merging LoRA Weights
 
+Note: Wan2.1 is not supported for merging LoRA weights.
+
 ```bash
 python merge_lora.py \
     --dit path/to/ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states.pt \
@@ -341,6 +390,8 @@ For additional options, use `python hv_generate_video.py --help`.
 
 Specifying `--fp8` runs DiT in fp8 mode. fp8 can significantly reduce memory consumption but may impact output quality.
 
+`--fp8_fast` option is also available for faster inference on RTX 40x0 GPUs. This option requires `--fp8` option. 
+
 If you're running low on VRAM, use `--blocks_to_swap` to offload some blocks to CPU. Maximum value is 38.
 
 For `--attn_mode`, specify either `flash`, `torch`, `sageattn`, `xformers`, or `sdpa` (same as `torch`). These correspond to FlashAttention, scaled dot product attention, SageAttention, and xformers, respectively. Default is `torch`. SageAttention is effective for VRAM reduction.
@@ -358,6 +409,10 @@ For `--output_type`, specify either `both`, `latent`, `video` or `images`. `both
 By specifying `--video_path`, video2video inference is possible. Specify a video file or a directory containing multiple image files (the image files are sorted by file name and used as frames). An error will occur if the video is shorter than `--video_length`. You can specify the strength with `--strength`. It can be specified from 0 to 1.0, and the larger the value, the greater the change from the original video.
 
 Note that video2video inference is experimental.
+
+`--compile` option enables PyTorch's compile feature (experimental). Requires triton. On Windows, also requires Visual C++ build tools installed and PyTorch>=2.6.0 (Visual C++ build tools is also required). You can pass arguments to the compiler with `--compile_args`.
+
+The `--compile` option takes a long time to run the first time, but speeds up on subsequent runs.
 
 You can save the DiT model after LoRA merge with the `--save_merged_model` option. Specify `--save_merged_model path/to/merged_model.safetensors`. Note that inference will not be performed when this option is specified.
 
@@ -405,6 +460,8 @@ Specify the input and output file paths with `--input` and `--output`, respectiv
 
 Specify `other` for `--target`. Use `default` to convert from another format to the format of this repository.
 
+Wan2.1 is also supported. 
+
 ## Miscellaneous
 
 ### SageAttention Installation
@@ -422,13 +479,9 @@ For reference, the build and installation instructions are as follows. You may n
     git clone https://github.com/thu-ml/SageAttention.git
     ```
 
-    You can skip step 4 by using the sdbsd repository mentioned above by `git clone https://github.com/sdbds/SageAttention-for-windows.git`.
+4. Open `x64 Native Tools Command Prompt for VS 2022` from the Start menu under Visual Studio 2022.
 
-4. Open `math.cuh` in the `SageAttention/csrc` folder and change `ushort` to `unsigned short` on lines 71 and 146, then save.
-
-5. Open `x64 Native Tools Command Prompt for VS 2022` from the Start menu under Visual Studio 2022.
-
-6. Activate your venv, navigate to the SageAttention folder, and run the following command. If you get a DISTUTILS not configured error, set `set DISTUTILS_USE_SDK=1` and try again:
+5. Activate your venv, navigate to the SageAttention folder, and run the following command. If you get a DISTUTILS not configured error, set `set DISTUTILS_USE_SDK=1` and try again:
     ```shell
     python setup.py install
     ```

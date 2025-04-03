@@ -34,6 +34,7 @@ class BaseDatasetParams:
     num_repeats: int = 1
     cache_directory: Optional[str] = None
     debug_dataset: bool = False
+    architecture: str = "no_default"  # short style like "hv" or "wan"
 
 
 @dataclass
@@ -46,10 +47,12 @@ class ImageDatasetParams(BaseDatasetParams):
 class VideoDatasetParams(BaseDatasetParams):
     video_directory: Optional[str] = None
     video_jsonl_file: Optional[str] = None
+    control_directory: Optional[str] = None
     target_frames: Sequence[int] = (1,)
     frame_extraction: Optional[str] = "head"
     frame_stride: Optional[int] = 1
     frame_sample: Optional[int] = 1
+    max_frames: Optional[int] = 129
 
 
 @dataclass
@@ -102,10 +105,12 @@ class ConfigSanitizer:
     VIDEO_DATASET_DISTINCT_SCHEMA = {
         "video_directory": str,
         "video_jsonl_file": str,
+        "control_directory": str,
         "target_frames": [int],
         "frame_extraction": str,
         "frame_stride": int,
         "frame_sample": int,
+        "max_frames": int,
         "cache_directory": str,
     }
 
@@ -125,7 +130,7 @@ class ConfigSanitizer:
         )
 
         def validate_flex_dataset(dataset_config: dict):
-            if "target_frames" in dataset_config:
+            if "video_directory" in dataset_config or "video_jsonl_file" in dataset_config:
                 return Schema(self.video_dataset_schema)(dataset_config)
             else:
                 return Schema(self.image_dataset_schema)(dataset_config)
@@ -193,7 +198,7 @@ class BlueprintGenerator:
 
         dataset_blueprints = []
         for dataset_config in sanitized_user_config.get("datasets", []):
-            is_image_dataset = "target_frames" not in dataset_config
+            is_image_dataset = "image_directory" in dataset_config or "image_jsonl_file" in dataset_config
             if is_image_dataset:
                 dataset_params_klass = ImageDatasetParams
             else:
@@ -286,10 +291,12 @@ def generate_dataset_group_by_blueprint(dataset_group_blueprint: DatasetGroupBlu
                     f"""\
         video_directory: "{dataset.video_directory}"
         video_jsonl_file: "{dataset.video_jsonl_file}"
+        control_directory: "{dataset.control_directory}"
         target_frames: {dataset.target_frames}
         frame_extraction: {dataset.frame_extraction}
         frame_stride: {dataset.frame_stride}
         frame_sample: {dataset.frame_sample}
+        max_frames: {dataset.max_frames}
     \n"""
                 ),
                 "    ",

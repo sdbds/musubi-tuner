@@ -7,6 +7,8 @@ from typing import List, Optional, Tuple, Union
 import safetensors
 import logging
 
+from dataset.image_video_dataset import ARCHITECTURE_HUNYUAN_VIDEO, ARCHITECTURE_WAN
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
@@ -54,6 +56,9 @@ MODELSPEC_TITLE = "modelspec.title"
 
 ARCH_HUNYUAN_VIDEO = "hunyuan-video"
 
+# Official Wan2.1 weights does not have sai_model_spec, so we use this as an architecture name
+ARCH_WAN = "wan2.1"
+
 ADAPTER_LORA = "lora"
 
 IMPL_HUNYUAN_VIDEO = "https://github.com/Tencent/HunyuanVideo"
@@ -93,6 +98,7 @@ def update_hash_sha256(metadata: dict, state_dict: dict):
 
 def build_metadata(
     state_dict: Optional[dict],
+    architecture: str,
     timestamp: float,
     title: Optional[str] = None,
     reso: Optional[Union[int, Tuple[int, int]]] = None,
@@ -112,7 +118,14 @@ def build_metadata(
     # hash = precalculate_safetensors_hashes(state_dict)
     # metadata["modelspec.hash_sha256"] = hash
 
-    arch = ARCH_HUNYUAN_VIDEO
+    # arch = ARCH_HUNYUAN_VIDEO
+    if architecture == ARCHITECTURE_HUNYUAN_VIDEO:
+        arch = ARCH_HUNYUAN_VIDEO
+    elif architecture == ARCHITECTURE_WAN:
+        arch = ARCH_WAN
+    else:
+        raise ValueError(f"Unknown architecture: {architecture}")
+
     if is_lora:
         arch += f"/{ADAPTER_LORA}"
     metadata["modelspec.architecture"] = arch

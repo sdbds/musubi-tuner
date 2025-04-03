@@ -101,12 +101,14 @@ def flash_attention(
             q = torch.nn.functional.scaled_dot_product_attention(
                 q, k, v, is_causal=causal, dropout_p=dropout_p, scale=softmax_scale
             )
+            x = q
         else:
+            x = torch.empty_like(q)
             for i in range(q.size(0)):
-                q[i : i + 1] = torch.nn.functional.scaled_dot_product_attention(
+                x[i : i + 1] = torch.nn.functional.scaled_dot_product_attention(
                     q[i : i + 1], k[i : i + 1], v[i : i + 1], is_causal=causal, dropout_p=dropout_p, scale=softmax_scale
                 )
-        x = q
+
         del q, k, v
         x = x.transpose(1, 2).contiguous()
         return x.type(out_dtype)
@@ -121,9 +123,11 @@ def flash_attention(
 
         if not split_attn:
             q = flash_attn.flash_attn_func(q, k, v, dropout_p, softmax_scale, causal, window_size, deterministic=deterministic)
+            x = q
         else:
+            x = torch.empty_like(q)
             for i in range(q.size(0)):
-                q[i : i + 1] = flash_attn.flash_attn_func(
+                x[i : i + 1] = flash_attn.flash_attn_func(
                     q[i : i + 1],
                     k[i : i + 1],
                     v[i : i + 1],
@@ -133,7 +137,6 @@ def flash_attention(
                     window_size,
                     deterministic=deterministic,
                 )
-        x = q
         del q, k, v
         return x.type(out_dtype)
 
@@ -149,13 +152,14 @@ def flash_attention(
 
         if not split_attn:
             q = xops.memory_efficient_attention(q, k, v, p=dropout_p, scale=softmax_scale)
+            x = q
         else:
+            x = torch.empty_like(q)
             for i in range(q.size(0)):
-                q[i : i + 1] = xops.memory_efficient_attention(
+                x[i : i + 1] = xops.memory_efficient_attention(
                     q[i : i + 1], k[i : i + 1], v[i : i + 1], p=dropout_p, scale=softmax_scale
                 )
 
-        x = q
         del q, k, v
         return x.type(out_dtype)
 

@@ -10,7 +10,7 @@ from dataset import config_utils
 from dataset.config_utils import BlueprintGenerator, ConfigSanitizer
 import accelerate
 
-from dataset.image_video_dataset import ItemInfo, save_text_encoder_output_cache
+from dataset.image_video_dataset import ARCHITECTURE_HUNYUAN_VIDEO, BaseDataset, ItemInfo, save_text_encoder_output_cache
 from hunyuan_model import text_encoder as text_encoder_module
 from hunyuan_model.text_encoder import TextEncoder
 
@@ -54,27 +54,7 @@ def encode_and_save_batch(
         save_text_encoder_output_cache(item, embed, mask, is_llm)
 
 
-def main(args):
-    device = args.device if args.device is not None else "cuda" if torch.cuda.is_available() else "cpu"
-    device = torch.device(device)
-
-    # Load dataset config
-    blueprint_generator = BlueprintGenerator(ConfigSanitizer())
-    logger.info(f"Load dataset config from {args.dataset_config}")
-    user_config = config_utils.load_user_config(args.dataset_config)
-    blueprint = blueprint_generator.generate(user_config, args)
-    train_dataset_group = config_utils.generate_dataset_group_by_blueprint(blueprint.dataset_group)
-
-    datasets = train_dataset_group.datasets
-
-    # define accelerator for fp8 inference
-    accelerator = None
-    if args.fp8_llm:
-        accelerator = accelerate.Accelerator(mixed_precision="fp16")
-
-    # define encode function
-    num_workers = args.num_workers if args.num_workers is not None else max(1, os.cpu_count() - 1)
-
+def prepare_cache_files_and_paths(datasets: list[BaseDataset]):
     all_cache_files_for_dataset = []  # exisiting cache files
     all_cache_paths_for_dataset = []  # all cache paths in the dataset
     for dataset in datasets:
@@ -83,52 +63,45 @@ def main(args):
         all_cache_files_for_dataset.append(all_cache_files)
 
         all_cache_paths_for_dataset.append(set())
+    return all_cache_files_for_dataset, all_cache_paths_for_dataset
 
-    def encode_for_text_encoder(text_encoder: TextEncoder, is_llm: bool):
-        for i, dataset in enumerate(datasets):
-            logger.info(f"Encoding dataset [{i}]")
-            all_cache_files = all_cache_files_for_dataset[i]
-            all_cache_paths = all_cache_paths_for_dataset[i]
-            for batch in tqdm(dataset.retrieve_text_encoder_output_cache_batches(num_workers)):
-                # update cache files (it's ok if we update it multiple times)
-                all_cache_paths.update([os.path.normpath(item.text_encoder_output_cache_path) for item in batch])
 
-                # skip existing cache files
-                if args.skip_existing:
-                    filtered_batch = [
-                        item for item in batch if not os.path.normpath(item.text_encoder_output_cache_path) in all_cache_files
-                    ]
-                    # print(f"Filtered {len(batch) - len(filtered_batch)} existing cache files")
-                    if len(filtered_batch) == 0:
-                        continue
-                    batch = filtered_batch
+def process_text_encoder_batches(
+    num_workers: Optional[int],
+    skip_existing: bool,
+    batch_size: int,
+    datasets: list[BaseDataset],
+    all_cache_files_for_dataset: list[set],
+    all_cache_paths_for_dataset: list[set],
+    encode: callable,
+):
+    num_workers = num_workers if num_workers is not None else max(1, os.cpu_count() - 1)
+    for i, dataset in enumerate(datasets):
+        logger.info(f"Encoding dataset [{i}]")
+        all_cache_files = all_cache_files_for_dataset[i]
+        all_cache_paths = all_cache_paths_for_dataset[i]
+        for batch in tqdm(dataset.retrieve_text_encoder_output_cache_batches(num_workers)):
+            # update cache files (it's ok if we update it multiple times)
+            all_cache_paths.update([os.path.normpath(item.text_encoder_output_cache_path) for item in batch])
 
-                bs = args.batch_size if args.batch_size is not None else len(batch)
-                for i in range(0, len(batch), bs):
-                    encode_and_save_batch(text_encoder, batch[i : i + bs], is_llm, accelerator)
+            # skip existing cache files
+            if skip_existing:
+                filtered_batch = [
+                    item for item in batch if not os.path.normpath(item.text_encoder_output_cache_path) in all_cache_files
+                ]
+                # print(f"Filtered {len(batch) - len(filtered_batch)} existing cache files")
+                if len(filtered_batch) == 0:
+                    continue
+                batch = filtered_batch
 
-    # Load Text Encoder 1
-    text_encoder_dtype = torch.float16 if args.text_encoder_dtype is None else str_to_dtype(args.text_encoder_dtype)
-    logger.info(f"loading text encoder 1: {args.text_encoder1}")
-    text_encoder_1 = text_encoder_module.load_text_encoder_1(args.text_encoder1, device, args.fp8_llm, text_encoder_dtype)
-    text_encoder_1.to(device=device)
+            bs = batch_size if batch_size is not None else len(batch)
+            for i in range(0, len(batch), bs):
+                encode(batch[i : i + bs])
 
-    # Encode with Text Encoder 1
-    logger.info("Encoding with Text Encoder 1")
-    encode_for_text_encoder(text_encoder_1, is_llm=True)
-    del text_encoder_1
 
-    # Load Text Encoder 2
-    logger.info(f"loading text encoder 2: {args.text_encoder2}")
-    text_encoder_2 = text_encoder_module.load_text_encoder_2(args.text_encoder2, device, text_encoder_dtype)
-    text_encoder_2.to(device=device)
-
-    # Encode with Text Encoder 2
-    logger.info("Encoding with Text Encoder 2")
-    encode_for_text_encoder(text_encoder_2, is_llm=False)
-    del text_encoder_2
-
-    # remove cache files not in dataset
+def post_process_cache_files(
+    datasets: list[BaseDataset], all_cache_files_for_dataset: list[set], all_cache_paths_for_dataset: list[set]
+):
     for i, dataset in enumerate(datasets):
         all_cache_files = all_cache_files_for_dataset[i]
         all_cache_paths = all_cache_paths_for_dataset[i]
@@ -141,15 +114,81 @@ def main(args):
                     logger.info(f"Removed old cache file: {cache_file}")
 
 
-def setup_parser():
+def main(args):
+    device = args.device if args.device is not None else "cuda" if torch.cuda.is_available() else "cpu"
+    device = torch.device(device)
+
+    # Load dataset config
+    blueprint_generator = BlueprintGenerator(ConfigSanitizer())
+    logger.info(f"Load dataset config from {args.dataset_config}")
+    user_config = config_utils.load_user_config(args.dataset_config)
+    blueprint = blueprint_generator.generate(user_config, args, architecture=ARCHITECTURE_HUNYUAN_VIDEO)
+    train_dataset_group = config_utils.generate_dataset_group_by_blueprint(blueprint.dataset_group)
+
+    datasets = train_dataset_group.datasets
+
+    # define accelerator for fp8 inference
+    accelerator = None
+    if args.fp8_llm:
+        accelerator = accelerate.Accelerator(mixed_precision="fp16")
+
+    # prepare cache files and paths: all_cache_files_for_dataset = exisiting cache files, all_cache_paths_for_dataset = all cache paths in the dataset
+    all_cache_files_for_dataset, all_cache_paths_for_dataset = prepare_cache_files_and_paths(datasets)
+
+    # Load Text Encoder 1
+    text_encoder_dtype = torch.float16 if args.text_encoder_dtype is None else str_to_dtype(args.text_encoder_dtype)
+    logger.info(f"loading text encoder 1: {args.text_encoder1}")
+    text_encoder_1 = text_encoder_module.load_text_encoder_1(args.text_encoder1, device, args.fp8_llm, text_encoder_dtype)
+    text_encoder_1.to(device=device)
+
+    # Encode with Text Encoder 1 (LLM)
+    logger.info("Encoding with Text Encoder 1")
+
+    def encode_for_text_encoder_1(batch: list[ItemInfo]):
+        encode_and_save_batch(text_encoder_1, batch, is_llm=True, accelerator=accelerator)
+
+    process_text_encoder_batches(
+        args.num_workers,
+        args.skip_existing,
+        args.batch_size,
+        datasets,
+        all_cache_files_for_dataset,
+        all_cache_paths_for_dataset,
+        encode_for_text_encoder_1,
+    )
+    del text_encoder_1
+
+    # Load Text Encoder 2
+    logger.info(f"loading text encoder 2: {args.text_encoder2}")
+    text_encoder_2 = text_encoder_module.load_text_encoder_2(args.text_encoder2, device, text_encoder_dtype)
+    text_encoder_2.to(device=device)
+
+    # Encode with Text Encoder 2
+    logger.info("Encoding with Text Encoder 2")
+
+    def encode_for_text_encoder_2(batch: list[ItemInfo]):
+        encode_and_save_batch(text_encoder_2, batch, is_llm=False, accelerator=None)
+
+    process_text_encoder_batches(
+        args.num_workers,
+        args.skip_existing,
+        args.batch_size,
+        datasets,
+        all_cache_files_for_dataset,
+        all_cache_paths_for_dataset,
+        encode_for_text_encoder_2,
+    )
+    del text_encoder_2
+
+    # remove cache files not in dataset
+    post_process_cache_files(datasets, all_cache_files_for_dataset, all_cache_paths_for_dataset)
+
+
+def setup_parser_common():
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--dataset_config", type=str, required=True, help="path to dataset config .toml file")
-    parser.add_argument("--text_encoder1", type=str, required=True, help="Text Encoder 1 directory")
-    parser.add_argument("--text_encoder2", type=str, required=True, help="Text Encoder 2 directory")
     parser.add_argument("--device", type=str, default=None, help="device to use, default is cuda if available")
-    parser.add_argument("--text_encoder_dtype", type=str, default=None, help="data type for Text Encoder, default is float16")
-    parser.add_argument("--fp8_llm", action="store_true", help="use fp8 for Text Encoder 1 (LLM)")
     parser.add_argument(
         "--batch_size", type=int, default=None, help="batch size, override dataset config if dataset batch size > this"
     )
@@ -159,8 +198,17 @@ def setup_parser():
     return parser
 
 
+def hv_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    parser.add_argument("--text_encoder1", type=str, required=True, help="Text Encoder 1 directory")
+    parser.add_argument("--text_encoder2", type=str, required=True, help="Text Encoder 2 directory")
+    parser.add_argument("--text_encoder_dtype", type=str, default=None, help="data type for Text Encoder, default is float16")
+    parser.add_argument("--fp8_llm", action="store_true", help="use fp8 for Text Encoder 1 (LLM)")
+    return parser
+
+
 if __name__ == "__main__":
-    parser = setup_parser()
+    parser = setup_parser_common()
+    parser = hv_setup_parser(parser)
 
     args = parser.parse_args()
     main(args)

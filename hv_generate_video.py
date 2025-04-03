@@ -25,6 +25,7 @@ from hunyuan_model.text_encoder import TextEncoder
 from hunyuan_model.text_encoder import PROMPT_TEMPLATE
 from hunyuan_model.vae import load_vae
 from hunyuan_model.models import load_transformer, get_rotary_pos_embed
+from hunyuan_model.fp8_optimization import convert_fp8_linear
 from modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
 from networks import lora
 
@@ -313,23 +314,6 @@ def encode_input_prompt(prompt: Union[str, list[str]], args, device, fp8_llm=Fal
 # endregion
 
 
-def load_images(image_dir, video_length, bucket_reso):
-    image_files = glob_images(image_dir)
-    if len(image_files) == 0:
-        raise ValueError(f"No image files found in {image_dir}")
-    if len(image_files) < video_length:
-        raise ValueError(f"Number of images in {image_dir} is less than {video_length}")
-
-    image_files.sort()
-    images = []
-    for image_file in image_files[:video_length]:
-        image = Image.open(image_file)
-        image = resize_image_to_bucket(image, bucket_reso)  # returns a numpy array
-        images.append(image)
-
-    return images
-
-
 def prepare_vae(args, device):
     vae_dtype = torch.float16 if args.vae_dtype is None else str_to_dtype(args.vae_dtype)
     vae, _, s_ratio, t_ratio = load_vae(vae_dtype=vae_dtype, device=device, vae_path=args.vae)
@@ -479,6 +463,15 @@ def parse_args():
     parser.add_argument("--no_metadata", action="store_true", help="do not save metadata")
     parser.add_argument("--latent_path", type=str, nargs="*", default=None, help="path to latent for decode. no inference")
     parser.add_argument("--lycoris", action="store_true", help="use lycoris for inference")
+    parser.add_argument("--fp8_fast", action="store_true", help="Enable fast FP8 arthimetic(RTX 4XXX+)")
+    parser.add_argument("--compile", action="store_true", help="Enable torch.compile")
+    parser.add_argument(
+        "--compile_args",
+        nargs=4,
+        metavar=("BACKEND", "MODE", "DYNAMIC", "FULLGRAPH"),
+        default=["inductor", "max-autotune-no-cudagraphs", "False", "False"],
+        help="Torch.compile settings",
+    )
 
     args = parser.parse_args()
 
@@ -487,6 +480,9 @@ def parse_args():
     ), "latent_path is only supported for images or video output"
 
     # update dit_weight based on model_base if not exists
+
+    if args.fp8_fast and not args.fp8:
+        raise ValueError("--fp8_fast requires --fp8")
 
     return args
 
@@ -525,6 +521,8 @@ def main():
                 latents = load_file(latent_path)["latent"]
                 with safe_open(latent_path, framework="pt") as f:
                     metadata = f.metadata()
+                if metadata is None:
+                    metadata = {}
                 logger.info(f"Loaded metadata: {metadata}")
 
                 if "seeds" in metadata:
@@ -571,12 +569,7 @@ def main():
         if args.video_path is not None:
             # v2v inference
             logger.info(f"Video2Video inference: {args.video_path}")
-
-            if os.path.isfile(args.video_path):
-                video = load_video(args.video_path, 0, video_length, bucket_reso=(width, height))  # list of frames
-            else:
-                video = load_images(args.video_path, video_length, bucket_reso=(width, height))  # list of frames
-
+            video = load_video(args.video_path, 0, video_length, bucket_reso=(width, height))  # list of frames
             if len(video) < video_length:
                 raise ValueError(f"Video length is less than {video_length}")
             video = np.stack(video, axis=0)  # F, H, W, C
@@ -635,6 +628,12 @@ def main():
 
                 logger.info(f"Loading LoRA weights from {lora_weight} with multiplier {lora_multiplier}")
                 weights_sd = load_file(lora_weight)
+
+                # Filter to exclude keys that are part of single_blocks
+                if args.exclude_single_blocks:
+                    filtered_weights = {k: v for k, v in weights_sd.items() if "single_blocks" not in k}
+                    weights_sd = filtered_weights
+
                 if args.lycoris:
                     lycoris_net, _ = create_network_from_weights(
                         multiplier=lora_multiplier,
@@ -645,14 +644,8 @@ def main():
                         vae=None,
                         for_inference=True,
                     )
-
-                # Filter to exclude keys that are part of single_blocks
-                if args.exclude_single_blocks:
-                    filtered_weights = {k: v for k, v in weights_sd.items() if "single_blocks" not in k}
-                    weights_sd = filtered_weights
-
                 else:
-                    network = lora.create_network_from_weights_hunyuan_video(
+                    network = lora.create_arch_network_from_weights(
                         lora_multiplier, weights_sd, unet=transformer, for_inference=True
                     )
                 logger.info("Merging LoRA weights to DiT model")
@@ -680,16 +673,50 @@ def main():
                 logger.info("Merged model saved")
                 return
 
+        logger.info(f"Casting model to {dit_weight_dtype}")
+        transformer.to(dtype=dit_weight_dtype)
+
+        if args.fp8_fast:
+            logger.info("Enabling FP8 acceleration")
+            params_to_keep = {"norm", "bias", "time_in", "vector_in", "guidance_in", "txt_in", "img_in"}
+            for name, param in transformer.named_parameters():
+                dtype_to_use = dit_dtype if any(keyword in name for keyword in params_to_keep) else dit_weight_dtype
+                param.to(dtype=dtype_to_use)
+            convert_fp8_linear(transformer, dit_dtype, params_to_keep=params_to_keep)
+
+        if args.compile:
+            compile_backend, compile_mode, compile_dynamic, compile_fullgraph = args.compile_args
+            logger.info(
+                f"Torch Compiling[Backend: {compile_backend}; Mode: {compile_mode}; Dynamic: {compile_dynamic}; Fullgraph: {compile_fullgraph}]"
+            )
+            torch._dynamo.config.cache_size_limit = 32
+            for i, block in enumerate(transformer.single_blocks):
+                compiled_block = torch.compile(
+                    block,
+                    backend=compile_backend,
+                    mode=compile_mode,
+                    dynamic=compile_dynamic.lower() in "true",
+                    fullgraph=compile_fullgraph.lower() in "true",
+                )
+                transformer.single_blocks[i] = compiled_block
+            for i, block in enumerate(transformer.double_blocks):
+                compiled_block = torch.compile(
+                    block,
+                    backend=compile_backend,
+                    mode=compile_mode,
+                    dynamic=compile_dynamic.lower() in "true",
+                    fullgraph=compile_fullgraph.lower() in "true",
+                )
+                transformer.double_blocks[i] = compiled_block
+
         if blocks_to_swap > 0:
-            logger.info(f"Casting model to {dit_weight_dtype}")
-            transformer.to(dtype=dit_weight_dtype)
             logger.info(f"Enable swap {blocks_to_swap} blocks to CPU from device: {device}")
             transformer.enable_block_swap(blocks_to_swap, device, supports_backward=False)
             transformer.move_to_device_except_swap_blocks(device)
             transformer.prepare_block_swap_before_forward()
         else:
-            logger.info(f"Moving and casting model to {device} and {dit_weight_dtype}")
-            transformer.to(device=device, dtype=dit_weight_dtype)
+            logger.info(f"Moving model to {device}")
+            transformer.to(device=device)
         if args.img_in_txt_in_offloading:
             logger.info("Enable offloading img_in and txt_in to CPU")
             transformer.enable_img_in_txt_in_offloading()

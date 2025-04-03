@@ -1,15 +1,25 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 import math
+from typing import Optional, Union
 
 import torch
-import torch.cuda.amp as amp
 import torch.nn as nn
-from diffusers.configuration_utils import ConfigMixin, register_to_config
-from diffusers.models.modeling_utils import ModelMixin
+from torch.utils.checkpoint import checkpoint
+from accelerate import init_empty_weights
+
+import logging
+
+from utils.safetensors_utils import MemoryEfficientSafeOpen, load_safetensors
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+
+from utils.device_utils import clean_memory_on_device
 
 from .attention import flash_attention
 from utils.device_utils import clean_memory_on_device
 from modules.custom_offloading_utils import ModelOffloader
+from modules.fp8_optimization_utils import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
 
 __all__ = ["WanModel"]
 
@@ -310,7 +320,10 @@ class WanI2VCrossAttention(WanSelfAttention):
         # output
         x = x.flatten(2)
         img_x = img_x.flatten(2)
-        x += img_x
+        if self.training:
+            x = x + img_x  # avoid inplace
+        else:
+            x += img_x
         del img_x
 
         x = self.o(x)
@@ -358,16 +371,15 @@ class WanAttentionBlock(nn.Module):
         # modulation
         self.modulation = nn.Parameter(torch.randn(1, 6, dim) / dim**0.5)
 
-    def forward(
-        self,
-        x,
-        e,
-        seq_lens,
-        grid_sizes,
-        freqs,
-        context,
-        context_lens,
-    ):
+        self.gradient_checkpointing = False
+
+    def enable_gradient_checkpointing(self):
+        self.gradient_checkpointing = True
+
+    def disable_gradient_checkpointing(self):
+        self.gradient_checkpointing = False
+
+    def _forward(self, x, e, seq_lens, grid_sizes, freqs, context, context_lens):
         r"""
         Args:
             x(Tensor): Shape [B, L, C]
@@ -401,12 +413,18 @@ class WanAttentionBlock(nn.Module):
         #     return x
         # x = cross_attn_ffn(x, context, context_lens, e)
 
-        x += self.cross_attn(self.norm3(x), context, context_lens)
+        # x += self.cross_attn(self.norm3(x), context, context_lens) # backward error
+        x = x + self.cross_attn(self.norm3(x), context, context_lens)
         del context
         y = self.ffn(self.norm2(x).float() * (1 + e[4]) + e[3])
         x = x + y.to(torch.float32) * e[5]
         del y
         return x
+
+    def forward(self, x, e, seq_lens, grid_sizes, freqs, context, context_lens):
+        if self.training and self.gradient_checkpointing:
+            return checkpoint(self._forward, x, e, seq_lens, grid_sizes, freqs, context, context_lens, use_reentrant=False)
+        return self._forward(x, e, seq_lens, grid_sizes, freqs, context, context_lens)
 
 
 class Head(nn.Module):
@@ -582,9 +600,69 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         # initialize weights
         self.init_weights()
 
+        self.gradient_checkpointing = False
+
         # offloading
         self.blocks_to_swap = None
         self.offloader = None
+
+    @property
+    def dtype(self):
+        return next(self.parameters()).dtype
+
+    @property
+    def device(self):
+        return next(self.parameters()).device
+
+    def fp8_optimization(
+        self, state_dict: dict[str, torch.Tensor], device: torch.device, move_to_device: bool, use_scaled_mm: bool = False
+    ) -> int:
+        """
+        Optimize the model state_dict with fp8.
+
+        Args:
+            state_dict (dict[str, torch.Tensor]):
+                The state_dict of the model.
+            device (torch.device):
+                The device to calculate the weight.
+            move_to_device (bool):
+                Whether to move the weight to the device after optimization.
+        """
+        TARGET_KEYS = ["blocks"]
+        EXCLUDE_KEYS = [
+            "norm",
+            "patch_embedding",
+            "text_embedding",
+            "time_embedding",
+            "time_projection",
+            "head",
+            "modulation",
+            "img_emb",
+        ]
+
+        # inplace optimization
+        state_dict = optimize_state_dict_with_fp8(state_dict, device, TARGET_KEYS, EXCLUDE_KEYS, move_to_device=move_to_device)
+
+        # apply monkey patching
+        apply_fp8_monkey_patch(self, state_dict, use_scaled_mm=use_scaled_mm)
+
+        return state_dict
+
+    def enable_gradient_checkpointing(self):
+        self.gradient_checkpointing = True
+
+        for block in self.blocks:
+            block.enable_gradient_checkpointing()
+
+        print(f"WanModel: Gradient checkpointing enabled.")
+
+    def disable_gradient_checkpointing(self):
+        self.gradient_checkpointing = False
+
+        for block in self.blocks:
+            block.disable_gradient_checkpointing()
+
+        print(f"WanModel: Gradient checkpointing disabled.")
 
     def enable_block_swap(self, blocks_to_swap: int, device: torch.device, supports_backward: bool):
         self.blocks_to_swap = blocks_to_swap
@@ -629,7 +707,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
             return
         self.offloader.prepare_block_devices_before_forward(self.blocks)
 
-    def forward(self, x, t, context, seq_len, clip_fea=None, y=None):
+    def forward(self, x, t, context, seq_len, clip_fea=None, y=None, skip_block_indices=None):
         r"""
         Forward pass through the diffusion model
 
@@ -651,8 +729,9 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
             List[Tensor]:
                 List of denoised video tensors with original input shapes [C_out, F, H / 8, W / 8]
         """
-        if self.model_type == "i2v":
-            assert clip_fea is not None and y is not None
+        # remove assertions to work with Fun-Control T2V
+        # if self.model_type == "i2v":
+        #     assert clip_fea is not None and y is not None
         # params
         device = self.patch_embedding.weight.device
         if self.freqs.device != device:
@@ -668,6 +747,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
 
         freqs_list = []
         for fhw in grid_sizes:
+            fhw = tuple(fhw.tolist())
             if fhw not in self.freqs_fhw:
                 c = self.dim // self.num_heads // 2
                 self.freqs_fhw[fhw] = calculate_freqs_i(fhw, c, self.freqs)
@@ -687,9 +767,9 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
 
         # context
         context_lens = None
-        context = self.text_embedding(
-            torch.stack([torch.cat([u, u.new_zeros(self.text_len - u.size(0), u.size(1))]) for u in context])
-        )
+        if type(context) is list:
+            context = torch.stack([torch.cat([u, u.new_zeros(self.text_len - u.size(0), u.size(1))]) for u in context])
+        context = self.text_embedding(context)
 
         if clip_fea is not None:
             context_clip = self.img_emb(clip_fea)  # bs x 257 x dim
@@ -700,13 +780,18 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         # arguments
         kwargs = dict(e=e0, seq_lens=seq_lens, grid_sizes=grid_sizes, freqs=freqs_list, context=context, context_lens=context_lens)
 
-        clean_memory_on_device(device)
+        if self.blocks_to_swap:
+            clean_memory_on_device(device)
+
         # print(f"x: {x.shape}, e: {e0.shape}, context: {context.shape}, seq_lens: {seq_lens}")
         for block_idx, block in enumerate(self.blocks):
-            if self.blocks_to_swap:
+            is_block_skipped = skip_block_indices is not None and block_idx in skip_block_indices
+
+            if self.blocks_to_swap and not is_block_skipped:
                 self.offloader.wait_for_block(block_idx)
 
-            x = block(x, **kwargs)
+            if not is_block_skipped:
+                x = block(x, **kwargs)
 
             if self.blocks_to_swap:
                 self.offloader.submit_move_blocks_forward(self.blocks, block_idx)
@@ -766,3 +851,83 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
 
         # init output layer
         nn.init.zeros_(self.head.head.weight)
+
+
+def detect_wan_sd_dtype(path: str) -> torch.dtype:
+    # get dtype from model weights
+    with MemoryEfficientSafeOpen(path) as f:
+        keys = set(f.keys())
+        key1 = "model.diffusion_model.blocks.0.cross_attn.k.weight"  # 1.3B
+        key2 = "blocks.0.cross_attn.k.weight"  # 14B
+        if key1 in keys:
+            dit_dtype = f.get_tensor(key1).dtype
+        elif key2 in keys:
+            dit_dtype = f.get_tensor(key2).dtype
+        else:
+            raise ValueError(f"Could not find the dtype in the model weights: {path}")
+    logger.info(f"Detected DiT dtype: {dit_dtype}")
+    return dit_dtype
+
+
+def load_wan_model(
+    config: any,
+    device: Union[str, torch.device],
+    dit_path: str,
+    attn_mode: str,
+    split_attn: bool,
+    loading_device: Union[str, torch.device],
+    dit_weight_dtype: Optional[torch.dtype],
+    fp8_scaled: bool = False,
+) -> WanModel:
+    # dit_weight_dtype is None for fp8_scaled
+    assert (not fp8_scaled and dit_weight_dtype is not None) or (fp8_scaled and dit_weight_dtype is None)
+
+    device = torch.device(device)
+    loading_device = torch.device(loading_device)
+
+    with init_empty_weights():
+        logger.info(f"Creating WanModel")
+        model = WanModel(
+            model_type="i2v" if config.i2v else "t2v",
+            dim=config.dim,
+            eps=config.eps,
+            ffn_dim=config.ffn_dim,
+            freq_dim=config.freq_dim,
+            in_dim=config.in_dim,
+            num_heads=config.num_heads,
+            num_layers=config.num_layers,
+            out_dim=config.out_dim,
+            text_len=config.text_len,
+            attn_mode=attn_mode,
+            split_attn=split_attn,
+        )
+        if dit_weight_dtype is not None:
+            model.to(dit_weight_dtype)
+
+    # if fp8_scaled, load model weights to CPU to reduce VRAM usage. Otherwise, load to the specified device (CPU for block swap or CUDA for others)
+    wan_loading_device = torch.device("cpu") if fp8_scaled else loading_device
+    logger.info(f"Loading DiT model from {dit_path}, device={wan_loading_device}, dtype={dit_weight_dtype}")
+
+    # load model weights with the specified dtype or as is
+    sd = load_safetensors(dit_path, wan_loading_device, disable_mmap=True, dtype=dit_weight_dtype)
+
+    # remove "model.diffusion_model." prefix: 1.3B model has this prefix
+    for key in list(sd.keys()):
+        if key.startswith("model.diffusion_model."):
+            sd[key[22:]] = sd.pop(key)
+
+    if fp8_scaled:
+        # fp8 optimization: calculate on CUDA, move back to CPU if loading_device is CPU (block swap)
+        logger.info(f"Optimizing model weights to fp8. This may take a while.")
+        sd = model.fp8_optimization(sd, device, move_to_device=loading_device.type == "cpu")
+
+        if loading_device.type != "cpu":
+            # make sure all the model weights are on the loading_device
+            logger.info(f"Moving weights to {loading_device}")
+            for key in sd.keys():
+                sd[key] = sd[key].to(loading_device)
+
+    info = model.load_state_dict(sd, strict=True, assign=True)
+    logger.info(f"Loaded DiT model from {dit_path}, info={info}")
+
+    return model
