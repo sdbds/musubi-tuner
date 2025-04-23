@@ -34,7 +34,7 @@ def create_arch_network(
         exclude_patterns = ast.literal_eval(exclude_patterns)
 
     # exclude if 'img_mod', 'txt_mod' or 'modulation' in the name
-    exclude_patterns.append(r".*(patch_embedding|text_embedding|time_embedding|time_projection|norm|head|modulation).*")
+    exclude_patterns.append(r".*(patch_embedding|text_embedding|time_embedding|time_projection|norm|head).*")
 
     kwargs["exclude_patterns"] = exclude_patterns
 

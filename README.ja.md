@@ -42,6 +42,16 @@ Wan2.1については、[Wan2.1のドキュメント](./docs/wan.md)も参照し
 
 - GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- 2025/04/18
+    - Wan2.1の推論時に、ファイルからプロンプトを読み込んで生成する一括生成モードと、コマンドラインからプロンプトを指定して生成するインタラクティブモードを追加しました。詳細は[こちら](./docs/wan.md#interactive-mode--インタラクティブモード)を参照してください。
+
+- 2025/04/09
+    - `hv_train_network.py`および `wan_train_network.py`にPyTorch Dynamoを使用するオプションが追加されました。PR [#215](https://github.com/kohya-ss/musubi-tuner/pull/215) sdbds 氏に感謝します。詳細は[こちら](./docs/advanced_config.md#pytorch-dynamo-optimization-for-model-training--モデルの学習におけるpytorch-dynamoの最適化)を参照してください。
+
+- 2025/04/06
+    - JSONL形式の動画データセットで、動画ファイルだけでなく、複数枚の画像が格納されたディレクトリも指定できるようになりました。詳細は[こちら](./dataset/dataset_config.md#sample-for-video-dataset-with-metadata-jsonl-file)を参照してください。
+    - 動画データセットで、元動画のフレームレートを指定すると、アーキテクチャのフレームレートに自動的に間引く機能を追加しました。詳細は[こちら](./dataset/dataset_config.md#sample-for-video-dataset-with-caption-text-files)を参照してください。
+
 - 2025/03/30
     - Wan2.1-FunのControlモデルの学習を実験的に追加しました（未テスト）。[Wan2.1のドキュメント](./docs/wan.md#training--学習)を参照してください。
     - Wan2.1-FunのControlモデルによる推論を実験的にサポートしました。14BのI2VでのControlのみテスト済みです。[Wan2.1のドキュメント](./docs/wan.md#inference--推論)を参照してください。
@@ -68,20 +78,6 @@ Wan2.1については、[Wan2.1のドキュメント](./docs/wan.md)も参照し
         - raindrop313氏の[ComfyUI-WanVideoStartEndFrames](https://github.com/raindrop313/ComfyUI-WanVideoStartEndFrames) の実装を参考にしました。raindrop313氏に感謝いたします。なお、実装を完全に再現したものではありませんので、何らかの問題があるかもしれません。
         - `--end_image_path`に最後のフレームの画像を指定してください。あわせて `--trim_tail_frames`オプションも追加されています。
         - 詳細は[こちら](./docs/wan.md#i2v-inference--i2v推論)を参照してください。
-    
-- 2025/03/18
-    - SageAttentionのインストール方法が最新に更新されました（ソースコードの編集が不要となりました）。PR [#165](https://github.com/kohya-ss/musubi-tuner/pull/165) fai-9氏に感謝いたします。
-
-- 2025/03/17
-    - Wan2.1の学習で、float8_e4m3fnの重みを使用した場合に、LoRAの重みも同形式になり、正しく保存されない不具合を集成しました。
-
-- 2025/03/16
-    - Wan2.1の学習で、fp16の重みを使用した場合でも重みがbf16にcastされていた不具合を修正しました。[PR #160]https://github.com/kohya-ss/musubi-tuner/pull/160)
-        - あわせてfp16の重みを使用するとサンプル画像生成で黒画像が生成される不具合を修正しました。
-        - fp16の学習で不具合が起きる場合にはbf16をお使いください。
-    - Wan2.1の推論スクリプトをリファクタリングしました。`--fp8_fast`と`--compile`オプションが追加されました。詳しくは[こちら](./docs/wan.md#inference--推論)を参照してください。PR [#153](https://github.com/kohya-ss/musubi-tuner/pull/153)
-        - 大幅に変更を行ったため、不具合があればお知らせください。
-    - 先日追加された`--fp8_scaled`オプションは、fp8での学習および推論の精度向上に効果があるようです。`--fp8_base`で学習している場合や、`--fp8`で推論している場合は、`--fp8_scaled`の追加をご検討ください。問題があればご連絡ください。
 
 ### リリースについて
 
@@ -283,6 +279,12 @@ VRAMが足りない場合は、`--blocks_to_swap`を指定して、一部のブ�
 `--show_timesteps`に`image`（`matplotlib`が必要）または`console`を指定すると、学習時のtimestepsの分布とtimestepsごとのloss weightingが確認できます。
 
 学習時のログの記録が可能です。[TensorBoard形式のログの保存と参照](./docs/advanced_config.md#save-and-view-logs-in-tensorboard-format--tensorboard形式のログの保存と参照)を参照してください。
+
+PyTorch Dynamoによる最適化を行う場合は、[こちら](./docs/advanced_config.md#pytorch-dynamo-optimization-for-model-training--モデルの学習におけるpytorch-dynamoの最適化)を参照してください。
+
+`--gradient_checkpointing`を指定すると、gradient checkpointingが有効になります。VRAM使用量は減りますが、学習速度は低下します。
+
+`--optimizer_type`には`adamw8bit`、`adamw8bit_apex_fused`、`adamw8bit_apex_fused_legacy`、`adamw8bit_apex_fused_legacy_no_scale`のいずれかを指定してください。
 
 学習中のサンプル画像生成については、[こちらのドキュメント](./docs/sampling_during_training.md)を参照してください。その他の高度な設定については[こちらのドキュメント](./docs/advanced_config.md)を参照してください。
 

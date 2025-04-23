@@ -51,6 +51,16 @@ For Wan2.1, please also refer to [Wan2.1 documentation](./docs/wan.md).
 
 - **[NEW] GitHub Discussions Enabled**: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- Apr 18, 2025:
+    - Added batch generation mode that reads prompts from a file and generates them during Wan2.1 inference, as well as interactive mode that specifies prompts from the command line. See [here](./docs/wan.md#interactive-mode--インタラクティブモード) for details.
+
+- Apr 9, 2025
+    - `hv_train_network.py` and `wan_train_network.py` now support PyTorch Dynamo optimization. PR [#215](https://github.com/kohya-ss/musubi-tuner/pull/215) Thanks to sdbds. See [here](./docs/advanced_config.md#pytorch-dynamo-optimization-for-model-training--モデルの学習におけるpytorch-dynamoの最適化) for details.
+
+- Apr 6, 2025
+    - In the video dataset with JSONL format, you can now specify not only video files but also directories containing multiple images. See [here](./dataset/dataset_config.md#sample-for-video-dataset-with-metadata-jsonl-file) for details.
+    - Added a feature to automatically downsample the original video's frame rate to the architecture's frame rate when specifying the original video's frame rate in the video dataset. See [here](./dataset/dataset_config.md#sample-for-video-dataset-with-caption-text-files) for details.
+
 - Mar 30, 2025
     - Added experimental support for training Wan2.1-Fun's Control model (untested). See [here](./docs/wan.md#training--学習) for details.
     - Added experimental support for inference with Wan2.1-Fun's Control model. Tested only with 14B I2V Control. See [here](./docs/wan.md#inference--推論) for details.
@@ -78,20 +88,7 @@ For Wan2.1, please also refer to [Wan2.1 documentation](./docs/wan.md).
         - This feature is based on the implementation by raindrop313 in [ComfyUI-WanVideoStartEndFrames](https://github.com/raindrop313/ComfyUI-WanVideoStartEndFrames). Many thanks to raindrop313. Note that this is not a complete reproduction of the implementation, so there may be issues.
         - Specify the last frame image with `--end_image_path`. Also, the `--trim_tail_frames` option has been added.
         - See [here](./docs/wan.md#i2v-inference--i2v推論) for details.
-
-- Mar 18, 2025
-    - Updated SageAttention installation instructions to the latest version (no need to edit the source code). Thanks to fai-9 for PR [#165](https://github.com/kohya-ss/musubi-tuner/pull/165).
-
-- Mar 17, 2025
-    - Fixed a bug where the LoRA weights were corrupted when using float8_e4m3fn weights in Wan2.1 training.
-
-- Mar 16, 2025
-    - Fixed a bug where the weights were cast to bf16 even when using fp16 weights in Wan2.1 training. [PR #160](https://github.com/kohya-ss/musubi-tuner/pull/160)
-        - Also fixed a bug where black images were generated during sample image generation when using fp16 weights.
-        - If you encounter issues with fp16 training, please use bf16.
-    - Refactored the inference script for Wan2.1. Added `--fp8_fast` and `--compile` options. Please refer to [here](./docs/wan.md#inference--推論) for details. PR [#153](https://github.com/kohya-ss/musubi-tuner/pull/153)
-        - A major change has been made, so please let us know if you encounter any issues.
-    - The newly added `--fp8_scaled` option seems to work well for fp8 training and inference. If you are using `--fp8_base` for training, or `--fp8` for inference, please try to add `--fp8_scaled`. Please report any issues you encounter.
+        
 
 ### Releases
 
@@ -327,6 +324,8 @@ The format of LoRA trained is the same as `sd-scripts`.
 `--show_timesteps` can be set to `image` (requires `matplotlib`) or `console` to display timestep distribution and loss weighting during training.
 
 You can record logs during training. Refer to [Save and view logs in TensorBoard format](./docs/advanced_config.md#save-and-view-logs-in-tensorboard-format--tensorboard形式のログの保存と参照).
+
+For PyTorch Dynamo optimization, refer to [this document](./docs/advanced_config.md#pytorch-dynamo-optimization-for-model-training--モデルの学習におけるpytorch-dynamoの最適化).
 
 For sample image generation during training, refer to [this document](./docs/sampling_during_training.md). For advanced configuration, refer to [this document](./docs/advanced_config.md).
 
