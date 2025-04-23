@@ -39,11 +39,11 @@
 
 ## Introduction
 
-This repository provides scripts for training LoRA (Low-Rank Adaptation) models with HunyuanVideo or Wan2.1 models. 
+This repository provides scripts for training LoRA (Low-Rank Adaptation) models with HunyuanVideo, Wan2.1 and FramePack architectures. 
 
-This repository is unofficial and not affiliated with the official HunyanVideo/Wan2.1 repository.
+This repository is unofficial and not affiliated with the official HunyanVideo/Wan2.1/FramePack repositories. 
 
-For Wan2.1, please also refer to [Wan2.1 documentation](./docs/wan.md).
+For Wan2.1, please also refer to [Wan2.1 documentation](./docs/wan.md). For FramePack, please also refer to [FramePack documentation](./docs/framepack.md).
 
 *This repository is under development.*
 
@@ -527,5 +527,7 @@ We welcome contributions! However, please note:
 Code under the `hunyuan_model` directory is modified from [HunyuanVideo](https://github.com/Tencent/HunyuanVideo) and follows their license.
 
 Code under the `wan` directory is modified from [Wan2.1](https://github.com/Wan-Video/Wan2.1). The license is under the Apache License 2.0.
+
+Code under the `frame_pack` directory is modified from [FramePack](https://github.com/lllyasviel/FramePack). The license is under the Apache License 2.0.
 
 Other code is under the Apache License 2.0. Some code is copied and modified from Diffusers.

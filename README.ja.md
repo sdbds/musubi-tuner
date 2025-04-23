@@ -32,9 +32,9 @@
 
 ## はじめに
 
-このリポジトリは、HunyuanVideoおよびWan2.1のLoRA学習用のコマンドラインツールです。このリポジトリは非公式であり、公式のHunyuanVideoやWan2.1のリポジトリとは関係ありません。
+このリポジトリは、HunyuanVideo、Wan2.1、FramePackのLoRA学習用のコマンドラインツールです。このリポジトリは非公式であり、公式のHunyuanVideoやWan2.1、FramePackのリポジトリとは関係ありません。
 
-Wan2.1については、[Wan2.1のドキュメント](./docs/wan.md)も参照してください。
+Wan2.1については、[Wan2.1のドキュメント](./docs/wan.md)も参照してください。FramePackについては、[FramePackのドキュメント](./docs/framepack.md)を参照してください。
 
 *リポジトリは開発中です。*
 
@@ -449,5 +449,7 @@ sdbds氏によるWindows対応のSageAttentionのwheelが https://github.com/sdb
 `hunyuan_model`ディレクトリ以下のコードは、[HunyuanVideo](https://github.com/Tencent/HunyuanVideo)のコードを一部改変して使用しているため、そちらのライセンスに従います。
 
 `wan`ディレクトリ以下のコードは、[Wan2.1](https://github.com/Wan-Video/Wan2.1)のコードを一部改変して使用しています。ライセンスはApache License 2.0です。
+
+`frame_pack`ディレクトリ以下のコードは、[frame_pack](https://github.com/lllyasviel/FramePack)のコードを一部改変して使用しています。ライセンスはApache License 2.0です。
 
 他のコードはApache License 2.0に従います。一部Diffusersのコードをコピー、改変して使用しています。
