@@ -1,5 +1,5 @@
-torch==2.6.0
-torchvision==0.21.0
+torch==2.7.0
+torchvision
 xformers
 
 accelerate>=1.6.0
@@ -34,11 +34,11 @@ prodigyopt
 dadaptation
 heavyball>=0.24.4
 schedulefree>=1.4.0
-torch-optimi==0.2.1
+torch-optimi>=0.2.1
 adam-mini>=1.1.1
 
 triton-windows ; sys_platform == 'win32'
-https://github.com/sdbds/flash-attention-for-windows/releases/download/2.7.4.post1/flash_attn-2.7.4.post1+cu124torch2.5.1cxx11abiFALSEfullbackward-cp310-cp310-win_amd64.whl ; sys_platform == 'win32'
-https://github.com/sdbds/SageAttention-for-windows/releases/download/2.1.1/sageattention-2.1.1+cu124torch2.5.1-cp310-cp310-win_amd64.whl ; sys_platform == 'win32'
+https://github.com/sdbds/flash-attention-for-windows/releases/download/torch270%2Bcu128/flash_attn-2.7.4.post1+cu128torch2.7.0cxx11abiFALSEfullbackward-cp311-cp311-win_amd64.whl ; sys_platform == 'win32'
+https://github.com/sdbds/SageAttention-for-windows/releases/download/2.11_torch270%2Bcu128/sageattention-2.1.1+cu128torch2.7.0-cp311-cp311-win_amd64.whl ; sys_platform == 'win32'
 flash-attn; sys_platform == 'linux'
 sageattention; sys_platform == 'linux'
