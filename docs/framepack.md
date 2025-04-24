@@ -29,6 +29,8 @@ HunyuanVideoとの主な違いは次のとおりです。
 
 You need to download the DiT, VAE, Text Encoder 1 (LLaMA), Text Encoder 2 (CLIP), and Image Encoder (SigLIP) models specifically for FramePack. Several download options are available for each component.
 
+***Note:** The weights are publicly available on the following page: [maybleMyers/framepack_h1111](https://huggingface.co/maybleMyers/framepack_h1111). Thank you maybleMyers!
+
 ### DiT Model
 
 Choose one of the following methods:
@@ -72,6 +74,8 @@ Choose one of the following methods:
 <details>
 <summary>日本語</summary>
 
+※以下のページに重みが一括で公開されています。maybleMyers 氏に感謝いたします。: https://huggingface.co/maybleMyers/framepack_h1111
+
 DiT、VAE、テキストエンコーダー1（LLaMA）、テキストエンコーダー2（CLIP）、および画像エンコーダー（SigLIP）モデルは複数の方法でダウンロードできます。英語の説明を参考にして、ダウンロードしてください。
 
 FramePack公式のリポジトリをクローンして実行した場合、モデルはローカルにダウンロードされている可能性があります。スナップショットディレクトリへのパスを指定してください。例：`path/to/FramePack/hf_download/hub/models--lllyasviel--flux_redux_bfl/snapshots/<hex-uuid-folder>`
@@ -91,7 +95,7 @@ Latent pre-caching uses a dedicated script for FramePack. You **must** provide t
 
 ```bash
 python fpack_cache_latents.py \
-    --dataset_config path/to/toml \
+    --dataset_config path/to/toml --vanilla_sampling \
     --vae path/to/vae_model.safetensors \
     --image_encoder path/to/image_encoder_model.safetensors \
     --vae_chunk_size 32 --vae_spatial_tile_sample_min_size 128 
@@ -103,6 +107,8 @@ Key differences from HunyuanVideo caching:
 -   You can use the `--latent_window_size` argument (default 9) which defines the size of the latent sections FramePack processes (omitted in the example). This value should typically not be changed unless you understand the implications.
 -   The script generates multiple cache files per video, each corresponding to a different section, with the section index appended to the filename (e.g., `..._frame_pos-0000-count_...` becomes `..._frame_pos-0000-0000-count_...`, `..._frame_pos-0000-0001-count_...`, etc.).
 -   Image embeddings are calculated using the Image Encoder and stored in the cache files alongside the latents.
+
+By default, the sampling method used is Inverted anti-drifting (the same as during inference, using the latent and index in reverse order), described in the paper. You can switch to Vanilla sampling in the paper (using the temporally ordered latent and index) by specifying `--vanilla_sampling`. Preliminary tests suggest that Vanilla sampling may yield better quality. If you change this option, please overwrite the existing cache without specifying `--skip_existing`.
 
 For VRAM savings during VAE decoding, consider using `--vae_chunk_size` and `--vae_spatial_tile_sample_min_size`. If VRAM is overflowing and using shared memory, it is recommended to set `--vae_chunk_size` to 16 or 8, and `--vae_spatial_tile_sample_min_size` to 64 or 32.
 
@@ -120,6 +126,8 @@ HunyuanVideoのキャッシングとの主な違いは次のとおりです。
 -  `--latent_window_size`引数（デフォルト9）を指定できます（例では省略）。これは、FramePackが処理するlatentセクションのサイズを定義します。この値は、影響を理解していない限り、通常変更しないでください。
 -  スクリプトは、各ビデオに対して複数のキャッシュファイルを生成します。各ファイルは異なるセクションに対応し、セクションインデックスがファイル名に追加されます（例：`..._frame_pos-0000-count_...`は`..._frame_pos-0000-0000-count_...`、`..._frame_pos-0000-0001-count_...`などになります）。
 -  画像埋め込みは画像エンコーダーを使用して計算され、latentとともにキャッシュファイルに保存されます。
+
+デフォルトでは、論文のサンプリング方法 Inverted anti-drifting （推論時と同じ、逆順の latent と index を使用）を使用します。`--vanilla_sampling`を指定すると Vanilla sampling （時間順の latent と index を使用）に変更できます。簡単なテストの結果では、Vanilla sampling の方が品質が良いようです。このオプションの有無を変更する場合には `--skip_existing` を指定せずに既存のキャッシュを上書きしてください。
 
 VAEのdecode時のVRAM節約のために、`--vae_chunk_size`と`--vae_spatial_tile_sample_min_size`を使用することを検討してください。VRAMがあふれて共有メモリを使用している場合には、`--vae_chunk_size`を16、8などに、`--vae_spatial_tile_sample_min_size`を64、32などに変更することをお勧めします。
 </details>
@@ -232,14 +240,15 @@ python fpack_generate_video.py \
     --save_path path/to/save/dir --output_type both \
     --seed 1234 --lora_multiplier 1.0 --lora_weight path/to/lora.safetensors
 ```
-    <!-- --embedded_cfg_scale 10.0 --guidance_scale 1.0 \ -->
+<!-- --embedded_cfg_scale 10.0 --guidance_scale 1.0 \ -->
 
 Key differences from HunyuanVideo inference:
 -   Uses `fpack_generate_video.py`.
 -   **Requires** specifying `--vae`, `--text_encoder1`, `--text_encoder2`, and `--image_encoder`.
 -   **Requires** specifying `--image_path` for the starting frame.
--  **Requires** specifying `--video_seconds` (length of the video in seconds).
-- `--video_size` is the size of the generated video, height and width are specified in that order. 
+-   **Requires** specifying `--video_seconds` (length of the video in seconds).
+- `--video_size` is the size of the generated video, height and width are specified in that order.
+-   `--prompt`: Prompt for generation.
 -  Optional `--latent_window_size` argument (default 9, should match caching and training).
 -  `--fp8_scaled` option is available for DiT to reduce memory usage. Quality may be slightly lower. `--fp8_llm` option is available to reduce memory usage of Text Encoder 1. `--fp8` alone is also an option for DiT but `--fp8_scaled` potentially offers better quality.
 -   LoRA loading options (`--lora_weight`, `--lora_multiplier`, `--include_patterns`, `--exclude_patterns`) are available. `--lycoris` is also supported.
@@ -250,6 +259,26 @@ Key differences from HunyuanVideo inference:
 -   `--sample_solver` (default `unipc`) is available but only `unipc` is implemented.
 -   `--save_merged_model` option is available to save the DiT model after merging LoRA weights. Inference is skipped if this is specified.
 -   Batch and interactive modes (`--from_file`, `--interactive`) are **not yet implemented** for FramePack generation.
+
+**Section-specific Prompts**
+
+You can now provide different prompts for different sections of the video using the `--prompt` argument. Use `;;;` to separate sections and specify the starting section index followed by a colon (e.g., `0:prompt A;;;3:prompt B`). Each definition should be in the format `INDEX:PROMPT_TEXT`.
+
+*   `INDEX` can be:
+    *   A non-negative integer (e.g., `0`, `3`): The prompt applies to this section index.
+    *   A negative integer (e.g., `-1`, `-2`): The prompt applies to the k-th section from the end (e.g., `-1` for the last section, `-2` for the second to last).
+    *   A range (e.g., `0-2`, `3-5`): The prompt applies to all sections within this inclusive range.
+* If some parts are not specified with an index, the prompt associated with index `0` will be used (e.g., `0:prompt A;;;-1:prompt B` means the last section is prompt B, and all others are prompt A).
+    * This can be used with the end image guidance feature to specify a different prompt for the last section.
+*   If no index is specified for a part (e.g., `prompt A;;;3:prompt B`), it defaults to index `0`.
+*   Example 1: `"0:A cat walks;;;3:The cat sits down;;;-1:The cat sleeps"`
+*   Example 2: `"0:A cat turns around;;;-1:A cat walks towards the camera"`
+
+**End Image Guidance**
+
+Specify an `--end_image_path` to guide the generation towards a specific final frame. This is highly experimental.
+
+*  `--end_image_path` : Path to an image to be used as a target for the final frame. The generation process for the last section will be conditioned on this image's VAE latent and image encoder embedding. This may affect the naturalness of the transition into the final frames.
 
 Other options like `--video_size`, `--fps`, `--infer_steps`, `--save_path`, `--output_type`, `--seed`, `--attn_mode`, `--blocks_to_swap`, `--vae_chunk_size`, `--vae_spatial_tile_sample_min_size` function similarly to HunyuanVideo/Wan2.1 where applicable.
 
@@ -262,9 +291,10 @@ FramePackの推論は専用のスクリプト`fpack_generate_video.py`を使用�
 HunyuanVideoの推論との主な違いは次のとおりです。
 -  `fpack_generate_video.py`を使用します。
 -  `--vae`、`--text_encoder1`、`--text_encoder2`、`--image_encoder`を指定する必要があります。
--  `--image_path`を指定する必要があります。
+-  `--image_path`を指定する必要があります（開始フレーム）。
 -  `--video_seconds`を指定する必要があります（秒単位でのビデオの長さを指定）。
 -  `--video_size`は生成するビデオのサイズで、高さと幅をその順番で指定します。
+-   `--prompt`: 生成用のプロンプトです。
 -  必要に応じて`--latent_window_size`引数（デフォルト9）を指定できます（キャッシング時、学習時と一致させる必要があります）。
 - DiTのメモリ使用量を削減するために、`--fp8_scaled`オプションを指定可能です。品質はやや低下する可能性があります。またText Encoder 1のメモリ使用量を削減するために、`--fp8_llm`オプションを指定可能です。DiT用に`--fp8`単独のオプションも用意されていますが、`--fp8_scaled`の方が品質が良い可能性があります。
 -  LoRAの読み込みオプション（`--lora_weight`、`--lora_multiplier`、`--include_patterns`、`--exclude_patterns`）が利用可能です。LyCORISもサポートされています。
@@ -275,6 +305,25 @@ HunyuanVideoの推論との主な違いは次のとおりです。
 -  `--sample_solver`（デフォルト`unipc`）は利用可能ですが、`unipc`のみが実装されています。
 -  `--save_merged_model`オプションは、LoRAの重みをマージした後にDiTモデルを保存するためのオプションです。これを指定すると推論はスキップされます。
 -  バッチモードとインタラクティブモード（`--from_file`、`--interactive`）はFramePack生成には**まだ実装されていません**。
+
+**セクション別プロンプト:**
+
+`--prompt`引数を使用して、ビデオの異なるセクションに異なるプロンプトを指定できるようになりました。セクションを区切るには`;;;`を使用し、開始セクションインデックスの後にコロンを付けて指定します（例：`0:プロンプトA;;;3:プロンプトB`）。各定義は`インデックス:プロンプトテキスト`の形式である必要があります。
+
+*   `インデックス`には以下を指定できます：
+    *   非負の整数（例：`0`, `3`）：このセクションインデックスに対してプロンプトが適用されます。
+    *   負の整数（例：`-1`, `-2`）：最後からk番目のセクションにプロンプトが適用されます（例：`-1`は最後のセクション、`-2`は最後から2番目のセクション）。
+    *   範囲（例：`0-2`, `3-5`）：この範囲（両端を含む）内のすべてのセクションにプロンプトが適用されます。
+* インデックスが指定されていない部分は、インデックス`0`のプロンプトが適用されます。（例：`0:プロンプトA;;;-1:プロンプトB`なら、一番最後がプロンプトB、それ以外はプロンプトAになります。）
+    * 終端画像ガイダンスを使用する場合、この形式をお勧めします。
+*   ある部分にインデックスが指定されていない場合（例：`プロンプトA;;;3:プロンプトB`）、インデックス`0`として扱われます。
+
+
+ **終端画像ガイダンス**
+ 
+ `--end_image_path`を指定して、生成を特定の最終フレームに誘導します。これは非常に実験的な機能です。
+
+-   `--end_image_path` :  最終フレームのターゲットとして使用する画像へのパス。最後のセクションの生成プロセスは、この画像を初期画像として生成されます。これは最終フレームへの遷移の自然さに影響を与える可能性があります。
 
 `--video_size`、`--fps`、`--infer_steps`、`--save_path`、`--output_type`、`--seed`、`--attn_mode`、`--blocks_to_swap`、`--vae_chunk_size`、`--vae_spatial_tile_sample_min_size`などの他のオプションは、HunyuanVideo/Wan2.1と同様に機能します。
 

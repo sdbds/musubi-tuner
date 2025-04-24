@@ -29,6 +29,7 @@ def encode_and_save_batch(
     image_encoder: SiglipVisionModel,
     batch: List[ItemInfo],
     latent_window_size: int,
+    vanilla_sampling: bool = False,
 ):
     """Encode a batch of original RGB videos and save FramePack section caches."""
 
@@ -46,24 +47,32 @@ def encode_and_save_batch(
         item = batch[0]  # other items should have the same size
         raise ValueError(f"Image or video size too small: {item.item_key} and {len(batch) - 1} more, size: {item.original_size}")
 
+    # calculate latent frame count from original frame count (4n+1)
     latent_f = (batch[0].frame_count - 1) // 4 + 1
+
+    # calculate the total number of sections (excluding the first frame, divided by window size)
     total_latent_sections = math.floor((latent_f - 1) / latent_window_size)
     if total_latent_sections < 1:
-        raise ValueError(f"Not enough frames for FramePack: {batch[0].frame_count}, minimum: {latent_window_size*4+1}")
+        min_frames_needed = latent_window_size * 4 + 1
+        raise ValueError(
+            f"Not enough frames for FramePack: {batch[0].frame_count} frames ({latent_f} latent frames), minimum required: {min_frames_needed} frames ({latent_window_size+1} latent frames)"
+        )
 
-    latent_f = total_latent_sections * latent_window_size + 1
-    frame_count = (latent_f - 1) * 4 + 1
-    if frame_count != batch[0].frame_count:
-        logger.info(f"Frame count mismatch: {frame_count} != {batch[0].frame_count}, trimming to {frame_count}")
-        contents = contents[:, :, :frame_count, :, :]
+    # 実際に処理する潜在変数のフレーム数 (セクション境界に合わせる)
+    latent_f_aligned = total_latent_sections * latent_window_size + 1
+    # 実際に処理する元のフレーム数
+    frame_count_aligned = (latent_f_aligned - 1) * 4 + 1
+    if frame_count_aligned != batch[0].frame_count:
+        logger.info(
+            f"Frame count mismatch: required={frame_count_aligned} != actual={batch[0].frame_count}, trimming to {frame_count_aligned}"
+        )
+        contents = contents[:, :, :frame_count_aligned, :, :]
 
-    latent_paddings = list(reversed(range(total_latent_sections)))
-    if total_latent_sections > 4:
-        latent_paddings = [3] + [2] * (total_latent_sections - 3) + [1, 0]
+    latent_f = latent_f_aligned  # Update to the aligned value
 
     # VAE encode (list of tensor -> stack)
     latents = hunyuan.vae_encode(contents, vae)  # include scaling factor
-    latents = latents.to("cpu")
+    latents = latents.to("cpu")  # (B, C, latent_f, H/8, W/8)
 
     # Vision encoding per‑item (once)
     images = np.stack([item.content[0] for item in batch], axis=0)  # B, H, W, C
@@ -75,67 +84,191 @@ def encode_and_save_batch(
             image_encoder_output = hf_clip_vision_encode(image, feature_extractor, image_encoder)
             image_embeddings.append(image_encoder_output.last_hidden_state)
     image_embeddings = torch.cat(image_embeddings, dim=0)  # B, LEN, 1152
+    image_embeddings = image_embeddings.to("cpu")  # Save memory
 
-    for b, item in enumerate(batch):
-        original_latent_cache_path = item.latent_cache_path
-        video_lat = latents[b : b + 1]  # keep batch dim, B, C, F, H, W
+    if not vanilla_sampling:
+        # padding is reversed for inference (future to past)
+        latent_paddings = list(reversed(range(total_latent_sections)))
+        # Note: The padding trick for inference. See the paper for details.
+        if total_latent_sections > 4:
+            latent_paddings = [3] + [2] * (total_latent_sections - 3) + [1, 0]
 
-        # emulate inferece step
-        history_latents = torch.zeros((1, 16, 1 + 2 + 16, height // 8, width // 8), dtype=video_lat.dtype)
-        latent_f_index = latent_f - latent_window_size
-        section_index = total_latent_sections - 1
-        for latent_padding in latent_paddings:
-            is_last_section = section_index == 0
-            latent_padding_size = latent_padding * latent_window_size
+        for b, item in enumerate(batch):
+            original_latent_cache_path = item.latent_cache_path
+            video_lat = latents[b : b + 1]  # keep batch dim, 1, C, F, H, W
 
-            indices = torch.arange(0, sum([1, latent_padding_size, latent_window_size, 1, 2, 16])).unsqueeze(0)
-            (
-                clean_latent_indices_pre,
-                blank_indices,
-                latent_indices,
-                clean_latent_indices_post,
-                clean_latent_2x_indices,
-                clean_latent_4x_indices,
-            ) = indices.split([1, latent_padding_size, latent_window_size, 1, 2, 16], dim=1)
-            clean_latent_indices = torch.cat([clean_latent_indices_pre, clean_latent_indices_post], dim=1)
+            # emulate inference step (history latents)
+            # Note: In inference, history_latents stores *generated* future latents.
+            # Here, for caching, we just need its shape and type for clean_* tensors.
+            # The actual content doesn't matter much as clean_* will be overwritten.
+            history_latents = torch.zeros(
+                (1, video_lat.shape[1], 1 + 2 + 16, video_lat.shape[3], video_lat.shape[4]), dtype=video_lat.dtype
+            )  # C=16 for HY
 
-            clean_latents_pre = video_lat[:, :, 0:1, :, :].to(history_latents)
-            clean_latents_post, clean_latents_2x, clean_latents_4x = history_latents[:, :, : 1 + 2 + 16, :, :].split(
-                [1, 2, 16], dim=2
-            )
-            clean_latents = torch.cat([clean_latents_pre, clean_latents_post], dim=2)
+            latent_f_index = latent_f - latent_window_size  # Start from the last section
+            section_index = total_latent_sections - 1
 
-            target_latents = video_lat[:, :, latent_f_index : latent_f_index + latent_window_size, :, :]
+            for latent_padding in latent_paddings:
+                is_last_section = section_index == 0  # the last section in inference order == the first section in time
+                latent_padding_size = latent_padding * latent_window_size
+                if is_last_section:
+                    assert latent_f_index == 1, "Last section should be starting from frame 1"
 
-            # save cache (file path is inside item.latent_cache_path pattern), remove batch dim
-            item.latent_cache_path = append_section_idx_to_latent_cache_path(original_latent_cache_path, section_index)
-            save_latent_cache_framepack(
-                item_info=item,
-                latent=target_latents.squeeze(0),
-                latent_indices=latent_indices.squeeze(0),
-                clean_latents=clean_latents.squeeze(0),
-                clean_latent_indices=clean_latent_indices.squeeze(0),
-                clean_latents_2x=clean_latents_2x.squeeze(0),
-                clean_latent_2x_indices=clean_latent_2x_indices.squeeze(0),
-                clean_latents_4x=clean_latents_4x.squeeze(0),
-                clean_latent_4x_indices=clean_latent_4x_indices.squeeze(0),
-                image_embeddings=image_embeddings[b],
-            )
+                # indices generation (same as inference)
+                indices = torch.arange(0, sum([1, latent_padding_size, latent_window_size, 1, 2, 16])).unsqueeze(0)
+                (
+                    clean_latent_indices_pre,  # Index for start_latent
+                    blank_indices,  # Indices for padding (future context in inference)
+                    latent_indices,  # Indices for the target latents to predict
+                    clean_latent_indices_post,  # Index for the most recent history frame
+                    clean_latent_2x_indices,  # Indices for the next 2 history frames
+                    clean_latent_4x_indices,  # Indices for the next 16 history frames
+                ) = indices.split([1, latent_padding_size, latent_window_size, 1, 2, 16], dim=1)
 
-            section_index -= 1
-            latent_f_index -= latent_window_size
+                # Indices for clean_latents (start + recent history)
+                clean_latent_indices = torch.cat([clean_latent_indices_pre, clean_latent_indices_post], dim=1)
 
-        if is_last_section:
-            generated_latents = video_lat[:, :, : latent_window_size + 1, :, :]
-        else:
-            generated_latents = target_latents
+                # clean latents preparation (emulating inference)
+                clean_latents_pre = video_lat[:, :, 0:1, :, :]  # Always the first frame (start_latent)
+                clean_latents_post, clean_latents_2x, clean_latents_4x = history_latents[:, :, : 1 + 2 + 16, :, :].split(
+                    [1, 2, 16], dim=2
+                )
+                clean_latents = torch.cat([clean_latents_pre, clean_latents_post], dim=2)  # Combine start frame + placeholder
 
-        history_latents = torch.cat([generated_latents, history_latents], dim=2)
+                # Target latents for this section (ground truth)
+                target_latents = video_lat[:, :, latent_f_index : latent_f_index + latent_window_size, :, :]
+
+                # save cache (file path is inside item.latent_cache_path pattern), remove batch dim
+                item.latent_cache_path = append_section_idx_to_latent_cache_path(original_latent_cache_path, section_index)
+                save_latent_cache_framepack(
+                    item_info=item,
+                    latent=target_latents.squeeze(0),  # Ground truth for this section
+                    latent_indices=latent_indices.squeeze(0),  # Indices for the ground truth section
+                    clean_latents=clean_latents.squeeze(0),  # Start frame + history placeholder
+                    clean_latent_indices=clean_latent_indices.squeeze(0),  # Indices for start frame + history placeholder
+                    clean_latents_2x=clean_latents_2x.squeeze(0),  # History placeholder
+                    clean_latent_2x_indices=clean_latent_2x_indices.squeeze(0),  # Indices for history placeholder
+                    clean_latents_4x=clean_latents_4x.squeeze(0),  # History placeholder
+                    clean_latent_4x_indices=clean_latent_4x_indices.squeeze(0),  # Indices for history placeholder
+                    image_embeddings=image_embeddings[b],
+                )
+
+                if is_last_section:  # If this was the first section generated in inference (time=0)
+                    # History gets the start frame + the generated first section
+                    generated_latents_for_history = video_lat[:, :, : latent_window_size + 1, :, :]
+                else:
+                    # History gets the generated current section
+                    generated_latents_for_history = target_latents  # Use true latents as stand-in for generated
+
+                history_latents = torch.cat([generated_latents_for_history, history_latents], dim=2)
+
+                section_index -= 1
+                latent_f_index -= latent_window_size
+
+    else:
+        # Vanilla Sampling Logic
+        for b, item in enumerate(batch):
+            original_latent_cache_path = item.latent_cache_path
+            video_lat = latents[b : b + 1]  # Keep batch dim: 1, C, F_aligned, H, W
+            img_emb = image_embeddings[b]  # LEN, 1152
+
+            for section_index in range(total_latent_sections):
+                target_start_f = section_index * latent_window_size + 1
+                target_end_f = target_start_f + latent_window_size
+                target_latents = video_lat[:, :, target_start_f:target_end_f, :, :]
+
+                # Clean latents preparation (Vanilla)
+
+                # Get clean_latents_pre (Always frame 0)
+                clean_latents_pre = video_lat[:, :, 0:1, :, :]
+
+                # Frame indices for past context (relative to anchor)
+                idx_post_frame = target_start_f - 1  # Frame index of the last frame of section i-1
+                idx_2x_frame_1 = idx_post_frame - 1
+                idx_2x_frame_2 = idx_post_frame - 2
+                idx_4x_start_frame = idx_post_frame - idx_2x_frame_2 - 16
+
+                # Helper function to get frame or zeros if index is out of bounds
+                def get_frame_or_zeros(frame_idx):
+                    if frame_idx >= 0:
+                        # Ensure frame_idx doesn't exceed the actual length
+                        if frame_idx < video_lat.shape[2]:
+                            return video_lat[:, :, frame_idx : frame_idx + 1, :, :]
+                        else:
+                            # This case should ideally not happen if indexing is correct
+                            logger.warning(
+                                f"Attempted to access frame {frame_idx} beyond latent length {video_lat.shape[2]}. Returning zeros."
+                            )
+                            return torch.zeros_like(clean_latents_pre)
+                    else:
+                        return torch.zeros_like(clean_latents_pre)
+
+                # Get clean_latents_post (frame at idx_post_frame)
+                clean_latents_post = get_frame_or_zeros(idx_post_frame)
+
+                # Get clean_latents_2x (frames at idx_2x_frame_1, idx_2x_frame_2)
+                frame_2x_1 = get_frame_or_zeros(idx_2x_frame_1)
+                frame_2x_2 = get_frame_or_zeros(idx_2x_frame_2)
+                clean_latents_2x = torch.cat(
+                    [frame_2x_2, frame_2x_1], dim=2
+                )  # Order might matter (older first?) - assuming order [..., t-2, t-1]
+
+                # Get clean_latents_4x (16 frames ending at idx_4x_start_frame)
+                clean_latents_4x_list = []
+                for i in range(16):
+                    frame_idx = idx_4x_start_frame + i
+                    clean_latents_4x_list.append(get_frame_or_zeros(frame_idx))
+                clean_latents_4x = torch.cat(clean_latents_4x_list, dim=2)  # Ensure correct temporal order [..., t-18, ..., t-3]
+
+                # Combine pre and post for the main clean_latents input
+                clean_latents = torch.cat([clean_latents_pre, clean_latents_post], dim=2)  # (1, C, 2, H, W)
+
+                # Indices generation (Vanilla with Offset)
+                vanilla_offset_size = section_index * latent_window_size  # Offset based on section index
+                # print(f"Vanilla offset size: {vanilla_offset_size}")
+
+                # Calculate total length including the offset
+                total_length = sum([1, vanilla_offset_size, latent_window_size, 1, 2, 16])
+                indices = torch.arange(0, total_length).unsqueeze(0)
+
+                # Split indices including the offset part
+                (
+                    clean_latent_indices_pre,  # Index for frame 0
+                    past_offset_indices,  # Indices representing the time offset *before* section i
+                    latent_indices,  # Indices for the target latents (section i)
+                    clean_latent_indices_post,  # Index for frame from end of section i-1
+                    clean_latent_2x_indices,  # Indices for frames from end of section i-2, i-3
+                    clean_latent_4x_indices,  # Indices for the 16 past frames
+                ) = indices.split([1, vanilla_offset_size, latent_window_size, 1, 2, 16], dim=1)
+
+                clean_latent_indices = torch.cat([clean_latent_indices_pre, clean_latent_indices_post], dim=1)
+
+                # Save cache
+                item.latent_cache_path = append_section_idx_to_latent_cache_path(original_latent_cache_path, section_index)
+                save_latent_cache_framepack(
+                    item_info=item,
+                    latent=target_latents.squeeze(0),
+                    latent_indices=latent_indices.squeeze(0),  # Indices for target section i
+                    clean_latents=clean_latents.squeeze(0),  # Past clean frames
+                    clean_latent_indices=clean_latent_indices.squeeze(0),  # Indices for clean_latents_pre/post
+                    clean_latents_2x=clean_latents_2x.squeeze(0),  # Past clean frames (2x)
+                    clean_latent_2x_indices=clean_latent_2x_indices.squeeze(0),  # Indices for clean_latents_2x
+                    clean_latents_4x=clean_latents_4x.squeeze(0),  # Past clean frames (4x)
+                    clean_latent_4x_indices=clean_latent_4x_indices.squeeze(0),  # Indices for clean_latents_4x
+                    image_embeddings=img_emb,
+                    # Note: We don't explicitly save past_offset_indices,
+                    # but its size influences the absolute values in other indices.
+                )
 
 
 def framepack_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--image_encoder", type=str, required=True, help="Image encoder (CLIP) checkpoint path or directory")
     parser.add_argument("--latent_window_size", type=int, default=9, help="FramePack latent window size (default 9)")
+    parser.add_argument(
+        "--vanilla_sampling",
+        action="store_true",
+        help="Generate cache for vanilla (autoregressive) sampling instead of inference emulation",
+    )
     return parser
 
 
@@ -169,9 +302,11 @@ def main(args: argparse.Namespace):
     image_encoder.eval()
     image_encoder.to(device)
 
+    logger.info(f"Cache generation mode: {'Vanilla Sampling' if args.vanilla_sampling else 'Inference Emulation'}")
+
     # encoding closure
     def encode(batch: List[ItemInfo]):
-        encode_and_save_batch(vae, feature_extractor, image_encoder, batch, args.latent_window_size)
+        encode_and_save_batch(vae, feature_extractor, image_encoder, batch, args.latent_window_size, args.vanilla_sampling)
 
     # reuse core loop from cache_latents with no change
     encode_datasets_framepack(datasets, encode, args)
