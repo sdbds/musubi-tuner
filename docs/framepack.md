@@ -260,26 +260,6 @@ Key differences from HunyuanVideo inference:
 -   `--save_merged_model` option is available to save the DiT model after merging LoRA weights. Inference is skipped if this is specified.
 -   Batch and interactive modes (`--from_file`, `--interactive`) are **not yet implemented** for FramePack generation.
 
-**Section-specific Prompts**
-
-You can now provide different prompts for different sections of the video using the `--prompt` argument. Use `;;;` to separate sections and specify the starting section index followed by a colon (e.g., `0:prompt A;;;3:prompt B`). Each definition should be in the format `INDEX:PROMPT_TEXT`.
-
-*   `INDEX` can be:
-    *   A non-negative integer (e.g., `0`, `3`): The prompt applies to this section index.
-    *   A negative integer (e.g., `-1`, `-2`): The prompt applies to the k-th section from the end (e.g., `-1` for the last section, `-2` for the second to last).
-    *   A range (e.g., `0-2`, `3-5`): The prompt applies to all sections within this inclusive range.
-* If some parts are not specified with an index, the prompt associated with index `0` will be used (e.g., `0:prompt A;;;-1:prompt B` means the last section is prompt B, and all others are prompt A).
-    * This can be used with the end image guidance feature to specify a different prompt for the last section.
-*   If no index is specified for a part (e.g., `prompt A;;;3:prompt B`), it defaults to index `0`.
-*   Example 1: `"0:A cat walks;;;3:The cat sits down;;;-1:The cat sleeps"`
-*   Example 2: `"0:A cat turns around;;;-1:A cat walks towards the camera"`
-
-**End Image Guidance**
-
-Specify an `--end_image_path` to guide the generation towards a specific final frame. This is highly experimental.
-
-*  `--end_image_path` : Path to an image to be used as a target for the final frame. The generation process for the last section will be conditioned on this image's VAE latent and image encoder embedding. This may affect the naturalness of the transition into the final frames.
-
 Other options like `--video_size`, `--fps`, `--infer_steps`, `--save_path`, `--output_type`, `--seed`, `--attn_mode`, `--blocks_to_swap`, `--vae_chunk_size`, `--vae_spatial_tile_sample_min_size` function similarly to HunyuanVideo/Wan2.1 where applicable.
 
 The maximum value for `--blocks_to_swap` is 38.
@@ -306,26 +286,154 @@ HunyuanVideoの推論との主な違いは次のとおりです。
 -  `--save_merged_model`オプションは、LoRAの重みをマージした後にDiTモデルを保存するためのオプションです。これを指定すると推論はスキップされます。
 -  バッチモードとインタラクティブモード（`--from_file`、`--interactive`）はFramePack生成には**まだ実装されていません**。
 
-**セクション別プロンプト:**
-
-`--prompt`引数を使用して、ビデオの異なるセクションに異なるプロンプトを指定できるようになりました。セクションを区切るには`;;;`を使用し、開始セクションインデックスの後にコロンを付けて指定します（例：`0:プロンプトA;;;3:プロンプトB`）。各定義は`インデックス:プロンプトテキスト`の形式である必要があります。
-
-*   `インデックス`には以下を指定できます：
-    *   非負の整数（例：`0`, `3`）：このセクションインデックスに対してプロンプトが適用されます。
-    *   負の整数（例：`-1`, `-2`）：最後からk番目のセクションにプロンプトが適用されます（例：`-1`は最後のセクション、`-2`は最後から2番目のセクション）。
-    *   範囲（例：`0-2`, `3-5`）：この範囲（両端を含む）内のすべてのセクションにプロンプトが適用されます。
-* インデックスが指定されていない部分は、インデックス`0`のプロンプトが適用されます。（例：`0:プロンプトA;;;-1:プロンプトB`なら、一番最後がプロンプトB、それ以外はプロンプトAになります。）
-    * 終端画像ガイダンスを使用する場合、この形式をお勧めします。
-*   ある部分にインデックスが指定されていない場合（例：`プロンプトA;;;3:プロンプトB`）、インデックス`0`として扱われます。
-
-
- **終端画像ガイダンス**
- 
- `--end_image_path`を指定して、生成を特定の最終フレームに誘導します。これは非常に実験的な機能です。
-
--   `--end_image_path` :  最終フレームのターゲットとして使用する画像へのパス。最後のセクションの生成プロセスは、この画像を初期画像として生成されます。これは最終フレームへの遷移の自然さに影響を与える可能性があります。
-
 `--video_size`、`--fps`、`--infer_steps`、`--save_path`、`--output_type`、`--seed`、`--attn_mode`、`--blocks_to_swap`、`--vae_chunk_size`、`--vae_spatial_tile_sample_min_size`などの他のオプションは、HunyuanVideo/Wan2.1と同様に機能します。
 
 `--blocks_to_swap`の最大値は38です。
+</details>
+
+## Advanced Video Control Features (Experimental) / 高度なビデオ制御機能（実験的）
+
+This section describes experimental features added to the `fpack_generate_video.py` script to provide finer control over the generated video content, particularly useful for longer videos or sequences requiring specific transitions or states. These features leverage the Inverted Anti-drifting sampling method inherent to FramePack.
+
+### **1. End Image Guidance (`--end_image_path`)**
+
+*   **Functionality:** Guides the generation process to make the final frame(s) of the video resemble a specified target image.
+*   **Usage:** `--end_image_path <path_to_image_file>`
+*   **Mechanism:** The provided image is encoded using the VAE. This latent representation is used as a target or starting point during the generation of the final video section (which is the first step in Inverted Anti-drifting).
+*   **Use Cases:** Defining a clear ending for the video, such as a character striking a specific pose or a product appearing in a close-up.
+
+### **2. Section Start Image Guidance (`--image_path` Extended Format)**
+
+*   **Functionality:** Guides specific sections within the video to start with a visual state close to a provided image.
+*   **Usage:** `--image_path "SECTION_SPEC:path/to/image.jpg;;;SECTION_SPEC:path/to/another.jpg;;;..."`
+    *   `SECTION_SPEC`: Defines the target section(s). Rules:
+        *   `0`: The first section of the video (generated last in Inverted Anti-drifting).
+        *   `-1`: The last section of the video (generated first).
+        *   `N` (non-negative integer): The N-th section (0-indexed).
+        *   `-N` (negative integer): The N-th section from the end.
+        *   `S-E` (range, e.g., `0-2`): Applies the same image guidance to sections S through E (inclusive).
+    *   Use `;;;` as a separator between definitions.
+    *   If no image is specified for a section, generation proceeds based on the prompt and preceding (future time) section context.
+*   **Mechanism:** When generating a specific section, if a corresponding start image is provided, its VAE latent representation is strongly referenced as the "initial state" for that section. This guides the beginning of the section towards the specified image while attempting to maintain temporal consistency with the subsequent (already generated) section.
+*   **Use Cases:** Defining clear starting points for scene changes, specifying character poses or attire at the beginning of certain sections.
+
+### **3. Section-Specific Prompts (`--prompt` Extended Format)**
+
+*   **Functionality:** Allows providing different text prompts for different sections of the video, enabling more granular control over the narrative or action flow.
+*   **Usage:** `--prompt "SECTION_SPEC:Prompt text for section(s);;;SECTION_SPEC:Another prompt;;;..."`
+    *   `SECTION_SPEC`: Uses the same rules as `--image_path`.
+    *   Use `;;;` as a separator.
+    *   If a prompt for a specific section is not provided, the prompt associated with index `0` (or the closest specified applicable prompt) is typically used. Check behavior if defaults are critical.
+*   **Mechanism:** During the generation of each section, the corresponding section-specific prompt is used as the primary textual guidance for the model.
+*   **Prompt Content Recommendation:**
+    *   Recall that FramePack uses Inverted Anti-drifting and references future context.
+    *   It is recommended to describe "**the main content or state change that should occur in the current section, *and* the subsequent events or states leading towards the end of the video**" in the prompt for each section.
+    *   Including the content of subsequent sections in the current section's prompt helps the model maintain context and overall coherence.
+    *   Example: For section 1, the prompt might describe what happens in section 1 *and* briefly summarize section 2 (and beyond).
+    *   However, based on observations (e.g., the `latent_paddings` comment), the model's ability to perfectly utilize very long-term context might be limited. Experimentation is key. Describing just the "goal for the current section" might also work. Start by trying the "section and onwards" approach.
+*   **Use Cases:** Describing evolving storylines, gradual changes in character actions or emotions, step-by-step processes over time.
+
+### **Combined Usage Example**
+
+Generating a 3-section video of "A dog runs towards a thrown ball, catches it, and runs back":
+
+```bash
+python fpack_generate_video.py \
+ --prompt "0:A dog runs towards a thrown ball, catches it, and runs back;;;1:The dog catches the ball and then runs back towards the viewer;;;2:The dog runs back towards the viewer holding the ball" \
+ --image_path "0:./img_start_running.png;;;1:./img_catching.png;;;2:./img_running_back.png" \
+ --end_image_path ./img_returned.png \
+ --save_path ./output \
+ # ... other arguments
+```
+
+*   **Generation Order:** Section 2 -> Section 1 -> Section 0
+*   **Generating Section 2:**
+    *   Prompt: "The dog runs back towards the viewer holding the ball"
+    *   Start Image: `./img_running_back.png`
+    *   End Image: `./img_returned.png` (Initial target)
+*   **Generating Section 1:**
+    *   Prompt: "The dog catches the ball and then runs back towards the viewer"
+    *   Start Image: `./img_catching.png`
+    *   Future Context: Generated Section 2 latent
+*   **Generating Section 0:**
+    *   Prompt: "A dog runs towards a thrown ball, catches it, and runs back"
+    *   Start Image: `./img_start_running.png`
+    *   Future Context: Generated Section 1 & 2 latents
+
+### **Important Considerations**
+
+*   **Inverted Generation:** Always remember that generation proceeds from the end of the video towards the beginning. Section `-1` (the last section, `2` in the example) is generated first.
+*   **Continuity vs. Guidance:** While start image guidance is powerful, drastically different images between sections might lead to unnatural transitions. Balance guidance strength with the need for smooth flow.
+*   **Prompt Optimization:** The prompt content recommendation is a starting point. Fine-tune prompts based on observed model behavior and desired output quality.
+
+<details>
+<summary>日本語</summary>
+
+### **高度な動画制御機能（実験的）**
+
+このセクションでは、`fpack_generate_video.py` スクリプトに追加された実験的な機能について説明します。これらの機能は、生成される動画の内容をより詳細に制御するためのもので、特に長い動画や特定の遷移・状態が必要なシーケンスに役立ちます。これらの機能は、FramePack固有のInverted Anti-driftingサンプリング方式を活用しています。
+
+#### **1. 終端画像ガイダンス (`--end_image_path`)**
+
+*   **機能:** 動画の最後のフレーム（群）を指定したターゲット画像に近づけるように生成を誘導します。
+*   **書式:** `--end_image_path <画像ファイルパス>`
+*   **動作:** 指定された画像はVAEでエンコードされ、その潜在表現が動画の最終セクション（Inverted Anti-driftingでは最初に生成される）の生成時の目標または開始点として使用されます。
+*   **用途:** キャラクターが特定のポーズで終わる、特定の商品がクローズアップで終わるなど、動画の結末を明確に定義する場合。
+
+#### **2. セクション開始画像ガイダンス (`--image_path` 拡張書式)**
+
+*   **機能:** 動画内の特定のセクションが、指定された画像に近い視覚状態から始まるように誘導します。
+*   **書式:** `--image_path "セクション指定子:画像パス;;;セクション指定子:別の画像パス;;;..."`
+    *   `セクション指定子`: 対象セクションを定義します。ルール：
+        *   `0`: 動画の最初のセクション（Inverted Anti-driftingでは最後に生成）。
+        *   `-1`: 動画の最後のセクション（最初に生成）。
+        *   `N`（非負整数）: N番目のセクション（0始まり）。
+        *   `-N`（負整数）: 最後からN番目のセクション。
+        *   `S-E`（範囲, 例:`0-2`）: セクションSからE（両端含む）に同じ画像を適用。
+    *   区切り文字は `;;;` です。
+    *   セクションに画像が指定されていない場合、プロンプトと後続（未来時刻）セクションのコンテキストに基づいて生成されます。
+*   **動作:** 特定セクションの生成時、対応する開始画像が指定されていれば、そのVAE潜在表現がそのセクションの「初期状態」として強く参照されます。これにより、後続（生成済み）セクションとの時間的連続性を維持しようとしつつ、セクションの始まりを指定画像に近づけます。
+*   **用途:** シーン変更の起点を明確にする、特定のセクション開始時のキャラクターのポーズや服装を指定するなど。
+
+#### **3. セクション別プロンプト (`--prompt` 拡張書式)**
+
+*   **機能:** 動画のセクションごとに異なるテキストプロンプトを与え、物語やアクションの流れをより細かく指示できます。
+*   **書式:** `--prompt "セクション指定子:プロンプトテキスト;;;セクション指定子:別のプロンプト;;;..."`
+    *   `セクション指定子`: `--image_path` と同じルールです。
+    *   区切り文字は `;;;` です。
+    *   特定セクションのプロンプトがない場合、通常はインデックス`0`に関連付けられたプロンプト（または最も近い適用可能な指定プロンプト）が使用されます。デフォルトの挙動が重要な場合は確認してください。
+*   **動作:** 各セクションの生成時、対応するセクション別プロンプトがモデルへの主要なテキスト指示として使用されます。
+*   **プロンプト内容の推奨:**
+    *   FramePackはInverted Anti-driftingを採用し、未来のコンテキストを参照することを思い出してください。
+    *   各セクションのプロンプトには、「**現在のセクションで起こるべき主要な内容や状態変化、*および*それに続く動画の終端までの内容**」を記述することを推奨します。
+    *   現在のセクションのプロンプトに後続セクションの内容を含めることで、モデルが全体的な文脈を把握し、一貫性を保つのに役立ちます。
+    *   例：セクション1のプロンプトには、セクション1の内容 *と* セクション2（以降）の簡単な要約を記述します。
+    *   ただし、モデルの長期コンテキスト完全利用能力には限界がある可能性も示唆されています（例：`latent_paddings`コメント）。実験が鍵となります。「現在のセクションの目標」のみを記述するだけでも機能する場合があります。まずは「セクション以降」アプローチを試すことをお勧めします。
+*   **用途:** 時間経過に伴うストーリーの変化、キャラクターの行動や感情の段階的な変化、段階的なプロセスなどを記述する場合。
+
+#### **組み合わせ使用例**
+
+「投げられたボールに向かって犬が走り、それを捕まえ、走って戻ってくる」3セクション動画の生成：
+（コマンド記述例は英語版を参考にしてください）
+
+*   **生成順序:** セクション2 → セクション1 → セクション0
+*   **セクション2生成時:**
+    *   プロンプト: "犬がボールを咥えてこちらに向かって走ってくる"
+    *   開始画像: `./img_running_back.png`
+    *   終端画像: `./img_returned.png` （初期目標）
+*   **セクション1生成時:**
+    *   プロンプト: "犬がボールを捕まえ、その後こちらに向かって走ってくる"
+    *   開始画像: `./img_catching.png`
+    *   未来コンテキスト: 生成済みセクション2の潜在表現
+*   **セクション0生成時:**
+    *   プロンプト: "犬が投げられたボールに向かって走り、それを捕まえ、走って戻ってくる"
+    *   開始画像: `./img_start_running.png`
+    *   未来コンテキスト: 生成済みセクション1 & 2の潜在表現
+
+#### **重要な考慮事項**
+
+*   **逆順生成:** 生成は動画の終わりから始まりに向かって進むことを常に意識してください。セクション`-1`（最後のセクション、上の例では `2`）が最初に生成されます。
+*   **連続性とガイダンスのバランス:** 開始画像ガイダンスは強力ですが、セクション間で画像が大きく異なると、遷移が不自然になる可能性があります。ガイダンスの強さとスムーズな流れの必要性のバランスを取ってください。
+*   **プロンプトの最適化:** 推奨されるプロンプト内容はあくまでも参考です。モデルの観察された挙動と望ましい出力品質に基づいてプロンプトを微調整してください。
+
 </details>

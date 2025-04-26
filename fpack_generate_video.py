@@ -115,7 +115,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--guidance_rescale", type=float, default=0.0, help="CFG Re-scale, default is 0.0. Should not change.")
     # parser.add_argument("--video_path", type=str, default=None, help="path to video for video2video inference")
-    parser.add_argument("--image_path", type=str, default=None, help="path to image for image2video inference")
+    parser.add_argument(
+        "--image_path",
+        type=str,
+        default=None,
+        help="path to image for image2video inference. If `;;;` is used, it will be used as section images. The notation is same as `--prompt`.",
+    )
     parser.add_argument("--end_image_path", type=str, default=None, help="path to end image for image2video inference")
     # parser.add_argument(
     #     "--control_path",
@@ -414,7 +419,7 @@ def decode_latent(
         history_pixels = hunyuan.vae_decode(latent, vae).cpu()
     vae.to("cpu")
 
-    print(f"Decoded. Pixel shape {history_pixels.shape}")
+    logger.info(f"Decoded. Pixel shape {history_pixels.shape}")
     return history_pixels[0]  # remove batch dimension
 
 
@@ -441,6 +446,44 @@ def prepare_i2v_inputs(
 
     height, width, video_seconds = check_inputs(args)
 
+    # define parsing function
+    def parse_section_strings(input_string: str) -> dict[int, str]:
+        section_strings = {}
+        if ";;;" in input_string:
+            split_section_strings = input_string.split(";;;")
+            for section_str in split_section_strings:
+                if ":" not in section_str:
+                    start = end = 0
+                    section_str = section_str.strip()
+                else:
+                    index_str, section_str = section_str.split(":", 1)
+                    index_str = index_str.strip()
+                    section_str = section_str.strip()
+
+                    m = re.match(r"^(-?\d+)(-\d+)?$", index_str)
+                    if m:
+                        start = int(m.group(1))
+                        end = int(m.group(2)[1:]) if m.group(2) is not None else start
+                    else:
+                        start = end = 0
+                        section_str = section_str.strip()
+                for i in range(start, end + 1):
+                    section_strings[i] = section_str
+        else:
+            section_strings[0] = input_string
+
+        # assert 0 in section_prompts, "Section prompts must contain section 0"
+        if 0 not in section_strings:
+            # use smallest section index. prefer positive index over negative index
+            # if all section indices are negative, use the smallest negative index
+            indices = list(section_strings.keys())
+            if all(i < 0 for i in indices):
+                section_index = min(indices)
+            else:
+                section_index = min(i for i in indices if i >= 0)
+            section_strings[0] = section_strings[section_index]
+        return section_strings
+
     # prepare image
     def preprocess_image(image_path: str):
         image = Image.open(image_path).convert("RGB")
@@ -452,7 +495,13 @@ def prepare_i2v_inputs(
         image_tensor = image_tensor.permute(2, 0, 1)[None, :, None]  # HWC -> CHW -> NCFHW, N=1, C=3, F=1
         return image_tensor, image_np
 
-    img_tensor, img_np = preprocess_image(args.image_path)
+    section_image_paths = parse_section_strings(args.image_path)
+
+    section_images = {}
+    for index, image_path in section_image_paths.items():
+        img_tensor, img_np = preprocess_image(image_path)
+        section_images[index] = (img_tensor, img_np)
+
     if args.end_image_path is not None:
         end_img_tensor, end_img_np = preprocess_image(args.end_image_path)
     else:
@@ -462,47 +511,13 @@ def prepare_i2v_inputs(
     n_prompt = args.negative_prompt if args.negative_prompt else ""
 
     if encoded_context is None:
+        # parse section prompts
+        section_prompts = parse_section_strings(args.prompt)
+
         # load text encoder
         tokenizer1, text_encoder1 = load_text_encoder1(args, args.fp8_llm, device)
         tokenizer2, text_encoder2 = load_text_encoder2(args)
         text_encoder2.to(device)
-
-        # parse section prompts
-        section_prompts = {}
-        if ";;;" in args.prompt:
-            section_prompt_strs = args.prompt.split(";;;")
-            for section_prompt_str in section_prompt_strs:
-                if ":" not in section_prompt_str:
-                    start = end = 0
-                    prompt_str = section_prompt_str.strip()
-                else:
-                    index_str, prompt_str = section_prompt_str.split(":", 1)
-                    index_str = index_str.strip()
-                    prompt_str = prompt_str.strip()
-
-                    m = re.match(r"^(-?\d+)(-\d+)?$", index_str)
-                    if m:
-                        start = int(m.group(1))
-                        end = int(m.group(2)[1:]) if m.group(2) is not None else start
-                    else:
-                        start = end = 0
-                        prompt_str = section_prompt_str.strip()
-                for i in range(start, end + 1):
-                    section_prompts[i] = prompt_str
-        else:
-            section_prompts[0] = args.prompt
-
-        # assert 0 in section_prompts, "Section prompts must contain section 0"
-        if 0 not in section_prompts:
-            # use smallest section index. prefer positive index over negative index
-            # if all section indices are negative, use the smallest negative index
-            indices = list(section_prompts.keys())
-            if all(i < 0 for i in indices):
-                section_index = min(indices)
-            else:
-                section_index = min(i for i in indices if i >= 0)
-            section_prompts[0] = section_prompts[section_index]
-        print(section_prompts)
 
         logger.info(f"Encoding prompt")
         llama_vecs = {}
@@ -541,16 +556,12 @@ def prepare_i2v_inputs(
         image_encoder.to(device)
 
         # encode image with image encoder
-        with torch.no_grad():
-            image_encoder_output = hf_clip_vision_encode(img_np, feature_extractor, image_encoder)
-        image_encoder_last_hidden_state = image_encoder_output.last_hidden_state.cpu()
-
-        if end_img_np is not None:
+        section_image_encoder_last_hidden_states = {}
+        for index, (img_tensor, img_np) in section_images.items():
             with torch.no_grad():
-                end_image_encoder_output = hf_clip_vision_encode(end_img_np, feature_extractor, image_encoder)
-            end_image_encoder_last_hidden_state = end_image_encoder_output.last_hidden_state.cpu()
-        else:
-            end_image_encoder_last_hidden_state = None
+                image_encoder_output = hf_clip_vision_encode(img_np, feature_extractor, image_encoder)
+            image_encoder_last_hidden_state = image_encoder_output.last_hidden_state.cpu()
+            section_image_encoder_last_hidden_states[index] = image_encoder_last_hidden_state
 
         # free image encoder and clean memory
         del image_encoder, feature_extractor
@@ -565,28 +576,23 @@ def prepare_i2v_inputs(
         clip_l_pooler_n = encoded_context_n["clip_l_pooler"]
         image_encoder_last_hidden_state = encoded_context["image_encoder_last_hidden_state"]
 
-    # # end frame image
-    # if args.end_image_path is not None:
-    #     end_img = Image.open(args.end_image_path).convert("RGB")
-    #     end_img_cv2 = np.array(end_img)  # PIL to numpy
-    # else:
-    #     end_img = None
-    #     end_img_cv2 = None
-    # has_end_image = end_img is not None
-
     # VAE encoding
     logger.info(f"Encoding image to latent space")
     vae.to(device)
-    start_latent = hunyuan.vae_encode(img_tensor, vae).cpu()
-    if end_img_tensor is not None:
-        end_latent = hunyuan.vae_encode(end_img_tensor, vae).cpu()
-    else:
-        end_latent = None
+
+    section_start_latents = {}
+    for index, (img_tensor, img_np) in section_images.items():
+        start_latent = hunyuan.vae_encode(img_tensor, vae).cpu()
+        section_start_latents[index] = start_latent
+
+    end_latent = hunyuan.vae_encode(end_img_tensor, vae).cpu() if end_img_tensor is not None else None
+
     vae.to("cpu")  # move VAE to CPU to save memory
     clean_memory_on_device(device)
 
     # prepare model input arguments
     arg_c = {}
+    arg_null = {}
     for index in llama_vecs.keys():
         llama_vec = llama_vecs[index]
         llama_attention_mask = llama_attention_masks[index]
@@ -595,8 +601,6 @@ def prepare_i2v_inputs(
             "llama_vec": llama_vec,
             "llama_attention_mask": llama_attention_mask,
             "clip_l_pooler": clip_l_pooler,
-            "image_encoder_last_hidden_state": image_encoder_last_hidden_state,
-            "end_image_encoder_last_hidden_state": end_image_encoder_last_hidden_state,
             "prompt": section_prompts[index],  # for debugging
         }
         arg_c[index] = arg_c_i
@@ -605,11 +609,16 @@ def prepare_i2v_inputs(
         "llama_vec": llama_vec_n,
         "llama_attention_mask": llama_attention_mask_n,
         "clip_l_pooler": clip_l_pooler_n,
-        "image_encoder_last_hidden_state": image_encoder_last_hidden_state,
-        "end_image_encoder_last_hidden_state": end_image_encoder_last_hidden_state,
     }
 
-    return height, width, video_seconds, start_latent, end_latent, arg_c, arg_null
+    arg_c_img = {}
+    for index in section_images.keys():
+        image_encoder_last_hidden_state = section_image_encoder_last_hidden_states[index]
+        start_latent = section_start_latents[index]
+        arg_c_img_i = {"image_encoder_last_hidden_state": image_encoder_last_hidden_state, "start_latent": start_latent}
+        arg_c_img[index] = arg_c_img_i
+
+    return height, width, video_seconds, arg_c, arg_null, arg_c_img, end_latent
 
 
 # def setup_scheduler(args: argparse.Namespace, config, device: torch.device) -> Tuple[Any, torch.Tensor]:
@@ -682,13 +691,13 @@ def generate(args: argparse.Namespace, gen_settings: GenerationSettings, shared_
         n_prompt = args.negative_prompt if args.negative_prompt else ""
         encoded_context_n = shared_models.get("encoded_contexts", {}).get(n_prompt)
 
-        height, width, video_seconds, start_latent, end_latent, context, context_null = prepare_i2v_inputs(
+        height, width, video_seconds, context, context_null, context_img, end_latent = prepare_i2v_inputs(
             args, device, vae, encoded_context, encoded_context_n
         )
     else:
         # prepare inputs without shared models
         vae = load_vae(args.vae, args.vae_chunk_size, args.vae_spatial_tile_sample_min_size, device)
-        height, width, video_seconds, start_latent, end_latent, context, context_null = prepare_i2v_inputs(args, device, vae)
+        height, width, video_seconds, context, context_null, context_img, end_latent = prepare_i2v_inputs(args, device, vae)
 
         # load DiT model
         model = load_dit_model(args, device)
@@ -715,12 +724,15 @@ def generate(args: argparse.Namespace, gen_settings: GenerationSettings, shared_
     num_frames = latent_window_size * 4 - 3
 
     logger.info(
-        f"Video size: {height}x{width}@{video_seconds} (HxW@seconds), fps: {args.fps}, "
+        f"Video size: {height}x{width}@{video_seconds} (HxW@seconds), fps: {args.fps}, num sections: {total_latent_sections}, "
         f"infer_steps: {args.infer_steps}, frames per generation: {num_frames}"
     )
 
     history_latents = torch.zeros((1, 16, 1 + 2 + 16, height // 8, width // 8), dtype=torch.float32)
-    # history_pixels = None
+    if end_latent is not None:
+        logger.info(f"Use end image: {args.end_image_path}")
+        history_latents[:, :, 0:1] = end_latent.to(history_latents)
+
     total_generated_latent_frames = 0
 
     latent_paddings = reversed(range(total_latent_sections))
@@ -735,6 +747,7 @@ def generate(args: argparse.Namespace, gen_settings: GenerationSettings, shared_
 
     for section_index_reverse, latent_padding in enumerate(latent_paddings):
         section_index = total_latent_sections - 1 - section_index_reverse
+        section_index_from_last = -(section_index_reverse + 1)  # -1, -2 ...
 
         is_last_section = latent_padding == 0
         is_first_section = section_index_reverse == 0
@@ -742,12 +755,21 @@ def generate(args: argparse.Namespace, gen_settings: GenerationSettings, shared_
 
         logger.info(f"latent_padding_size = {latent_padding_size}, is_last_section = {is_last_section}")
 
-        reference_start_latent = start_latent
-        apply_end_image = args.end_image_path is not None and is_first_section
-        if apply_end_image:
+        # select start latent
+        if section_index_from_last in context_img:
+            image_index = section_index_from_last
+            apply_section_image = not is_last_section  # last section already has latent_padding_size=0
+        elif section_index in context:
+            image_index = section_index
+            apply_section_image = not is_last_section
+        else:
+            image_index = 0
+            apply_section_image = False
+
+        start_latent = context_img[image_index]["start_latent"]
+        if apply_section_image:
             latent_padding_size = 0
-            reference_start_latent = end_latent
-            logger.info(f"Apply experimental end image, latent_padding_size = {latent_padding_size}")
+            logger.info(f"Apply experimental section image, latent_padding_size = {latent_padding_size}")
 
         # sum([1, 3, 9, 1, 2, 16]) = 32
         indices = torch.arange(0, sum([1, latent_padding_size, latent_window_size, 1, 2, 16])).unsqueeze(0)
@@ -761,7 +783,7 @@ def generate(args: argparse.Namespace, gen_settings: GenerationSettings, shared_
         ) = indices.split([1, latent_padding_size, latent_window_size, 1, 2, 16], dim=1)
         clean_latent_indices = torch.cat([clean_latent_indices_pre, clean_latent_indices_post], dim=1)
 
-        clean_latents_pre = reference_start_latent.to(history_latents)
+        clean_latents_pre = start_latent.to(history_latents)
         clean_latents_post, clean_latents_2x, clean_latents_4x = history_latents[:, :, : 1 + 2 + 16, :, :].split([1, 2, 16], dim=2)
         clean_latents = torch.cat([clean_latents_pre, clean_latents_post], dim=2)
 
@@ -770,13 +792,13 @@ def generate(args: argparse.Namespace, gen_settings: GenerationSettings, shared_
         # else:
         #     transformer.initialize_teacache(enable_teacache=False)
 
-        section_index_from_last = -(section_index_reverse + 1)  # -1, -2 ...
         if section_index_from_last in context:
             prompt_index = section_index_from_last
         elif section_index in context:
             prompt_index = section_index
         else:
             prompt_index = 0
+
         context_for_index = context[prompt_index]
         # if args.section_prompts is not None:
         logger.info(f"Section {section_index}: {context_for_index['prompt']}")
@@ -785,12 +807,9 @@ def generate(args: argparse.Namespace, gen_settings: GenerationSettings, shared_
         llama_attention_mask = context_for_index["llama_attention_mask"].to(device)
         clip_l_pooler = context_for_index["clip_l_pooler"].to(device, dtype=torch.bfloat16)
 
-        if not apply_end_image:
-            image_encoder_last_hidden_state = context_for_index["image_encoder_last_hidden_state"].to(device, dtype=torch.bfloat16)
-        else:
-            image_encoder_last_hidden_state = context_for_index["end_image_encoder_last_hidden_state"].to(
-                device, dtype=torch.bfloat16
-            )
+        image_encoder_last_hidden_state = context_img[image_index]["image_encoder_last_hidden_state"].to(
+            device, dtype=torch.bfloat16
+        )
 
         llama_vec_n = context_null["llama_vec"].to(device, dtype=torch.bfloat16)
         llama_attention_mask_n = context_null["llama_attention_mask"].to(device)
