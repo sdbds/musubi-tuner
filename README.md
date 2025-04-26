@@ -51,6 +51,9 @@ For Wan2.1, please also refer to [Wan2.1 documentation](./docs/wan.md). For Fram
 
 - **[NEW] GitHub Discussions Enabled**: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- Apr 26, 2025:
+    - Added inference and LoRA training for FramePack. PR [#230](https://github.com/kohya-ss/musubi-tuner/pull/230). See [FramePack documentation](./docs/framepack.md) for details.
+
 - Apr 18, 2025:
     - Added batch generation mode that reads prompts from a file and generates them during Wan2.1 inference, as well as interactive mode that specifies prompts from the command line. See [here](./docs/wan.md#interactive-mode--インタラクティブモード) for details.
 
