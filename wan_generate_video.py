@@ -493,13 +493,21 @@ def load_dit_model(
     return model
 
 
-def merge_lora_weights(lora_module: ModuleType, model: torch.nn.Module, args: argparse.Namespace, device: torch.device) -> None:
+def merge_lora_weights(
+    lora_module: ModuleType,
+    model: torch.nn.Module,
+    args: argparse.Namespace,
+    device: torch.device,
+    converter: Optional[callable] = None,
+) -> None:
     """merge LoRA weights to the model
 
     Args:
+        lora_module: LoRA module, e.g. lora_wan
         model: DiT model
         args: command line arguments
         device: device to use
+        converter: Optional callable to convert weights
     """
     if args.lora_weight is None or len(args.lora_weight) == 0:
         return
@@ -512,6 +520,8 @@ def merge_lora_weights(lora_module: ModuleType, model: torch.nn.Module, args: ar
 
         logger.info(f"Loading LoRA weights from {lora_weight} with multiplier {lora_multiplier}")
         weights_sd = load_file(lora_weight)
+        if converter is not None:
+            weights_sd = converter(weights_sd)
 
         # apply include/exclude patterns
         original_key_count = len(weights_sd.keys())

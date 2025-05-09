@@ -56,6 +56,9 @@ If you find this project helpful, please consider supporting its development via
 
 - GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- May 9, 2025:
+    - Added support for applying LoRA for HunyuanVideo in the inference code of FramePack. Both LoRA from this repository and diffusion-pipe can be applied. See [FramePack documentation](./docs/framepack.md#inference) for details.
+
 - May 4, 2025:
     - Added training and inference for FramePack-F1 (experimental feature). See [FramePack documentation](./docs/framepack.md) for details. 
         - Please re-cache the latents for FramePack-F1 with `--f1` option (`--vanilla_sampling` is changed to `--f1`, and the behavior is changed). The cache files are not compatible with FramePack. The cache files cannot be shared between FramePack and FramePack-F1, so please specify a different `.toml` file for another cache directory. 

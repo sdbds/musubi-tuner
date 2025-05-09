@@ -687,6 +687,156 @@ def prepare_i2v_inputs(
 #     return scheduler, timesteps
 
 
+def convert_lora_for_framepack(lora_sd: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    # Check the format of the LoRA file
+    keys = list(lora_sd.keys())
+    if keys[0].startswith("lora_unet_"):
+        # logging.info(f"Musubi Tuner LoRA detected")
+        pass
+
+    else:
+        transformer_prefixes = ["diffusion_model", "transformer"]  # to ignore Text Encoder modules
+        lora_suffix = None
+        prefix = None
+        for key in keys:
+            if lora_suffix is None and "lora_A" in key:
+                lora_suffix = "lora_A"
+            if prefix is None:
+                pfx = key.split(".")[0]
+                if pfx in transformer_prefixes:
+                    prefix = pfx
+            if lora_suffix is not None and prefix is not None:
+                break
+
+        if lora_suffix == "lora_A" and prefix is not None:
+            logging.info(f"Diffusion-pipe (?) LoRA detected, converting to the default LoRA format")
+            lora_sd = convert_lora_from_diffusion_pipe_or_something(lora_sd, "lora_unet_")
+
+        else:
+            logging.info(f"LoRA file format not recognized. Using it as-is.")
+
+    # Check LoRA is for FramePack or for HunyuanVideo
+    is_hunyuan = False
+    for key in lora_sd.keys():
+        if "double_blocks" in key or "single_blocks" in key:
+            is_hunyuan = True
+            break
+    if is_hunyuan:
+        logging.info("HunyuanVideo LoRA detected, converting to FramePack format")
+        lora_sd = convert_hunyuan_to_framepack(lora_sd)
+
+    return lora_sd
+
+
+def convert_lora_from_diffusion_pipe_or_something(lora_sd: dict[str, torch.Tensor], prefix: str) -> dict[str, torch.Tensor]:
+    """
+    Convert LoRA weights to the format used by the diffusion pipeline to Musubi Tuner.
+    Copy from Musubi Tuner repo.
+    """
+    # convert from diffusers(?) to default LoRA
+    # Diffusers format: {"diffusion_model.module.name.lora_A.weight": weight, "diffusion_model.module.name.lora_B.weight": weight, ...}
+    # default LoRA format: {"prefix_module_name.lora_down.weight": weight, "prefix_module_name.lora_up.weight": weight, ...}
+
+    # note: Diffusers has no alpha, so alpha is set to rank
+    new_weights_sd = {}
+    lora_dims = {}
+    for key, weight in lora_sd.items():
+        diffusers_prefix, key_body = key.split(".", 1)
+        if diffusers_prefix != "diffusion_model" and diffusers_prefix != "transformer":
+            print(f"unexpected key: {key} in diffusers format")
+            continue
+
+        new_key = f"{prefix}{key_body}".replace(".", "_").replace("_lora_A_", ".lora_down.").replace("_lora_B_", ".lora_up.")
+        new_weights_sd[new_key] = weight
+
+        lora_name = new_key.split(".")[0]  # before first dot
+        if lora_name not in lora_dims and "lora_down" in new_key:
+            lora_dims[lora_name] = weight.shape[0]
+
+    # add alpha with rank
+    for lora_name, dim in lora_dims.items():
+        new_weights_sd[f"{lora_name}.alpha"] = torch.tensor(dim)
+
+    return new_weights_sd
+
+
+def convert_hunyuan_to_framepack(lora_sd: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """
+    Convert HunyuanVideo LoRA weights to FramePack format.
+    """
+    new_lora_sd = {}
+    for key, weight in lora_sd.items():
+        if "double_blocks" in key:
+            key = key.replace("double_blocks", "transformer_blocks")
+            key = key.replace("img_mod_linear", "norm1_linear")
+            key = key.replace("img_attn_qkv", "attn_to_QKV")  # split later
+            key = key.replace("img_attn_proj", "attn_to_out_0")
+            key = key.replace("img_mlp_fc1", "ff_net_0_proj")
+            key = key.replace("img_mlp_fc2", "ff_net_2")
+            key = key.replace("txt_mod_linear", "norm1_context_linear")
+            key = key.replace("txt_attn_qkv", "attn_add_QKV_proj")  # split later
+            key = key.replace("txt_attn_proj", "attn_to_add_out")
+            key = key.replace("txt_mlp_fc1", "ff_context_net_0_proj")
+            key = key.replace("txt_mlp_fc2", "ff_context_net_2")
+        elif "single_blocks" in key:
+            key = key.replace("single_blocks", "single_transformer_blocks")
+            key = key.replace("linear1", "attn_to_QKVM")  # split later
+            key = key.replace("linear2", "proj_out")
+            key = key.replace("modulation_linear", "norm_linear")
+        else:
+            print(f"Unsupported module name: {key}, only double_blocks and single_blocks are supported")
+            continue
+
+        if "QKVM" in key:
+            # split QKVM into Q, K, V, M
+            key_q = key.replace("QKVM", "q")
+            key_k = key.replace("QKVM", "k")
+            key_v = key.replace("QKVM", "v")
+            key_m = key.replace("attn_to_QKVM", "proj_mlp")
+            if "_down" in key or "alpha" in key:
+                # copy QKVM weight or alpha to Q, K, V, M
+                assert "alpha" in key or weight.size(1) == 3072, f"QKVM weight size mismatch: {key}. {weight.size()}"
+                new_lora_sd[key_q] = weight
+                new_lora_sd[key_k] = weight
+                new_lora_sd[key_v] = weight
+                new_lora_sd[key_m] = weight
+            elif "_up" in key:
+                # split QKVM weight into Q, K, V, M
+                assert weight.size(0) == 21504, f"QKVM weight size mismatch: {key}. {weight.size()}"
+                new_lora_sd[key_q] = weight[:3072]
+                new_lora_sd[key_k] = weight[3072 : 3072 * 2]
+                new_lora_sd[key_v] = weight[3072 * 2 : 3072 * 3]
+                new_lora_sd[key_m] = weight[3072 * 3 :]  # 21504 - 3072 * 3 = 12288
+            else:
+                print(f"Unsupported module name: {key}")
+                continue
+        elif "QKV" in key:
+            # split QKV into Q, K, V
+            key_q = key.replace("QKV", "q")
+            key_k = key.replace("QKV", "k")
+            key_v = key.replace("QKV", "v")
+            if "_down" in key or "alpha" in key:
+                # copy QKV weight or alpha to Q, K, V
+                assert "alpha" in key or weight.size(1) == 3072, f"QKV weight size mismatch: {key}. {weight.size()}"
+                new_lora_sd[key_q] = weight
+                new_lora_sd[key_k] = weight
+                new_lora_sd[key_v] = weight
+            elif "_up" in key:
+                # split QKV weight into Q, K, V
+                assert weight.size(0) == 3072 * 3, f"QKV weight size mismatch: {key}. {weight.size()}"
+                new_lora_sd[key_q] = weight[:3072]
+                new_lora_sd[key_k] = weight[3072 : 3072 * 2]
+                new_lora_sd[key_v] = weight[3072 * 2 :]
+            else:
+                print(f"Unsupported module name: {key}")
+                continue
+        else:
+            # no split needed
+            new_lora_sd[key] = weight
+
+    return new_lora_sd
+
+
 def generate(args: argparse.Namespace, gen_settings: GenerationSettings, shared_models: Optional[Dict] = None) -> torch.Tensor:
     """main function for generation
 
@@ -725,7 +875,9 @@ def generate(args: argparse.Namespace, gen_settings: GenerationSettings, shared_
 
         # merge LoRA weights
         if args.lora_weight is not None and len(args.lora_weight) > 0:
-            merge_lora_weights(lora_framepack, model, args, device)  # ugly hack to common merge_lora_weights function
+            merge_lora_weights(
+                lora_framepack, model, args, device, convert_lora_for_framepack
+            )  # ugly hack to common merge_lora_weights function
             # if we only want to save the model, we can skip the rest
             if args.save_merged_model:
                 return None, None

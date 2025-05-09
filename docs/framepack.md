@@ -280,6 +280,8 @@ Key differences from HunyuanVideo inference:
 
 Other options like `--video_size`, `--fps`, `--infer_steps`, `--save_path`, `--output_type`, `--seed`, `--attn_mode`, `--blocks_to_swap`, `--vae_chunk_size`, `--vae_spatial_tile_sample_min_size` function similarly to HunyuanVideo/Wan2.1 where applicable.
 
+The LoRA weights that can be specified in `--lora_weight` are not limited to the FramePack weights trained in this repository. You can also specify the HunyuanVideo LoRA weights from this repository and the HunyuanVideo LoRA weights from diffusion-pipe (automatic detection).
+
 The maximum value for `--blocks_to_swap` is 38.
 <details>
 <summary>日本語</summary>
@@ -308,6 +310,8 @@ HunyuanVideoの推論との主な違いは次のとおりです。
 -  バッチモードとインタラクティブモード（`--from_file`、`--interactive`）はFramePack生成には**まだ実装されていません**。
 
 `--video_size`、`--fps`、`--infer_steps`、`--save_path`、`--output_type`、`--seed`、`--attn_mode`、`--blocks_to_swap`、`--vae_chunk_size`、`--vae_spatial_tile_sample_min_size`などの他のオプションは、HunyuanVideo/Wan2.1と同様に機能します。
+
+`--lora_weight`に指定できるLoRAの重みは、当リポジトリで学習したFramePackの重み以外に、当リポジトリのHunyuanVideoのLoRA、diffusion-pipeのHunyuanVideoのLoRAが指定可能です（自動判定）。
 
 `--blocks_to_swap`の最大値は38です。
 </details>
