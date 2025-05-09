@@ -103,9 +103,21 @@ def parse_args() -> argparse.Namespace:
         help="Custom system prompt for LLM. If specified, it will override the default system prompt. See hunyuan_model/text_encoder.py for the default system prompt.",
     )
     parser.add_argument("--video_size", type=int, nargs=2, default=[256, 256], help="video size, height and width")
-    parser.add_argument("--video_seconds", type=float, default=5.0, help="video length, Default is 5.0 seconds")
-    parser.add_argument("--fps", type=int, default=30, help="video fps, Default is 30")
-    parser.add_argument("--infer_steps", type=int, default=25, help="number of inference steps, Default is 25")
+    parser.add_argument("--video_seconds", type=float, default=5.0, help="video length, default is 5.0 seconds")
+    parser.add_argument(
+        "--video_sections",
+        type=int,
+        default=None,
+        help="number of video sections, Default is None (auto calculate from video seconds)",
+    )
+    parser.add_argument(
+        "--one_frame_inference",
+        type=str,
+        default=None,
+        help="one frame inference, default is None, comma separated values from 'default', 'no_2x', 'no_4x' and 'no_post'.",
+    )
+    parser.add_argument("--fps", type=int, default=30, help="video fps, default is 30")
+    parser.add_argument("--infer_steps", type=int, default=25, help="number of inference steps, default is 25")
     parser.add_argument("--save_path", type=str, required=True, help="path to save generated video")
     parser.add_argument("--seed", type=int, default=None, help="Seed for evaluation.")
     # parser.add_argument(
@@ -173,7 +185,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bulk_decode", action="store_true", help="decode all frames at once")
     parser.add_argument("--blocks_to_swap", type=int, default=0, help="number of blocks to swap in the model")
     parser.add_argument(
-        "--output_type", type=str, default="video", choices=["video", "images", "latent", "both"], help="output type"
+        "--output_type",
+        type=str,
+        default="video",
+        choices=["video", "images", "latent", "both", "latent_images"],
+        help="output type",
     )
     parser.add_argument("--no_metadata", action="store_true", help="do not save metadata")
     parser.add_argument("--latent_path", type=str, nargs="*", default=None, help="path to latent for decode. no inference")
@@ -288,6 +304,8 @@ def check_inputs(args: argparse.Namespace) -> Tuple[int, int, int]:
     width = args.video_size[1]
 
     video_seconds = args.video_seconds
+    if args.video_sections is not None:
+        video_seconds = (args.video_sections * (args.latent_window_size * 4) + 1) / args.fps
 
     if height % 8 != 0 or width % 8 != 0:
         raise ValueError(f"`height` and `width` have to be divisible by 8 but are {height} and {width}.")
@@ -393,13 +411,14 @@ def decode_latent(
     vae: AutoencoderKLCausal3D,
     latent: torch.Tensor,
     device: torch.device,
+    one_frame_inference_mode: bool,
 ) -> torch.Tensor:
     logger.info(f"Decoding video...")
     if latent.ndim == 4:
         latent = latent.unsqueeze(0)  # add batch dimension
 
     vae.to(device)
-    if not bulk_decode:
+    if not bulk_decode and not one_frame_inference_mode:
         latent_window_size = latent_window_size  # default is 9
         # total_latent_sections = (args.video_seconds * 30) / (latent_window_size * 4)
         # total_latent_sections = int(max(round(total_latent_sections), 1))
@@ -430,8 +449,14 @@ def decode_latent(
             clean_memory_on_device(device)
     else:
         # bulk decode
-        logger.info(f"Bulk decoding")
-        history_pixels = hunyuan.vae_decode(latent, vae).cpu()
+        logger.info(f"Bulk decoding or one frame inference")
+        if not one_frame_inference_mode:
+            history_pixels = hunyuan.vae_decode(latent, vae).cpu()  # normal
+        else:
+            # one frame inference
+            history_pixels = [hunyuan.vae_decode(latent[:, :, i : i + 1, :, :], vae).cpu() for i in range(latent.shape[2])]
+            history_pixels = torch.cat(history_pixels, dim=2)
+
     vae.to("cpu")
 
     logger.info(f"Decoded. Pixel shape {history_pixels.shape}")
@@ -903,6 +928,11 @@ def generate(args: argparse.Namespace, gen_settings: GenerationSettings, shared_
 
     # video generation ######
     f1_mode = args.f1
+    one_frame_inference = None
+    if args.one_frame_inference is not None:
+        one_frame_inference = set()
+        for mode in args.one_frame_inference.split(","):
+            one_frame_inference.add(mode.strip())
 
     # prepare history latents
     history_latents = torch.zeros((1, 16, 1 + 2 + 16, height // 8, width // 8), dtype=torch.float32)
@@ -916,7 +946,7 @@ def generate(args: argparse.Namespace, gen_settings: GenerationSettings, shared_
         total_generated_latent_frames = 0
         latent_paddings = reversed(range(total_latent_sections))
 
-        if total_latent_sections > 4:
+        if total_latent_sections > 4 and one_frame_inference is None:
             # In theory the latent_paddings should follow the above sequence, but it seems that duplicating some
             # items looks better than expanding it when total_latent_sections > 4
             # One can try to remove below trick and just
@@ -1048,12 +1078,32 @@ def generate(args: argparse.Namespace, gen_settings: GenerationSettings, shared_
         clip_l_pooler_n = context_null["clip_l_pooler"].to(device, dtype=torch.bfloat16)
 
         # call DiT model to generate latents
+        sample_num_frames = num_frames
+        if one_frame_inference is not None:
+            latent_indices = latent_indices[:, -1:]  # only use the last frame
+            sample_num_frames = 1
+            if "no_2x" in one_frame_inference:
+                clean_latents_2x = None
+                clean_latent_2x_indices = None
+            if "no_4x" in one_frame_inference:
+                clean_latents_4x = None
+                clean_latent_4x_indices = None
+            if "no_post" in one_frame_inference:
+                clean_latents = clean_latents[:, :, :1, :, :]
+                clean_latent_indices = clean_latent_indices[:, :1]
+            else:
+                # zero out the history latents. this seems to prevent the images from corrupting
+                clean_latents[:,:,1:, :, :] = torch.zeros_like(clean_latents[:,:,1:, :, :]) 
+            logger.info(
+                f"One frame inference: {one_frame_inference}, latent_indices: {latent_indices}, num_frames: {sample_num_frames}"
+            )
+
         generated_latents = sample_hunyuan(
             transformer=model,
             sampler=args.sample_solver,
             width=width,
             height=height,
-            frames=num_frames,
+            frames=sample_num_frames,
             real_guidance_scale=args.guidance_scale,
             distilled_guidance_scale=args.embedded_cfg_scale,
             guidance_rescale=args.guidance_rescale,
@@ -1110,6 +1160,9 @@ def generate(args: argparse.Namespace, gen_settings: GenerationSettings, shared_
         # #     # save intermediate video
         # #     save_video(history_pixels[0], args, total_generated_latent_frames)
         # print(f"Decoded. Current latent shape {real_history_latents.shape}; pixel shape {history_pixels.shape}")
+
+    if one_frame_inference is not None:
+        real_history_latents = real_history_latents[:, :, 1:, :, :]  # remove the first frame (start_latent)
 
     # Only clean up shared models if they were created within this function
     if shared_models is None:
@@ -1250,7 +1303,7 @@ def save_output(
     height *= 8
     width *= 8
     # print(f"Saving output. Latent shape {latent.shape}; pixel shape {height}x{width}")
-    if args.output_type == "latent" or args.output_type == "both":
+    if args.output_type == "latent" or args.output_type == "both" or args.output_type == "latent_images":
         # save latent
         save_latent(latent, args, height, width)
     if args.output_type == "latent":
@@ -1258,14 +1311,16 @@ def save_output(
 
     total_latent_sections = (args.video_seconds * 30) / (args.latent_window_size * 4)
     total_latent_sections = int(max(round(total_latent_sections), 1))
-    video = decode_latent(args.latent_window_size, total_latent_sections, args.bulk_decode, vae, latent, device)
+    video = decode_latent(
+        args.latent_window_size, total_latent_sections, args.bulk_decode, vae, latent, device, args.one_frame_inference is not None
+    )
 
     if args.output_type == "video" or args.output_type == "both":
         # save video
         original_name = "" if original_base_names is None else f"_{original_base_names[0]}"
         save_video(video, args, original_name)
 
-    elif args.output_type == "images":
+    elif args.output_type == "images" or args.output_type == "latent_images":
         # save images
         original_name = "" if original_base_names is None else f"_{original_base_names[0]}"
         save_images(video, args, original_name)

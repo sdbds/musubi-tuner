@@ -56,6 +56,10 @@ If you find this project helpful, please consider supporting its development via
 
 - GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- May 9, 2025 update 2:
+    - Added support for single frame inference in FramePack. This is a unique feature of this repository that generates an image after time progression according to the prompt, rather than a video. In other words, it allows limited natural language editing of images. See [FramePack documentation](./docs/framepack.md#single-frame-inference--単一フレーム推論) for details.
+    - Added `--video_sections` option to specify the length of the generated video in terms of sections instead of seconds in the inference code of FramePack. Also added `--output_type latent_images` (saves both latent and images).
+
 - May 9, 2025:
     - Added support for applying LoRA for HunyuanVideo in the inference code of FramePack. Both LoRA from this repository and diffusion-pipe can be applied. See [FramePack documentation](./docs/framepack.md#inference) for details.
 
@@ -72,13 +76,6 @@ If you find this project helpful, please consider supporting its development via
 
 - Apr 18, 2025:
     - Added batch generation mode that reads prompts from a file and generates them during Wan2.1 inference, as well as interactive mode that specifies prompts from the command line. See [here](./docs/wan.md#interactive-mode--インタラクティブモード) for details.
-
-- Apr 9, 2025
-    - `hv_train_network.py` and `wan_train_network.py` now support PyTorch Dynamo optimization. PR [#215](https://github.com/kohya-ss/musubi-tuner/pull/215) Thanks to sdbds. See [here](./docs/advanced_config.md#pytorch-dynamo-optimization-for-model-training--モデルの学習におけるpytorch-dynamoの最適化) for details.
-
-- Apr 6, 2025
-    - In the video dataset with JSONL format, you can now specify not only video files but also directories containing multiple images. See [here](./dataset/dataset_config.md#sample-for-video-dataset-with-metadata-jsonl-file) for details.
-    - Added a feature to automatically downsample the original video's frame rate to the architecture's frame rate when specifying the original video's frame rate in the video dataset. See [here](./dataset/dataset_config.md#sample-for-video-dataset-with-caption-text-files) for details.
 
 
 ### Releases
