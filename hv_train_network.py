@@ -357,6 +357,7 @@ class NetworkTrainer:
     def __init__(self):
         self.blocks_to_swap = None
         torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
 
     # TODO 他のスクリプトと共通化する
     def generate_step_logs(
