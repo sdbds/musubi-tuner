@@ -4,6 +4,9 @@
 
 ## Table of Contents
 
+<details>
+<summary>Click to expand</summary>
+
 - [Musubi Tuner](#musubi-tuner)
   - [Table of Contents](#table-of-contents)
   - [Introduction](#introduction)
@@ -38,6 +41,8 @@
   - [Contributing](#contributing)
   - [License](#license)
 
+</details>
+
 ## Introduction
 
 This repository provides scripts for training LoRA (Low-Rank Adaptation) models with HunyuanVideo, Wan2.1 and FramePack architectures. 
@@ -55,6 +60,20 @@ If you find this project helpful, please consider supporting its development via
 ### Recent Updates
 
 - GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
+
+- May 22, 2025:
+    - In the inference script of FramePack, the following changes were made:
+        - **Breaking change**: When saving images in single frame inference, subdirectories are no longer created.
+        - Added support for batch and interactive modes. In batch mode, prompts are read from a file and generated. In interactive mode, prompts are specified from the command line. See [FramePack documentation](./docs/framepack.md#batch-and-interactive-modes--バッチモードとインタラクティブモード) for details.
+        - Added support for specifying multiple reference images in kisekaeichi method. See [FramePack documentation](./docs/framepack.md#kisekaeichi-method-history-reference-options--kisekaeichi方式履歴参照オプション) for details.
+
+- May 17, 2025 update 1:
+    - Fixed a bug where specifying `--max_data_loader_n_workers` as 2 or more caused data duplication or omission within a single epoch. PR [#287](https://github.com/kohya-ss/musubi-tuner/pull/287),  issue [#283](https://github.com/kohya-ss/musubi-tuner/issues/283)
+        - In the long term, all data will be trained, but in the short term, data bias occurred.
+        - The initialization of the dataset was inappropriate, causing each DataSet to return data in different orders, and this caused problems when using multiple DataLoaders. The initialization has been fixed so that all DataSets return data in the same order.
+
+- May 17, 2025:
+    - Added support for kisekaeichi method in FramePack's single frame inference. This new inference method proposed by furusu allows controlling the generated image by setting the reference image in post latent. See [FramePack documentation](./docs/framepack.md#kisekaeichi-method-history-reference-options--kisekaeichi方式履歴参照オプション) for details.
 
 - May 11, 2025:
     - Added support for single frame training in FramePack. This is an experimental feature that allows training for single frame inference. See [FramePack documentation](./docs/framepack.md#single-frame-training--1フレーム学習) for details.
