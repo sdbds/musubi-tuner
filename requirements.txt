@@ -25,6 +25,7 @@ ascii-magic==2.3.0
 matplotlib==3.10.0
 tensorboard
 wandb
+prompt-toolkit==3.0.51
 pillow-avif-plugin
 
 # optimizer
