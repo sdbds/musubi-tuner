@@ -11,6 +11,7 @@
 - [Save and view logs in wandb](#save-and-view-logs-in-wandb--wandbでログの保存と参照)
 - [FP8 weight optimization for models](#fp8-weight-optimization-for-models--モデルの重みのfp8への最適化)
 - [PyTorch Dynamo optimization for model training](#pytorch-dynamo-optimization-for-model-training--モデルの学習におけるpytorch-dynamoの最適化)
+- [LoRA Post-Hoc EMA merging](#lora-post-hoc-ema-merging--loraのpost-hoc-emaマージ)
 
 ## How to specify `network_args` / `network_args`の指定方法
 
@@ -26,7 +27,7 @@ The `--network_args` option is an option for specifying detailed arguments to Lo
 If you specify it on the command line, write as follows. / コマンドラインで指定する場合は以下のように記述します。
 
 ```bash
-accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 hv_train_network.py --dit ... 
+accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/musubi_tuner/hv_train_network.py --dit ... 
     --network_module networks.lora --network_dim 32 
     --network_args "key1=value1" "key2=value2" ...
 ```
@@ -60,7 +61,7 @@ LoRA+は、LoRAのUP側（LoRA-B）の学習率を上げることで学習速度
 ### Example / 記述例
 
 ```bash
-accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 hv_train_network.py --dit ... 
+accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/musubi_tuner/hv_train_network.py --dit ... 
     --network_module networks.lora --network_dim 32 --network_args "loraplus_lr_ratio=4" ...
 ```
 
@@ -257,12 +258,12 @@ The `--dynamo_dynamic` option has been reported to have many problems based on t
 ### Usage example:
 
 ```bash
-python train_video_model.py --dynamo_backend INDUCTOR --dynamo_mode default
+python src/musubi_tuner/hv_train_network.py --dynamo_backend INDUCTOR --dynamo_mode default
 ```
 
 For more aggressive optimization:
 ```bash
-python train_video_model.py --dynamo_backend INDUCTOR --dynamo_mode max-autotune --dynamo_fullgraph
+python src/musubi_tuner/hv_train_network.py --dynamo_backend INDUCTOR --dynamo_mode max-autotune --dynamo_fullgraph
 ```
 
 Note: The best combination of options may depend on your specific model and hardware. Experimentation may be necessary to find the optimal configuration.
@@ -304,13 +305,245 @@ __利用可能なオプション：__
 __使用例：__
 
 ```bash
-python train_video_model.py --dynamo_backend INDUCTOR --dynamo_mode default
+python src/musubi_tuner/hv_train_network.py --dynamo_backend INDUCTOR --dynamo_mode default
 ```
 
 より積極的な最適化の場合：
 ```bash
-python train_video_model.py --dynamo_backend INDUCTOR --dynamo_mode max-autotune --dynamo_fullgraph
+python src/musubi_tuner/hv_train_network.py --dynamo_backend INDUCTOR --dynamo_mode max-autotune --dynamo_fullgraph
 ```
 
 注意：最適なオプションの組み合わせは、特定のモデルとハードウェアに依存する場合があります。最適な構成を見つけるために実験が必要かもしれません。
 </details>
+
+## LoRA Post-Hoc EMA merging / LoRAのPost-Hoc EMAマージ
+
+The LoRA Post-Hoc EMA (Exponential Moving Average) merging is a technique to combine multiple LoRA checkpoint files into a single, potentially more stable model. This method applies exponential moving average across multiple checkpoints sorted by modification time, with configurable decay rates.
+
+The Post-Hoc EMA method works by:
+
+1. Sorting checkpoint files by modification time (oldest to newest)
+2. Using the oldest checkpoint as the base
+3. Iteratively merging subsequent checkpoints with a decay rate (beta)
+4. Optionally using linear interpolation between two beta values across the merge process
+
+Pseudo-code for merging multiple checkpoints with beta=0.95 would look like this:
+
+```
+beta = 0.95
+checkpoints = [checkpoint1, checkpoint2, checkpoint3]  # List of checkpoints
+merged_weights = checkpoints[0]  # Use the first checkpoint as the base
+for checkpoint in checkpoints[1:]:
+    merged_weights = beta * merged_weights + (1 - beta) * checkpoint
+```
+
+### Key features:
+
+- **Temporal ordering**: Automatically sorts files by modification time
+- **Configurable decay rates**: Supports single beta value or linear interpolation between two beta values
+- **Metadata preservation**: Maintains and updates metadata from the last checkpoint
+- **Hash updating**: Recalculates model hashes for the merged weights
+- **Dtype preservation**: Maintains original data types of tensors
+
+### Usage
+
+The LoRA Post-Hoc EMA merging is available as a standalone script:
+
+```bash
+python src/musubi_tuner/lora_post_hoc_ema.py checkpoint1.safetensors checkpoint2.safetensors checkpoint3.safetensors --output_file merged_lora.safetensors --beta 0.95
+```
+
+### Command line options:
+
+```
+path [path ...]
+    List of paths to the LoRA weight files to merge
+
+--beta BETA
+    Decay rate for merging weights (default: 0.95)
+    Higher values (closer to 1.0) give more weight to the accumulated average
+    Lower values give more weight to the current checkpoint
+
+--beta2 BETA2
+    Second decay rate for linear interpolation (optional)
+    If specified, the decay rate will linearly interpolate from beta to beta2
+    across the merging process
+
+--output_file OUTPUT_FILE
+    Output file path for the merged weights (required)
+
+--no_sort
+    Disable sorting of checkpoint files (merge in specified order)
+```
+
+### Examples:
+
+Basic usage with constant decay rate:
+```bash
+python src/musubi_tuner/lora_post_hoc_ema.py \
+    lora_epoch_001.safetensors \
+    lora_epoch_002.safetensors \
+    lora_epoch_003.safetensors \
+    --output_file lora_ema_merged.safetensors \
+    --beta 0.95
+```
+
+Using linear interpolation between two decay rates:
+```bash
+python src/musubi_tuner/lora_post_hoc_ema.py \
+    lora_epoch_001.safetensors \
+    lora_epoch_002.safetensors \
+    lora_epoch_003.safetensors \
+    --output_file lora_ema_interpolated.safetensors \
+    --beta 0.90 \
+    --beta2 0.95
+```
+
+### Recommended settings example (after training for 30 epochs)
+
+If you're unsure which settings to try, start with the following "General Recommended Settings".
+
+#### 1. General Recommended Settings (start with these combinations)
+
+- **Target Epochs:** `15-30` (the latter half of training)
+- **beta:** `0.9` (a balanced value)
+
+#### 2. If training converged early
+
+- **Situation:** Loss dropped early and stabilized afterwards.
+- **Target Epochs:** `10-30` (from the epoch where loss stabilized to the end)
+- **beta:** `0.95` (wider range, smoother)
+
+#### 3. If you want to avoid overfitting
+
+- **Situation:** In the latter part of training, generated results are too similar to training data.
+- **Target Epochs:** `15-25` (focus on the peak performance range)
+- **beta:** `0.8` (more emphasis on the latter part of the range while maintaining diversity)
+
+**Note:** The optimal values may vary depending on the model and dataset. It's recommended to experiment with multiple `beta` values (e.g., 0.8, 0.9, 0.95) and compare the generated results.
+
+### Notes:
+
+- Files are automatically sorted by modification time, so the order in the command line doesn't matter
+- All checkpoint files to be merged should be from the same training run, saved per epoch or step
+    - Merging is possible if shapes match, but may not work correctly as Post Hoc EMA
+- The merged model will have updated hash values in its metadata 
+- The metadata of the merged model will be taken from the last checkpoint, with only the hash value recalculated
+- Non-float tensors (long, int, bool, etc.) are not merged and will use the first checkpoint's values
+- Processing is done in float32 precision to maintain numerical stability during merging. The original data types are preserved when saving
+
+<details>
+<summary>日本語</summary>
+
+LoRA Post-Hoc EMA（指数移動平均）マージは、複数のLoRAチェックポイントファイルを単一の、より安定したモデルに結合する手法です。スクリプトでは、修正時刻でソート（古い順）された複数のチェックポイントに対して指定された減衰率で指数移動平均を適用します。減衰率は指定可能です。
+
+Post-Hoc EMA方法の動作：
+
+1. チェックポイントファイルを修正時刻順（古いものから新しいものへ）にソート
+2. 最古のチェックポイントをベースとして使用
+3. 減衰率（beta）を使って後続のチェックポイントを反復的にマージ
+4. オプションで、マージプロセス全体で2つのベータ値間の線形補間を使用
+
+疑似コードによるイメージ：複数のチェックポイントをbeta=0.95でマージする場合、次のように計算されます。
+
+```
+beta = 0.95
+checkpoints = [checkpoint1, checkpoint2, checkpoint3]  # チェックポイントのリスト
+merged_weights = checkpoints[0]  # 最初のチェックポイントをベースとして使用
+for checkpoint in checkpoints[1:]:
+    merged_weights = beta * merged_weights + (1 - beta) * checkpoint
+```
+
+### 主な特徴：
+
+- **時系列順序付け**: ファイルを修正時刻で自動的にソート
+- **設定可能な減衰率**: 単一のベータ値または2つのベータ値間の線形補間をサポート
+- **メタデータ保持**: 最後のチェックポイントからメタデータを維持・更新
+- **ハッシュ更新**: マージされた重みのモデルハッシュを再計算
+- **データ型保持**: テンソルの元のデータ型を維持
+
+### 使用法
+
+LoRA Post-Hoc EMAマージは独立したスクリプトとして提供されています：
+
+```bash
+python src/musubi_tuner/lora_post_hoc_ema.py checkpoint1.safetensors checkpoint2.safetensors checkpoint3.safetensors --output_file merged_lora.safetensors --beta 0.95
+```
+
+### コマンドラインオプション：
+
+```
+path [path ...]
+    マージするLoRA重みファイルのパスのリスト
+
+--beta BETA
+    重みマージのための減衰率（デフォルト：0.95）
+    高い値（1.0に近い）は累積平均により大きな重みを与える（古いチェックポイントを重視）
+    低い値は現在のチェックポイントにより大きな重みを与える
+
+--beta2 BETA2
+    線形補間のための第2減衰率（オプション）
+    指定された場合、減衰率はマージプロセス全体でbetaからbeta2へ線形補間される
+
+--output_file OUTPUT_FILE
+    マージされた重みの出力ファイルパス（必須）
+
+--no_sort
+    チェックポイントファイルのソートを無効にする（指定した順序でマージ）
+```
+
+### 例：
+
+定数減衰率での基本的な使用法：
+```bash
+python src/musubi_tuner/lora_post_hoc_ema.py \
+    lora_epoch_001.safetensors \
+    lora_epoch_002.safetensors \
+    lora_epoch_003.safetensors \
+    --output_file lora_ema_merged.safetensors \
+    --beta 0.95
+```
+
+2つの減衰率間の線形補間を使用：
+```bash
+python src/musubi_tuner/lora_post_hoc_ema.py \
+    lora_epoch_001.safetensors \
+    lora_epoch_002.safetensors \
+    lora_epoch_003.safetensors \
+    --output_file lora_ema_interpolated.safetensors \
+    --beta 0.90 \
+    --beta2 0.95
+```
+
+### 推奨設定の例 (30エポック学習した場合)
+
+どの設定から試せば良いか分からない場合は、まず以下の「**一般的な推奨設定**」から始めてみてください。
+
+#### 1. 一般的な推奨設定 (まず試すべき組み合わせ)
+- **対象エポック:** `15-30` (学習の後半半分)
+- **beta:** `0.9` (バランスの取れた値)
+
+#### 2. 早期に学習が収束した場合
+- **状況:** lossが早い段階で下がり、その後は安定している。
+- **対象エポック:** `10-30` (lossが安定し始めたエポックから最後まで)
+- **beta:** `0.95` (対象範囲が広いので、より滑らかにする)
+
+#### 3. 過学習を避けたい場合
+- **状況:** 学習の最後の方で、生成結果が学習データに似すぎている。
+- **対象エポック:** `15-25` (性能のピークと思われる範囲に絞る)
+- **beta:** `0.8` (範囲の終盤を重視しつつ、多様性を残す)
+
+**ヒント:** 最適な値はモデルやデータセットによって異なります。複数の`beta`（例: 0.8, 0.9, 0.95）を試して、生成結果を比較することをお勧めします。
+
+### 注意点：
+
+- ファイルは修正時刻で自動的にソートされるため、コマンドラインでの順序は関係ありません
+- マージする全てのチェックポイントファイルは、ひとつの学習で、エポックごと、またはステップごとに保存されたモデルである必要があります
+    - 形状が一致していればマージはできますが、Post Hoc EMAとしては正しく動作しません
+- alpha値はすべてのチェックポイントで同じである必要があります
+- マージされたモデルのメタデータは、最後のチェックポイントのものが利用されます。ハッシュ値のみが再計算されます
+- 浮動小数点以外の、long、int、boolなどのテンソルはマージされません（最初のチェックポイントのものが使用されます）
+- マージ中の数値安定性を維持するためにfloat32精度で計算されます。保存時は元のデータ型が維持されます
+
+</details>
+

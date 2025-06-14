@@ -52,6 +52,18 @@ Wan2.1については、[Wan2.1のドキュメント](./docs/wan.md)も参照し
 
 - GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- 2025/06/12
+    - LoRAモデルのPost Hoc EMAを行う`lora_post_hoc_ema.py`を追加しました。LoRAモデルの学習後に、Post Hoc EMAを適用してモデルの精度を向上させることができます。詳細は[こちらのドキュメント](./docs/advanced_config.md#lora-post-hoc-ema-merging--loraのpost-hoc-emaマージ)を参照してください。
+
+- 2025/06/11
+    - リポジトリのパッケージングに関するPRをマージしました。xhiroga氏に感謝します。PR [#319](https://github.com/kohya-ss/musubi-tuner/pull/319)
+        - `pyproject.toml`を導入し、インストール方法を更新しました。既存の環境からの移行方法については、[このディスカッションの投稿](https://github.com/kohya-ss/musubi-tuner/discussions/345)を参照してください。
+    - `README.md`を更新し、`pyproject.toml`を使用した新しいインストール方法を反映しました。
+
+- 2025/06/09
+    - FramePackの1フレーム推論のドキュメントに `--control_image_path` についての説明を追加しました。詳細は[1フレーム推論のドキュメント](./docs/framepack_1f.md#one-single-frame-inference--1フレーム推論)を参照してください。
+    - FramePackの1フレーム学習で、no_4xを指定しないとサンプル画像生成がクラッシュする不具合を修正しました。PR [#339](https://github.com/kohya-ss/musubi-tuner/pull/339)
+
 - 2025/06/08
     - wan_generate_video.pyとfpack_generate_video.pyのinteractiveモードで、`prompt-toolkit`がインストールされている場合、それを使用するようになりました。これにより、特にLinux環境でプロンプトの編集や補完が用意になります。PR [#330](https://github.com/kohya-ss/musubi-tuner/issues/312) 
         - この機能はオプションです。有効にするには、`pip install prompt-toolkit`でインストールしてください。インストールしてある場合は自動的に有効になります。
@@ -115,7 +127,7 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 以下のコマンドを使用して、必要な依存関係をインストールします。
 
 ```bash
-pip install -r requirements.txt
+pip install -e .
 ```
 
 オプションとして、FlashAttention、SageAttention（**推論にのみ使用できます**、インストール方法は[こちら](#SageAttentionのインストール方法)を参照）を使用できます。
@@ -193,12 +205,12 @@ Text EncoderにはComfyUI提供のモデルを使用させていただきます�
 latentの事前キャッシュは必須です。以下のコマンドを使用して、事前キャッシュを作成してください。（pipによるインストールの場合）
 
 ```bash
-python cache_latents.py --dataset_config path/to/toml --vae path/to/ckpts/hunyuan-video-t2v-720p/vae/pytorch_model.pt --vae_chunk_size 32 --vae_tiling
+python src/musubi_tuner/cache_latents.py --dataset_config path/to/toml --vae path/to/ckpts/hunyuan-video-t2v-720p/vae/pytorch_model.pt --vae_chunk_size 32 --vae_tiling
 ```
 
-uvでインストールした場合は、`uv run python cache_latents.py ...`のように、`uv run`を先頭につけてください。以下のコマンドも同様です。
+uvでインストールした場合は、`uv run --extra cu124 python src/musubi_tuner/cache_latents.py ...`のように、`uv run --extra cu124`を先頭につけてください。CUDA 12.8に対応している場合は、`uv run --extra cu128`も利用可能です。以下のコマンドも同様です。
 
-その他のオプションは`python cache_latents.py --help`で確認できます。
+その他のオプションは`python src/musubi_tuner/cache_latents.py --help`で確認できます。
 
 VRAMが足りない場合は、`--vae_spatial_tile_sample_min_size`を128程度に減らし、`--batch_size`を小さくしてください。
 
@@ -215,10 +227,10 @@ VRAMが足りない場合は、`--vae_spatial_tile_sample_min_size`を128程度�
 Text Encoder出力の事前キャッシュは必須です。以下のコマンドを使用して、事前キャッシュを作成してください。
 
 ```bash
-python cache_text_encoder_outputs.py --dataset_config path/to/toml  --text_encoder1 path/to/ckpts/text_encoder --text_encoder2 path/to/ckpts/text_encoder_2 --batch_size 16
+python src/musubi_tuner/cache_text_encoder_outputs.py --dataset_config path/to/toml  --text_encoder1 path/to/ckpts/text_encoder --text_encoder2 path/to/ckpts/text_encoder_2 --batch_size 16
 ```
 
-その他のオプションは`python cache_text_encoder_outputs.py --help`で確認できます。
+その他のオプションは`python src/musubi_tuner/cache_text_encoder_outputs.py --help`で確認できます。
 
 `--batch_size`はVRAMに合わせて調整してください。
 
@@ -249,7 +261,7 @@ VRAMが足りない場合（16GB程度未満の場合）は、`--fp8_llm`を指�
 以下のコマンドを使用して、学習を開始します（実際には一行で入力してください）。
 
 ```bash
-accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 hv_train_network.py 
+accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/musubi_tuner/hv_train_network.py 
     --dit path/to/ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states.pt 
     --dataset_config path/to/toml --sdpa --mixed_precision bf16 --fp8_base 
     --optimizer_type adamw8bit --learning_rate 2e-4 --gradient_checkpointing 
@@ -264,7 +276,7 @@ __更新__：サンプルの学習率を1e-3から2e-4に、`--timestep_sampling
 
 ただ、適切な学習率、学習ステップ数、timestepsの分布、loss weightingなどのパラメータは、以前として不明な点が数多くあります。情報提供をお待ちしています。
 
-その他のオプションは`python hv_train_network.py --help`で確認できます（ただし多くのオプションは動作未確認です）。
+その他のオプションは`python src/musubi_tuner/hv_train_network.py --help`で確認できます（ただし多くのオプションは動作未確認です）。
 
 `--fp8_base`を指定すると、DiTがfp8で学習されます。未指定時はmixed precisionのデータ型が使用されます。fp8は大きく消費メモリを削減できますが、品質は低下する可能性があります。`--fp8_base`を指定しない場合はVRAM 24GB以上を推奨します。また必要に応じて`--blocks_to_swap`を使用してください。
 
@@ -295,7 +307,7 @@ PyTorch Dynamoによる最適化を行う場合は、[こちら](./docs/advanced
 注：Wan 2.1には対応していません。
 
 ```bash
-python merge_lora.py \
+python src/musubi_tuner/merge_lora.py \
     --dit path/to/ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states.pt \
     --lora_weight path/to/lora.safetensors \
     --save_merged_model path/to/merged_model.safetensors \
@@ -312,7 +324,7 @@ python merge_lora.py \
 以下のコマンドを使用して動画を生成します。
 
 ```bash
-python hv_generate_video.py --fp8 --video_size 544 960 --video_length 5 --infer_steps 30 
+python src/musubi_tuner/hv_generate_video.py --fp8 --video_size 544 960 --video_length 5 --infer_steps 30 
     --prompt "A cat walks on the grass, realistic style."  --save_path path/to/save/dir --output_type both 
     --dit path/to/ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states.pt --attn_mode sdpa --split_attn
     --vae path/to/ckpts/hunyuan-video-t2v-720p/vae/pytorch_model.pt 
@@ -322,7 +334,7 @@ python hv_generate_video.py --fp8 --video_size 544 960 --video_length 5 --infer_
     --seed 1234 --lora_multiplier 1.0 --lora_weight path/to/lora.safetensors
 ```
 
-その他のオプションは`python hv_generate_video.py --help`で確認できます。
+その他のオプションは`python src/musubi_tuner/hv_generate_video.py --help`で確認できます。
 
 `--fp8`を指定すると、DiTがfp8で推論されます。fp8は大きく消費メモリを削減できますが、品質は低下する可能性があります。
 
@@ -377,7 +389,7 @@ SkyReels V1はclassifier free guidance（ネガティブプロンプト）を必
 ComfyUIで使用可能な形式（Diffusion-pipeと思われる）への変換は以下のコマンドで行えます。
 
 ```bash
-python convert_lora.py --input path/to/musubi_lora.safetensors --output path/to/another_format.safetensors --target other
+python src/musubi_tuner/convert_lora.py --input path/to/musubi_lora.safetensors --output path/to/another_format.safetensors --target other
 ```
 
 `--input`と`--output`はそれぞれ入力と出力のファイルパスを指定してください。

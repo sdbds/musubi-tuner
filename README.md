@@ -61,6 +61,17 @@ If you find this project helpful, please consider supporting its development via
 
 - GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- June 12, 2025:
+    - Added `lora_post_hoc_ema.py` for Post Hoc EMA of LoRA models. This allows you to apply Post Hoc EMA after training a LoRA model to improve accuracy. For details, see [this document](./docs/advanced_config.md#lora-post-hoc-ema-merging--loraのpost-hoc-emaマージ).
+
+- June 11, 2025:
+    - Merged the pull request for packaging the repository. Thank you for xhiroga for PR [#319](https://github.com/kohya-ss/musubi-tuner/pull/319)! This introduces `pyproject.toml` and updates installation instructions. For details on migrating your existing environment, please refer to [this discussion post](https://github.com/kohya-ss/musubi-tuner/discussions/345).
+    - Updated `README.md` to reflect the new installation methods using `pip` and `uv` with `pyproject.toml`.
+
+- June 9, 2025:
+    - Added documentation for `--control_image_path` in FramePack's one frame inference documentation. See [FramePack's one frame inference documentation](./docs/framepack_1f.md#one-single-frame-inference--1フレーム推論) for details.
+    - Fixed a bug in FramePack's one frame training where sample image generation would crash if `no_4x` was not specified. PR [#339](https://github.com/kohya-ss/musubi-tuner/pull/339)
+
 - June 8, 2025:
     - Added support for interactive mode in `wan_generate_video.py` and `fpack_generate_video.py`. If `prompt-toolkit` is installed, it will be used for prompt editing and completion, especially useful in Linux environments. PR [#330](https://github.com/kohya-ss/musubi-tuner/issues/330)
         - This feature is optional. To enable it, install `prompt-toolkit` with `pip install prompt-toolkit`. If installed, it will be automatically enabled.
@@ -120,10 +131,10 @@ PyTorch 2.5.1 or later is required (see [note](#PyTorch-version)).
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 ```
 
-Install the required dependencies using the following command:
+Install the required dependencies using the following command.
 
 ```bash
-pip install -r requirements.txt
+pip install -e .
 ```
 
 Optionally, you can use FlashAttention and SageAttention (**for inference only**; see [SageAttention Installation](#sageattention-installation) for installation instructions).
@@ -209,16 +220,16 @@ Latent pre-caching is required. Create the cache using the following command:
 If you have installed using pip:
 
 ```bash
-python cache_latents.py --dataset_config path/to/toml --vae path/to/ckpts/hunyuan-video-t2v-720p/vae/pytorch_model.pt --vae_chunk_size 32 --vae_tiling
+python src/musubi_tuner/cache_latents.py --dataset_config path/to/toml --vae path/to/ckpts/hunyuan-video-t2v-720p/vae/pytorch_model.pt --vae_chunk_size 32 --vae_tiling
 ```
 
-If you have installed with `uv`, you can use `uv run` to run the script. Other scripts can be run in the same way. (Note that the installation with `uv` is experimental. Feedback is welcome. If you encounter any issues, please use the pip-based installation.)
+If you have installed with `uv`, you can use `uv run --extra cu124` to run the script. If CUDA 12.8 is supported, `uv run --extra cu128` is also available. Other scripts can be run in the same way. (Note that the installation with `uv` is experimental. Feedback is welcome. If you encounter any issues, please use the pip-based installation.)
 
 ```bash
-uv run cache_latents.py --dataset_config path/to/toml --vae path/to/ckpts/hunyuan-video-t2v-720p/vae/pytorch_model.pt --vae_chunk_size 32 --vae_tiling
+uv run --extra cu124 src/musubi_tuner/cache_latents.py --dataset_config path/to/toml --vae path/to/ckpts/hunyuan-video-t2v-720p/vae/pytorch_model.pt --vae_chunk_size 32 --vae_tiling
 ```
 
-For additional options, use `python cache_latents.py --help`.
+For additional options, use `python src/musubi_tuner/cache_latents.py --help`.
 
 If you're running low on VRAM, reduce `--vae_spatial_tile_sample_min_size` to around 128 and lower the `--batch_size`.
 
@@ -235,16 +246,16 @@ By default, cache files not included in the dataset are automatically deleted. Y
 Text Encoder output pre-caching is required. Create the cache using the following command:
 
 ```bash
-python cache_text_encoder_outputs.py --dataset_config path/to/toml  --text_encoder1 path/to/ckpts/text_encoder --text_encoder2 path/to/ckpts/text_encoder_2 --batch_size 16
+python src/musubi_tuner/cache_text_encoder_outputs.py --dataset_config path/to/toml  --text_encoder1 path/to/ckpts/text_encoder --text_encoder2 path/to/ckpts/text_encoder_2 --batch_size 16
 ```
 
 or for uv:
 
 ```bash
-uv run cache_text_encoder_outputs.py --dataset_config path/to/toml  --text_encoder1 path/to/ckpts/text_encoder --text_encoder2 path/to/ckpts/text_encoder_2 --batch_size 16
+uv run --extra cu124 src/musubi_tuner/cache_text_encoder_outputs.py --dataset_config path/to/toml  --text_encoder1 path/to/ckpts/text_encoder --text_encoder2 path/to/ckpts/text_encoder_2 --batch_size 16
 ```
 
-For additional options, use `python cache_text_encoder_outputs.py --help`.
+For additional options, use `python src/musubi_tuner/cache_text_encoder_outputs.py --help`.
 
 Adjust `--batch_size` according to your available VRAM.
 
@@ -275,7 +286,7 @@ Run `accelerate config` to configure Accelerate. Choose appropriate values for e
 Start training using the following command (input as a single line):
 
 ```bash
-accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 hv_train_network.py 
+accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/musubi_tuner/hv_train_network.py 
     --dit path/to/ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states.pt 
     --dataset_config path/to/toml --sdpa --mixed_precision bf16 --fp8_base 
     --optimizer_type adamw8bit --learning_rate 2e-4 --gradient_checkpointing 
@@ -289,7 +300,7 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 hv_trai
 or for uv:
 
 ```bash
-uv run accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 hv_train_network.py 
+uv run --extra cu124 accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/musubi_tuner/hv_train_network.py 
     --dit path/to/ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states.pt 
     --dataset_config path/to/toml --sdpa --mixed_precision bf16 --fp8_base 
     --optimizer_type adamw8bit --learning_rate 2e-4 --gradient_checkpointing 
@@ -304,7 +315,7 @@ __Update__: Changed the sample training settings to a learning rate of 2e-4, `--
 
 However, the training settings are still experimental. Appropriate learning rates, training steps, timestep distribution, loss weighting, etc. are not yet known. Feedback is welcome.
 
-For additional options, use `python hv_train_network.py --help` (note that many options are unverified).
+For additional options, use `python src/musubi_tuner/hv_train_network.py --help` (note that many options are unverified).
 
 Specifying `--fp8_base` runs DiT in fp8 mode. Without this flag, mixed precision data type will be used. fp8 can significantly reduce memory consumption but may impact output quality. If `--fp8_base` is not specified, 24GB or more VRAM is recommended. Use `--blocks_to_swap` as needed.
 
@@ -331,7 +342,7 @@ For sample image generation during training, refer to [this document](./docs/sam
 Note: Wan2.1 is not supported for merging LoRA weights.
 
 ```bash
-python merge_lora.py \
+python src/musubi_tuner/merge_lora.py \
     --dit path/to/ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states.pt \
     --lora_weight path/to/lora.safetensors \
     --save_merged_model path/to/merged_model.safetensors \
@@ -342,7 +353,7 @@ python merge_lora.py \
 or for uv:
 
 ```bash
-uv run merge_lora.py \
+uv run --extra cu124 src/musubi_tuner/merge_lora.py \
     --dit path/to/ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states.pt \
     --lora_weight path/to/lora.safetensors \
     --save_merged_model path/to/merged_model.safetensors \
@@ -359,7 +370,7 @@ Specify the LoRA weights to merge with `--lora_weight` and the multiplier for th
 Generate videos using the following command:
 
 ```bash
-python hv_generate_video.py --fp8 --video_size 544 960 --video_length 5 --infer_steps 30 
+python src/musubi_tuner/hv_generate_video.py --fp8 --video_size 544 960 --video_length 5 --infer_steps 30 
     --prompt "A cat walks on the grass, realistic style."  --save_path path/to/save/dir --output_type both 
     --dit path/to/ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states.pt --attn_mode sdpa --split_attn
     --vae path/to/ckpts/hunyuan-video-t2v-720p/vae/pytorch_model.pt 
@@ -372,7 +383,7 @@ python hv_generate_video.py --fp8 --video_size 544 960 --video_length 5 --infer_
 or for uv:
 
 ```bash
-uv run hv_generate_video.py --fp8 --video_size 544 960 --video_length 5 --infer_steps 30 
+uv run --extra cu124 src/musubi_tuner/hv_generate_video.py --fp8 --video_size 544 960 --video_length 5 --infer_steps 30 
     --prompt "A cat walks on the grass, realistic style."  --save_path path/to/save/dir --output_type both 
     --dit path/to/ckpts/hunyuan-video-t2v-720p/transformers/mp_rank_00_model_states.pt --attn_mode sdpa --split_attn
     --vae path/to/ckpts/hunyuan-video-t2v-720p/vae/pytorch_model.pt 
@@ -382,7 +393,7 @@ uv run hv_generate_video.py --fp8 --video_size 544 960 --video_length 5 --infer_
     --seed 1234 --lora_multiplier 1.0 --lora_weight path/to/lora.safetensors
 ```
 
-For additional options, use `python hv_generate_video.py --help`.
+For additional options, use `python src/musubi_tuner/hv_generate_video.py --help`.
 
 Specifying `--fp8` runs DiT in fp8 mode. fp8 can significantly reduce memory consumption but may impact output quality.
 
@@ -443,13 +454,13 @@ You can also perform image2video inference with SkyReels V1 I2V model. Specify t
 You can convert LoRA to a format compatible with ComfyUI (presumed to be Diffusion-pipe) using the following command:
 
 ```bash
-python convert_lora.py --input path/to/musubi_lora.safetensors --output path/to/another_format.safetensors --target other
+python src/musubi_tuner/convert_lora.py --input path/to/musubi_lora.safetensors --output path/to/another_format.safetensors --target other
 ```
 
 or for uv:
 
 ```bash
-uv run convert_lora.py --input path/to/musubi_lora.safetensors --output path/to/another_format.safetensors --target other
+uv run --extra cu124 src/musubi_tuner/convert_lora.py --input path/to/musubi_lora.safetensors --output path/to/another_format.safetensors --target other
 ```
 
 Specify the input and output file paths with `--input` and `--output`, respectively.
