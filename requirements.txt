@@ -38,6 +38,9 @@ schedulefree>=1.4.0
 torch-optimi>=0.2.1
 adam-mini>=1.1.1
 
+hatchling
+editables
+-e .
 triton-windows ; sys_platform == 'win32'
 https://github.com/sdbds/flash-attention-for-windows/releases/download/torch271%2Bcu128/flash_attn-2.7.4.post1+cu128torch2.7.1cxx11abiFALSEfullbackward-cp311-cp311-win_amd64.whl; sys_platform == 'win32'
 https://github.com/sdbds/SageAttention-for-windows/releases/download/2.11_torch271%2Bcu128/sageattention-2.1.1+cu128torch2.7.1-cp311-cp311-win_amd64.whl ; sys_platform == 'win32'
