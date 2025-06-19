@@ -1974,6 +1974,7 @@ def load_packed_model(
     loading_device: Union[str, torch.device],
     fp8_scaled: bool = False,
     split_attn: bool = False,
+    for_inference: bool = False,
 ) -> HunyuanVideoTransformer3DModelPacked:
     # TODO support split_attn
     device = torch.device(device)
@@ -1990,7 +1991,12 @@ def load_packed_model(
 
     with init_empty_weights():
         logger.info(f"Creating HunyuanVideoTransformer3DModelPacked")
-        model = HunyuanVideoTransformer3DModelPacked(
+
+        # import here to avoid circular import issues
+        from musubi_tuner.frame_pack.hunyuan_video_packed_inference import HunyuanVideoTransformer3DModelPackedInference
+
+        model_class = HunyuanVideoTransformer3DModelPackedInference if for_inference else HunyuanVideoTransformer3DModelPacked
+        model = model_class(
             attention_head_dim=128,
             guidance_embeds=True,
             has_clean_x_embedder=True,
