@@ -61,6 +61,9 @@ If you find this project helpful, please consider supporting its development via
 
 - GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- June 25, 2025:
+    - Added support for one-frame inference and training in Wan2.1 architecture. For details, see the [Wan's one frame inference documentation](./docs/wan_1f.md).
+
 - June 17, 2025:
     - Added support for [MagCache](https://github.com/Zehong-Ma/MagCache) in FramePack's inference script. See [Advanced Configuration](./docs/advanced_config.md#magcache) for details.
     - Implemented caching of Text Encoder outputs in both interactive and batch modes in FramePack's inference script. Additionally, we reviewed the processing order and adjusted the timing of model offloading to reduce processing time during continuous generation.

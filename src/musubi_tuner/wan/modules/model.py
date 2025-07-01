@@ -79,12 +79,20 @@ def rope_apply(x, grid_sizes, freqs):
         return torch.stack(output).float()
 
 
-def calculate_freqs_i(fhw, c, freqs):
-    f, h, w = fhw
+def calculate_freqs_i(fhw, c, freqs, f_indices=None):
+    """f_indices is used to select specific frames for rotary embedding. e.g. [0,8] (with start image) or [0,8,20] (with start and end images)"""
+    f, h, w = fhw[:3]
     freqs = freqs.split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
+
+    if f_indices is None:
+        freqs_f = freqs[0][:f]
+    else:
+        logger.info(f"Using f_indices: {f_indices} for rotary embedding. fhw: {fhw}")
+        freqs_f = freqs[0][f_indices]
+
     freqs_i = torch.cat(
         [
-            freqs[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1),
+            freqs_f.view(f, 1, 1, -1).expand(f, h, w, -1),
             freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
             freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1),
         ],
@@ -460,9 +468,12 @@ class Head(nn.Module):
         return x
 
 
+FIRST_LAST_FRAME_CONTEXT_TOKEN_NUMBER = 257 * 2
+
+
 class MLPProj(torch.nn.Module):
 
-    def __init__(self, in_dim, out_dim):
+    def __init__(self, in_dim, out_dim, flf_pos_emb=False):
         super().__init__()
 
         self.proj = torch.nn.Sequential(
@@ -472,8 +483,16 @@ class MLPProj(torch.nn.Module):
             torch.nn.Linear(in_dim, out_dim),
             torch.nn.LayerNorm(out_dim),
         )
+        if flf_pos_emb:  # NOTE: we only use this for `flf2v`
+            self.emb_pos = nn.Parameter(torch.zeros(1, FIRST_LAST_FRAME_CONTEXT_TOKEN_NUMBER, 1280))
+        else:
+            self.emb_pos = None
 
     def forward(self, image_embeds):
+        if self.emb_pos is not None:  # for `flf2v`
+            bs, n, d = image_embeds.shape
+            image_embeds = image_embeds.view(-1, 2 * n, d)
+            image_embeds = image_embeds + self.emb_pos
         clip_extra_context_tokens = self.proj(image_embeds)
         return clip_extra_context_tokens
 
@@ -545,7 +564,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
 
         super().__init__()
 
-        assert model_type in ["t2v", "i2v"]
+        assert model_type in ["t2v", "i2v", "flf2v"], f"Invalid model_type: {model_type}. Must be one of ['t2v', 'i2v', 'flf2v']."
         self.model_type = model_type
 
         self.patch_size = patch_size
@@ -594,8 +613,8 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         )
         self.freqs_fhw = {}
 
-        if model_type == "i2v":
-            self.img_emb = MLPProj(1280, dim)
+        if model_type == "i2v" or model_type == "flf2v":
+            self.img_emb = MLPProj(1280, dim, flf_pos_emb=model_type == "flf2v")
 
         # initialize weights
         self.init_weights()
@@ -707,7 +726,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
             return
         self.offloader.prepare_block_devices_before_forward(self.blocks)
 
-    def forward(self, x, t, context, seq_len, clip_fea=None, y=None, skip_block_indices=None):
+    def forward(self, x, t, context, seq_len, clip_fea=None, y=None, skip_block_indices=None, f_indices=None):
         r"""
         Forward pass through the diffusion model
 
@@ -724,6 +743,10 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
                 CLIP image features for image-to-video mode
             y (List[Tensor], *optional*):
                 Conditional video inputs for image-to-video mode, same shape as x
+            skip_block_indices (List[int], *optional*):
+                Indices of blocks to skip during forward pass
+            f_indices (List[List[int]], *optional*):
+                Indices of frames used for rotary embeddings, list of lists for each video in the batch
 
         Returns:
             List[Tensor]:
@@ -742,15 +765,17 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
             y = None
 
         # embeddings
-        x = [self.patch_embedding(u.unsqueeze(0)) for u in x]
-        grid_sizes = torch.stack([torch.tensor(u.shape[2:], dtype=torch.long) for u in x])
+        x = [self.patch_embedding(u.unsqueeze(0)) for u in x] # x[0].shape = [1, 5120, F, H, W]
+        grid_sizes = torch.stack([torch.tensor(u.shape[2:], dtype=torch.long) for u in x]) # list of [F, H, W]
 
         freqs_list = []
-        for fhw in grid_sizes:
+        for i, fhw in enumerate(grid_sizes):
             fhw = tuple(fhw.tolist())
+            if f_indices is not None:
+                fhw = tuple(list(fhw) + f_indices[i])  # add f_indices to fhw for cache key
             if fhw not in self.freqs_fhw:
                 c = self.dim // self.num_heads // 2
-                self.freqs_fhw[fhw] = calculate_freqs_i(fhw, c, self.freqs)
+                self.freqs_fhw[fhw] = calculate_freqs_i(fhw, c, self.freqs, None if f_indices is None else f_indices[i])
             freqs_list.append(self.freqs_fhw[fhw])
 
         x = [u.flatten(2).transpose(1, 2) for u in x]
@@ -888,7 +913,7 @@ def load_wan_model(
     with init_empty_weights():
         logger.info(f"Creating WanModel")
         model = WanModel(
-            model_type="i2v" if config.i2v else "t2v",
+            model_type="i2v" if config.i2v else ("flf2v" if config.flf2v else "t2v"),
             dim=config.dim,
             eps=config.eps,
             ffn_dim=config.ffn_dim,

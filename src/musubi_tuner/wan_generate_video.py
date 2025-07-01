@@ -21,6 +21,7 @@ import numpy as np
 import torchvision.transforms.functional as TF
 from tqdm import tqdm
 
+from musubi_tuner.dataset import image_video_dataset
 from musubi_tuner.networks import lora_wan
 from musubi_tuner.utils.safetensors_utils import mem_eff_save_file, load_safetensors
 from musubi_tuner.wan.configs import WAN_CONFIGS, SUPPORTED_SIZES
@@ -121,6 +122,22 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="path to control video for inference with controlnet. video file or directory with images",
     )
+    parser.add_argument(
+        "--one_frame_inference",
+        type=str,
+        default=None,
+        help="one frame inference, default is None, comma separated values from 'no_2x', 'no_4x', 'no_post', 'control_indices' and 'target_index'.",
+    )
+    parser.add_argument(
+        "--control_image_path", type=str, default=None, nargs="*", help="path to control (reference) image for one frame inference."
+    )
+    parser.add_argument(
+        "--control_image_mask_path",
+        type=str,
+        default=None,
+        nargs="*",
+        help="path to control (reference) image mask for one frame inference.",
+    )
     parser.add_argument("--trim_tail_frames", type=int, default=0, help="trim tail N frames from the video before saving")
     parser.add_argument(
         "--cfg_skip_mode",
@@ -179,7 +196,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--blocks_to_swap", type=int, default=0, help="number of blocks to swap in the model")
     parser.add_argument(
-        "--output_type", type=str, default="video", choices=["video", "images", "latent", "both"], help="output type"
+        "--output_type",
+        type=str,
+        default="video",
+        choices=["video", "images", "latent", "both", "latent_images"],
+        help="output type",
     )
     parser.add_argument("--no_metadata", action="store_true", help="do not save metadata")
     parser.add_argument("--latent_path", type=str, nargs="*", default=None, help="path to latent for decode. no inference")
@@ -228,6 +249,9 @@ def parse_prompt_line(line: str) -> Dict[str, Any]:
 
     # Create dictionary of overrides
     overrides = {"prompt": prompt}
+    # Initialize control_image_path and control_image_mask_path as a list to accommodate multiple paths
+    overrides["control_image_path"] = []
+    overrides["control_image_mask_path"] = []
 
     for part in parts[1:]:
         if not part.strip():
@@ -253,10 +277,25 @@ def parse_prompt_line(line: str) -> Dict[str, Any]:
             overrides["flow_shift"] = float(value)
         elif option == "i":
             overrides["image_path"] = value
+        elif option == "ei":
+            overrides["end_image_path"] = value
         elif option == "cn":
             overrides["control_path"] = value
         elif option == "n":
             overrides["negative_prompt"] = value
+        # one frame inference options
+        elif option == "ci":  # control_image_path
+            overrides["control_image_path"].append(value)
+        elif option == "cim":  # control_image_mask_path
+            overrides["control_image_mask_path"].append(value)
+        elif option == "of":  # one_frame_inference
+            overrides["one_frame_inference"] = value
+
+    # If no control_image_path was provided, remove the empty list
+    if not overrides["control_image_path"]:
+        del overrides["control_image_path"]
+    if not overrides["control_image_mask_path"]:
+        del overrides["control_image_mask_path"]
 
     return overrides
 
@@ -645,7 +684,7 @@ def prepare_t2v_inputs(
     device: torch.device,
     vae: Optional[WanVAE] = None,
     encoded_context: Optional[Dict] = None,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Tuple[dict, dict]]:
+) -> Tuple[torch.Tensor, Tuple[dict, dict]]:
     """Prepare inputs for T2V
 
     Args:
@@ -727,7 +766,106 @@ def prepare_t2v_inputs(
         arg_c["y"] = [y]
         arg_null["y"] = [y]
 
-    return noise, context, context_null, (arg_c, arg_null)
+    return noise, (arg_c, arg_null)
+
+
+def parse_one_frame_inference_args(one_frame_inference_arg: str) -> Tuple[int, List[int], List[int], int]:
+    """Parse one frame inference arguments"""
+    one_frame_inference = set()
+    for mode in one_frame_inference_arg.split(","):
+        one_frame_inference.add(mode.strip())
+
+    target_index = 0
+    control_indices = []
+    for one_frame_param in one_frame_inference:
+        if one_frame_param.startswith("target_index="):
+            target_index = int(one_frame_param.split("=")[1])
+            logger.info(f"Set index for target: {target_index}")
+        elif one_frame_param.startswith("control_index="):
+            control_indices = one_frame_param.split("=")[1].split(";")
+            control_indices = [int(idx) for idx in control_indices]
+            logger.info(f"Set control indices: {control_indices}")
+
+    target_and_control_latent_indices = control_indices + [target_index]
+    f_indices = sorted(target_and_control_latent_indices)
+
+    one_frame_inference_index = f_indices.index(target_index)
+
+    return target_index, control_indices, f_indices, one_frame_inference_index
+
+
+def prepare_one_frame_inference(
+    args: argparse.Namespace,
+    accelerator: Accelerator,
+    vae: WanVAE,
+    device: torch.device,
+    lat_h: int,
+    lat_w: int,
+    height: int,
+    width: int,
+) -> Tuple[int, torch.Tensor, List[int]]:
+
+    target_index, _, f_indices, one_frame_inference_index = parse_one_frame_inference_args(args.one_frame_inference)
+
+    # prepare image
+    def preprocess_image(image_path: str):
+        image = Image.open(image_path)
+        if image.mode == "RGBA":
+            alpha = image.split()[-1]
+        else:
+            alpha = None
+        image = image.convert("RGB")
+
+        image_np = np.array(image)  # PIL to numpy, HWC
+
+        image_np = image_video_dataset.resize_image_to_bucket(image_np, (width, height))
+        image_tensor = torch.from_numpy(image_np).float() / 127.5 - 1.0  # -1 to 1.0, HWC
+        image_tensor = image_tensor.permute(2, 0, 1)[:, None]  # HWC -> CHW -> CFHW, C=3, F=1
+        return image_tensor, image_np, alpha
+
+    # check control images
+    control_image_tensors = []
+    control_mask_images = []
+    if args.control_image_path is not None and len(args.control_image_path) > 0:
+        for ctrl_image_path in args.control_image_path:
+            control_image_tensor, _, control_mask = preprocess_image(ctrl_image_path)
+            control_image_tensors.append(control_image_tensor)
+            control_mask_images.append(control_mask)
+
+    # TODO mask is not supported yet
+
+    vae.to_device(device)
+
+    with accelerator.autocast(), torch.no_grad():
+        black_image_latent = vae.encode([torch.zeros((3, 1, height, width), dtype=torch.float32, device=device)])[0]
+
+    control_latents = []
+    if control_image_tensors is not None:
+        # encode image to latent space with VAE
+        logger.info(f"Encoding image to latent space")
+
+        for ctrl_image_tensor in control_image_tensors:
+            # encode image one by one
+            with accelerator.autocast(), torch.no_grad():
+                control_latent = vae.encode([ctrl_image_tensor.to(device)])[0]
+            control_latents.append(control_latent)
+
+    vae.to_device("cpu")
+
+    lat_f = 1 + (len(control_latents) if control_latents is not None else 0)
+
+    # Create latent and mask for the required number of frames
+    y = torch.zeros(4 + 16, lat_f, lat_h, lat_w, dtype=torch.float32, device=device)
+    ci = 0
+    for j, index in enumerate(f_indices):
+        if index == target_index:
+            y[4:, j : j + 1, :, :] = black_image_latent  # set target latent to black image
+        else:
+            y[:4, j, :, :] = 1.0  # set mask to 1.0 for the clean latent frames
+            y[4:, j : j + 1, :, :] = control_latents[ci]  # set control latent
+            ci += 1
+
+    return one_frame_inference_index, y, f_indices
 
 
 def prepare_i2v_inputs(
@@ -737,7 +875,7 @@ def prepare_i2v_inputs(
     device: torch.device,
     vae: WanVAE,
     encoded_context: Optional[Dict] = None,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Tuple[dict, dict]]:
+) -> Tuple[torch.Tensor, Tuple[dict, dict], Optional[int]]:
     """Prepare inputs for I2V
 
     Args:
@@ -774,6 +912,7 @@ def prepare_i2v_inputs(
         end_img = None
         end_img_cv2 = None
     has_end_image = end_img is not None
+    additional_frames = 1 if has_end_image and not config.flf2v else 0
 
     # calculate latent dimensions: keep aspect ratio
     height, width = img_tensor.shape[1:]
@@ -783,7 +922,7 @@ def prepare_i2v_inputs(
     height = lat_h * config.vae_stride[1]
     width = lat_w * config.vae_stride[2]
     lat_f = (frames - 1) // config.vae_stride[0] + 1  # size of latent frames
-    max_seq_len = (lat_f + (1 if has_end_image else 0)) * lat_h * lat_w // (config.patch_size[1] * config.patch_size[2])
+    max_seq_len = (lat_f + additional_frames) * lat_h * lat_w // (config.patch_size[1] * config.patch_size[2])
 
     # set seed
     seed = args.seed if args.seed is not None else random.randint(0, 2**32 - 1)
@@ -793,18 +932,6 @@ def prepare_i2v_inputs(
     else:
         # ComfyUI compatible noise
         seed_g = torch.manual_seed(seed)
-
-    # generate noise
-    noise = torch.randn(
-        16,
-        lat_f + (1 if has_end_image else 0),
-        lat_h,
-        lat_w,
-        dtype=torch.float32,
-        generator=seed_g,
-        device=device if not args.cpu_noise else "cpu",
-    )
-    noise = noise.to(device)
 
     # configure negative prompt
     n_prompt = args.negative_prompt if args.negative_prompt else config.sample_neg_prompt
@@ -836,6 +963,11 @@ def prepare_i2v_inputs(
         logger.info(f"Encoding image to CLIP context")
         with torch.amp.autocast(device_type=device.type, dtype=torch.float16), torch.no_grad():
             clip_context = clip.visual([img_tensor[:, None, :, :]])
+            # I2V end image is not officially supported, so no additional CLIP context
+            if end_img is not None and config.flf2v: 
+                end_img_tensor = TF.to_tensor(end_img).sub_(0.5).div_(0.5).to(device)
+                end_clip_context = clip.visual([end_img_tensor[:, None, :, :]])
+                clip_context = torch.concat([clip_context, end_clip_context], dim=0)
         logger.info(f"Encoding complete")
 
         # free CLIP model and clean memory
@@ -847,56 +979,93 @@ def prepare_i2v_inputs(
         context_null = encoded_context["context_null"]
         clip_context = encoded_context["clip_context"]
 
-    # encode image to latent space with VAE
-    logger.info(f"Encoding image to latent space")
-    vae.to_device(device)
+    # check if one frame inference is enabled
+    if args.one_frame_inference is not None:
+        if has_end_image and not config.flf2v:
+            logger.warning("One frame inference with end image is not supported other than FLF2V")
+        one_frame_inference_index, y, f_indices = prepare_one_frame_inference(
+            args, accelerator, vae, device, lat_h, lat_w, height, width
+        )
+        max_seq_len = len(f_indices) * lat_h * lat_w // (config.patch_size[1] * config.patch_size[2])
+    else:
+        one_frame_inference_index, f_indices = None, None
 
-    # resize image
-    interpolation = cv2.INTER_AREA if height < img_cv2.shape[0] else cv2.INTER_CUBIC
-    img_resized = cv2.resize(img_cv2, (width, height), interpolation=interpolation)
-    img_resized = TF.to_tensor(img_resized).sub_(0.5).div_(0.5).to(device)  # -1 to 1, CHW
-    img_resized = img_resized.unsqueeze(1)  # CFHW
+        # encode image to latent space with VAE
+        logger.info(f"Encoding image to latent space")
+        vae.to_device(device)
 
-    if has_end_image:
-        interpolation = cv2.INTER_AREA if height < end_img_cv2.shape[1] else cv2.INTER_CUBIC
-        end_img_resized = cv2.resize(end_img_cv2, (width, height), interpolation=interpolation)
-        end_img_resized = TF.to_tensor(end_img_resized).sub_(0.5).div_(0.5).to(device)  # -1 to 1, CHW
-        end_img_resized = end_img_resized.unsqueeze(1)  # CFHW
-
-    # create mask for the first frame
-    msk = torch.zeros(4, lat_f + (1 if has_end_image else 0), lat_h, lat_w, device=device)
-    msk[:, 0] = 1
-    if has_end_image:
-        msk[:, -1] = 1
-
-    # encode image to latent space
-    with accelerator.autocast(), torch.no_grad():
-        # padding to match the required number of frames
-        padding_frames = frames - 1  # the first frame is image
-        img_resized = torch.concat([img_resized, torch.zeros(3, padding_frames, height, width, device=device)], dim=1)
-        y = vae.encode([img_resized])[0]
+        # resize image
+        interpolation = cv2.INTER_AREA if height < img_cv2.shape[0] else cv2.INTER_CUBIC
+        img_resized = cv2.resize(img_cv2, (width, height), interpolation=interpolation)
+        img_resized = TF.to_tensor(img_resized).sub_(0.5).div_(0.5).to(device)  # -1 to 1, CHW
+        img_resized = img_resized.unsqueeze(1)  # CFHW
 
         if has_end_image:
-            y_end = vae.encode([end_img_resized])[0]
-            y = torch.concat([y, y_end], dim=1)  # add end frame
+            interpolation = cv2.INTER_AREA if height < end_img_cv2.shape[1] else cv2.INTER_CUBIC
+            end_img_resized = cv2.resize(end_img_cv2, (width, height), interpolation=interpolation)
+            end_img_resized = TF.to_tensor(end_img_resized).sub_(0.5).div_(0.5).to(device)  # -1 to 1, CHW
+            end_img_resized = end_img_resized.unsqueeze(1)  # CFHW
 
-    y = torch.concat([msk, y])
-    logger.info(f"Encoding complete")
+        # create mask for the first frame
+        # if unofficial end image is used, we need to add an additional frame for it
+        msk = torch.zeros(4, lat_f + additional_frames, lat_h, lat_w, device=device)
+        msk[:, 0] = 1
+        if has_end_image:
+            # this process is confirmed by official code for FLF2V
+            msk[:, -1] = 1
 
-    # Fun-Control: encode control video to latent space
-    if config.is_fun_control:
-        # TODO use same resizing as for image
-        logger.info(f"Encoding control video to latent space")
-        # C, F, H, W
-        control_video = load_control_video(args.control_path, frames + (1 if has_end_image else 0), height, width).to(device)
+        # encode image to latent space
         with accelerator.autocast(), torch.no_grad():
-            control_latent = vae.encode([control_video])[0]
-        y = y[msk.shape[0] :]  # remove mask because Fun-Control does not need it
-        if has_end_image:
-            y[:, 1:-1] = 0  # remove image latent except first and last frame. according to WanVideoWrapper, this doesn't work
-        else:
-            y[:, 1:] = 0  # remove image latent except first frame
-        y = torch.concat([control_latent, y], dim=0)  # add control video latent
+            if not config.flf2v or not has_end_image:
+                # padding to match the required number of frames
+                padding_frames = frames - 1  # the first frame is image
+                img_resized = torch.concat([img_resized, torch.zeros(3, padding_frames, height, width, device=device)], dim=1)
+                y = vae.encode([img_resized])[0]
+
+                if has_end_image:
+                    y_end = vae.encode([end_img_resized])[0]
+                    y = torch.concat([y, y_end], dim=1)  # add end frame
+            else:
+                # FLF2V: encode image and end image together
+                padding_frames = frames - 2  # first and last frames are images
+                img_resized = torch.concat(
+                    [img_resized, torch.zeros(3, padding_frames, height, width, device=device), end_img_resized], dim=1
+                )
+                y = vae.encode([img_resized])[0]
+
+        y = torch.concat([msk, y])
+        logger.info(f"Encoding complete")
+
+        # Fun-Control: encode control video to latent space
+        if config.is_fun_control:
+            # TODO use same resizing as for image
+            logger.info(f"Encoding control video to latent space")
+            # C, F, H, W
+            control_video = load_control_video(args.control_path, frames + (1 if has_end_image else 0), height, width).to(device)
+            with accelerator.autocast(), torch.no_grad():
+                control_latent = vae.encode([control_video])[0]
+            y = y[msk.shape[0] :]  # remove mask because Fun-Control does not need it
+            if has_end_image:
+                y[:, 1:-1] = 0  # remove image latent except first and last frame. according to WanVideoWrapper, this doesn't work
+            else:
+                y[:, 1:] = 0  # remove image latent except first frame
+            y = torch.concat([control_latent, y], dim=0)  # add control video latent
+
+    # generate noise
+    noise = torch.randn(
+        16,
+        y.shape[1],  # number of frames in latent space
+        lat_h,
+        lat_w,
+        dtype=torch.float32,
+        generator=seed_g,
+        device=device if not args.cpu_noise else "cpu",
+    )
+    noise = noise.to(device)
+
+    print(
+        f"noise shape: {noise.shape}, y shape: {y.shape}, context shape: {context[0].shape}, clip_context shape: {clip_context.shape}"
+    )
 
     # prepare model input arguments
     arg_c = {
@@ -904,6 +1073,7 @@ def prepare_i2v_inputs(
         "clip_fea": clip_context,
         "seq_len": max_seq_len,
         "y": [y],
+        "f_indices": [f_indices] if f_indices is not None else None,
     }
 
     arg_null = {
@@ -911,12 +1081,13 @@ def prepare_i2v_inputs(
         "clip_fea": clip_context,
         "seq_len": max_seq_len,
         "y": [y],
+        "f_indices": [f_indices] if f_indices is not None else None,
     }
 
     vae.to_device("cpu")  # move VAE to CPU to save memory
     clean_memory_on_device(device)
 
-    return noise, context, context_null, y, (arg_c, arg_null)
+    return noise, (arg_c, arg_null), one_frame_inference_index
 
 
 def load_control_video(control_path: str, frames: int, height: int, width: int) -> torch.Tensor:
@@ -1130,7 +1301,9 @@ def run_sampling(
     return latent
 
 
-def generate(args: argparse.Namespace, gen_settings: GenerationSettings, shared_models: Optional[Dict] = None) -> torch.Tensor:
+def generate(
+    args: argparse.Namespace, gen_settings: GenerationSettings, shared_models: Optional[Dict] = None
+) -> tuple[torch.Tensor, Optional[int]]:
     """main function for generation
 
     Args:
@@ -1138,7 +1311,7 @@ def generate(args: argparse.Namespace, gen_settings: GenerationSettings, shared_
         shared_models: dictionary containing pre-loaded models and encoded data
 
     Returns:
-        torch.Tensor: generated latent
+        tuple[torch.Tensor, Optional[int]]: (latent tensor, one frame inference index)
     """
     device, cfg, dit_dtype, dit_weight_dtype, vae_dtype = (
         gen_settings.device,
@@ -1153,13 +1326,14 @@ def generate(args: argparse.Namespace, gen_settings: GenerationSettings, shared_
     accelerator = accelerate.Accelerator(mixed_precision=mixed_precision)
 
     # I2V or T2V
-    is_i2v = "i2v" in args.task
+    is_i2v = "i2v" in args.task or "flf2v" in args.task
 
     # prepare seed
     seed = args.seed if args.seed is not None else random.randint(0, 2**32 - 1)
     args.seed = seed  # set seed to args for saving
 
     # Check if we have shared models
+    one_frame_inference_index = None
     if shared_models is not None:
         # Use shared models and encoded data
         vae = shared_models.get("vae")
@@ -1169,16 +1343,16 @@ def generate(args: argparse.Namespace, gen_settings: GenerationSettings, shared_
         # prepare inputs
         if is_i2v:
             # I2V
-            noise, context, context_null, y, inputs = prepare_i2v_inputs(args, cfg, accelerator, device, vae, encoded_context)
+            noise, inputs, one_frame_inference_index = prepare_i2v_inputs(args, cfg, accelerator, device, vae, encoded_context)
         else:
             # T2V
-            noise, context, context_null, inputs = prepare_t2v_inputs(args, cfg, accelerator, device, vae, encoded_context)
+            noise, inputs = prepare_t2v_inputs(args, cfg, accelerator, device, vae, encoded_context)
     else:
         # prepare inputs without shared models
         if is_i2v:
             # I2V: need text encoder, VAE and CLIP
             vae = load_vae(args, cfg, device, vae_dtype)
-            noise, context, context_null, y, inputs = prepare_i2v_inputs(args, cfg, accelerator, device, vae)
+            noise, inputs, one_frame_inference_index = prepare_i2v_inputs(args, cfg, accelerator, device, vae)
             # vae is on CPU after prepare_i2v_inputs
         else:
             # T2V: need text encoder
@@ -1186,7 +1360,7 @@ def generate(args: argparse.Namespace, gen_settings: GenerationSettings, shared_
             if cfg.is_fun_control:
                 # Fun-Control: need VAE for encoding control video
                 vae = load_vae(args, cfg, device, vae_dtype)
-            noise, context, context_null, inputs = prepare_t2v_inputs(args, cfg, accelerator, device, vae)
+            noise, inputs = prepare_t2v_inputs(args, cfg, accelerator, device, vae)
 
         # load DiT model
         model = load_dit_model(args, cfg, device, dit_dtype, dit_weight_dtype, is_i2v)
@@ -1211,6 +1385,9 @@ def generate(args: argparse.Namespace, gen_settings: GenerationSettings, shared_
 
     # run sampling
     latent = run_sampling(model, noise, scheduler, timesteps, args, inputs, device, seed_g, accelerator, is_i2v)
+    if one_frame_inference_index is not None:
+        latent = latent[:, one_frame_inference_index : one_frame_inference_index + 1, :]
+        latent = latent.contiguous()  # safetensors requires contiguous tensors :(
 
     # Only clean up shared models if they were created within this function
     if shared_models is None:
@@ -1220,8 +1397,9 @@ def generate(args: argparse.Namespace, gen_settings: GenerationSettings, shared_
         synchronize_device(device)
 
         # wait for 5 seconds until block swap is done
-        logger.info("Waiting for 5 seconds to finish block swap")
-        time.sleep(5)
+        if args.blocks_to_swap > 0:
+            logger.info("Waiting for 5 seconds to finish block swap")
+            time.sleep(5)
 
         gc.collect()
         clean_memory_on_device(device)
@@ -1257,9 +1435,9 @@ def decode_latent(latent: torch.Tensor, args: argparse.Namespace, cfg) -> torch.
 
     vae.to_device(device)
 
-    logger.info(f"Decoding video from latents: {latent.shape}")
     x0 = latent.to(device)
 
+    logger.info(f"Decoding video from latents: {latent.shape}")
     with torch.autocast(device_type=device.type, dtype=vae_dtype), torch.no_grad():
         videos = vae.decode(x0)
 
@@ -1267,11 +1445,11 @@ def decode_latent(latent: torch.Tensor, args: argparse.Namespace, cfg) -> torch.
     if args.trim_tail_frames:
         videos[0] = videos[0][:, : -args.trim_tail_frames]
 
-    logger.info(f"Decoding complete")
     video = videos[0]
     del videos
     video = video.to(torch.float32).cpu()
 
+    logger.info(f"Decoding complete")
     return video
 
 
@@ -1362,7 +1540,8 @@ def save_images(sample: torch.Tensor, args: argparse.Namespace, original_base_na
     original_name = "" if original_base_name is None else f"_{original_base_name}"
     image_name = f"{time_flag}_{seed}{original_name}"
     sample = sample.unsqueeze(0)
-    save_images_grid(sample, save_path, image_name, rescale=True)
+    one_frame_inference = sample.shape[2] == 1  # check if one frame inference is used
+    save_images_grid(sample, save_path, image_name, rescale=True, create_subdir=not one_frame_inference)
     logger.info(f"Sample images saved to: {save_path}/{image_name}")
 
     return f"{save_path}/{image_name}"
@@ -1381,7 +1560,7 @@ def save_output(
         width: width of frame
         original_base_names: original base names (if latents are loaded from files)
     """
-    if args.output_type == "latent" or args.output_type == "both":
+    if args.output_type == "latent" or args.output_type == "both" or args.output_type == "latent_images":
         # save latent
         save_latent(latent, args, height, width)
 
@@ -1501,6 +1680,12 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
             with torch.amp.autocast(device_type=device.type, dtype=torch.float16), torch.no_grad():
                 clip_context = clip.visual([img_tensor[:, None, :, :]])
 
+            if prompt_args.end_image_path is not None and os.path.exists(prompt_args.end_image_path):
+                end_img = Image.open(prompt_args.end_image_path).convert("RGB")
+                end_img_tensor = TF.to_tensor(end_img).sub_(0.5).div_(0.5).to(device)
+                end_clip_context = clip.visual([end_img_tensor[:, None, :, :]])
+                clip_context = torch.concat([clip_context, end_clip_context], dim=0)
+
             encoded_contexts[prompt_data["prompt"]]["clip_context"] = clip_context
 
         # Free CLIP and clean memory
@@ -1546,7 +1731,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
 
         # Save latent if needed
         height, width, _ = check_inputs(prompt_args)
-        if prompt_args.output_type == "latent" or prompt_args.output_type == "both":
+        if prompt_args.output_type == "latent" or prompt_args.output_type == "both" or prompt_args.output_type == "latent_images":
             save_latent(latent, prompt_args, height, width)
 
         all_latents.append(latent)
@@ -1558,8 +1743,9 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
     synchronize_device(device)
 
     # wait for 5 seconds until block swap is done
-    logger.info("Waiting for 5 seconds to finish block swap")
-    time.sleep(5)
+    if args.blocks_to_swap > 0:
+        logger.info("Waiting for 5 seconds to finish block swap")
+        time.sleep(5)
 
     gc.collect()
     clean_memory_on_device(device)
@@ -1606,7 +1792,7 @@ def process_interactive(args: argparse.Namespace) -> None:
         gen_settings.dit_weight_dtype,
         gen_settings.vae_dtype,
     )
-    is_i2v = "i2v" in args.task
+    is_i2v = "i2v" in args.task or "flf2v" in args.task
 
     # Initialize models to None
     text_encoder = None
@@ -1690,6 +1876,13 @@ def process_interactive(args: argparse.Namespace) -> None:
                         with torch.amp.autocast(device_type=device.type, dtype=torch.float16), torch.no_grad():
                             clip_context = clip.visual([img_tensor[:, None, :, :]])
 
+                        if prompt_args.end_image_path is not None and os.path.exists(prompt_args.end_image_path):
+                            end_img = Image.open(prompt_args.end_image_path).convert("RGB")
+                            end_img_tensor = TF.to_tensor(end_img).sub_(0.5).div_(0.5).to(device)
+                            with torch.amp.autocast(device_type=device.type, dtype=torch.float16), torch.no_grad():
+                                end_clip_context = clip.visual([end_img_tensor[:, None, :, :]])
+                            clip_context = torch.concat([clip_context, end_clip_context], dim=0)
+                            
                         encoded_context["clip_context"] = clip_context
 
                     # Move CLIP to CPU after use
@@ -1730,7 +1923,11 @@ def process_interactive(args: argparse.Namespace) -> None:
 
                 # Save latent if needed
                 height, width, _ = check_inputs(prompt_args)
-                if prompt_args.output_type == "latent" or prompt_args.output_type == "both":
+                if (
+                    prompt_args.output_type == "latent"
+                    or prompt_args.output_type == "both"
+                    or prompt_args.output_type == "latent_images"
+                ):
                     save_latent(latent, prompt_args, height, width)
 
                 # Decode and save output
@@ -1868,7 +2065,6 @@ def main():
         video_length = (video_length - 1) * cfg.vae_stride[0] + 1
         args.seed = seeds[0]
 
-        # Decode and save
         save_output(latent[0], args, cfg, height, width, original_base_names)
 
     elif args.from_file:

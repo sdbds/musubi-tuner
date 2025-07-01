@@ -234,8 +234,13 @@ def line_to_prompt_dict(line: str) -> dict:
                 continue
 
             m = re.match(r"i (.+)", parg, re.IGNORECASE)
-            if m:  # negative prompt
+            if m:  # image path
                 prompt_dict["image_path"] = m.group(1)
+                continue
+
+            m = re.match(r"ei (.+)", parg, re.IGNORECASE)
+            if m:  # end image path
+                prompt_dict["end_image_path"] = m.group(1)
                 continue
 
             m = re.match(r"cn (.+)", parg, re.IGNORECASE)

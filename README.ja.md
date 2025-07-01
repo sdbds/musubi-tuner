@@ -52,6 +52,9 @@ Wan2.1については、[Wan2.1のドキュメント](./docs/wan.md)も参照し
 
 - GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- 2025/06/25
+    - Wan2.1アーキテクチャで1フレーム推論および学習をサポートしました。詳細は[Wanの1フレーム推論のドキュメント](./docs/wan_1f.md)を参照してください。
+
 - 2025/06/17
     - FramePackの推論スクリプトで [MagCache](https://github.com/Zehong-Ma/MagCache) をサポートしました。詳しくは[高度な設定](./docs/advanced_config.md#magcache)を参照してください。
     - FramePackの推論スクリプトで、対話モードおよびバッチモードでText Encoderの出力をキャッシュするようにしました。また処理順を見直し、モデルオフロードのタイミングを調整することで、連続生成時の処理時間を短縮しました。

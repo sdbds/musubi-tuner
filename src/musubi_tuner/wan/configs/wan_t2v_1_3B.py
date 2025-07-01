@@ -9,6 +9,7 @@ t2v_1_3B = EasyDict(__name__="Config: Wan T2V 1.3B")
 t2v_1_3B.update(wan_shared_cfg)
 t2v_1_3B.i2v = False
 t2v_1_3B.is_fun_control = False
+t2v_1_3B.flf2v = False
 
 # t5
 t2v_1_3B.t5_checkpoint = "models_t5_umt5-xxl-enc-bf16.pth"
