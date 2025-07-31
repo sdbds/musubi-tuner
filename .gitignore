@@ -6,3 +6,7 @@ uv.lock
 main.exp
 main.lib
 main.obj
+CLAUDE.md
+GEMINI.md
+.claude/
+.gemini/

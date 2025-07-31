@@ -41,7 +41,7 @@ except:
 
 from musubi_tuner.utils.model_utils import str_to_dtype
 from musubi_tuner.utils.device_utils import clean_memory_on_device
-from musubi_tuner.hv_generate_video import save_images_grid, save_videos_grid, synchronize_device
+from musubi_tuner.hv_generate_video import get_time_flag, save_images_grid, save_videos_grid, synchronize_device
 from musubi_tuner.dataset.image_video_dataset import load_video
 
 import logging
@@ -1467,7 +1467,7 @@ def save_latent(latent: torch.Tensor, args: argparse.Namespace, height: int, wid
     """
     save_path = args.save_path
     os.makedirs(save_path, exist_ok=True)
-    time_flag = datetime.fromtimestamp(time.time()).strftime("%Y%m%d-%H%M%S")
+    time_flag = get_time_flag()
 
     seed = args.seed
     video_length = args.video_length
@@ -1508,7 +1508,7 @@ def save_video(video: torch.Tensor, args: argparse.Namespace, original_base_name
     """
     save_path = args.save_path
     os.makedirs(save_path, exist_ok=True)
-    time_flag = datetime.fromtimestamp(time.time()).strftime("%Y%m%d-%H%M%S")
+    time_flag = get_time_flag()
 
     seed = args.seed
     original_name = "" if original_base_name is None else f"_{original_base_name}"
@@ -1534,7 +1534,7 @@ def save_images(sample: torch.Tensor, args: argparse.Namespace, original_base_na
     """
     save_path = args.save_path
     os.makedirs(save_path, exist_ok=True)
-    time_flag = datetime.fromtimestamp(time.time()).strftime("%Y%m%d-%H%M%S")
+    time_flag = get_time_flag()
 
     seed = args.seed
     original_name = "" if original_base_name is None else f"_{original_base_name}"

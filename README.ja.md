@@ -39,7 +39,7 @@
 
 このリポジトリは、HunyuanVideo、Wan2.1、FramePackのLoRA学習用のコマンドラインツールです。このリポジトリは非公式であり、公式のHunyuanVideoやWan2.1、FramePackのリポジトリとは関係ありません。
 
-Wan2.1については、[Wan2.1のドキュメント](./docs/wan.md)も参照してください。FramePackについては、[FramePackのドキュメント](./docs/framepack.md)を参照してください。
+Wan2.1については、[Wan2.1のドキュメント](./docs/wan.md)も参照してください。FramePackについては、[FramePackのドキュメント](./docs/framepack.md)を、FLUX.1 Kontextについては[FLUX.1 Kontextのドキュメント](./docs/flux_kontext.md)を参照してください。
 
 *リポジトリは開発中です。*
 
@@ -51,6 +51,16 @@ Wan2.1については、[Wan2.1のドキュメント](./docs/wan.md)も参照し
 ### 最近の更新
 
 - GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
+
+- 2025/07/31
+    - [AI コーディングエージェントを使用する開発者の方へのセクション](#aiコーディングエージェントを使用する開発者の方へ)を追加しました。AIエージェントを利用する場合はご一読ください。
+
+- 2025/07/29
+    - 依存関係が不足していてFLUX.1 KontextのLoRA学習ができない不具合を修正しました。`sentencepiece`が必要です。
+        - `pyproject.toml`に`sentencepiece`を追加しました。
+
+- 2025/07/28
+    - FLUX.1 KontextのLoRA学習を追加しました。詳細は[FLUX.1 KontextのLoRA学習のドキュメント](./docs/flux_kontext.md)を参照してください。
 
 - 2025/06/25
     - Wan2.1アーキテクチャで1フレーム推論および学習をサポートしました。詳細は[Wanの1フレーム推論のドキュメント](./docs/wan_1f.md)を参照してください。
@@ -65,31 +75,36 @@ Wan2.1については、[Wan2.1のドキュメント](./docs/wan.md)も参照し
 - 2025/06/12
     - LoRAモデルのPost Hoc EMAを行う`lora_post_hoc_ema.py`を追加しました。LoRAモデルの学習後に、Post Hoc EMAを適用してモデルの精度を向上させることができます。詳細は[こちらのドキュメント](./docs/advanced_config.md#lora-post-hoc-ema-merging--loraのpost-hoc-emaマージ)を参照してください。
 
-- 2025/06/11
-    - リポジトリのパッケージングに関するPRをマージしました。xhiroga氏に感謝します。PR [#319](https://github.com/kohya-ss/musubi-tuner/pull/319)
-        - `pyproject.toml`を導入し、インストール方法を更新しました。既存の環境からの移行方法については、[このディスカッションの投稿](https://github.com/kohya-ss/musubi-tuner/discussions/345)を参照してください。
-    - `README.md`を更新し、`pyproject.toml`を使用した新しいインストール方法を反映しました。
-
-- 2025/06/09
-    - FramePackの1フレーム推論のドキュメントに `--control_image_path` についての説明を追加しました。詳細は[1フレーム推論のドキュメント](./docs/framepack_1f.md#one-single-frame-inference--1フレーム推論)を参照してください。
-    - FramePackの1フレーム学習で、no_4xを指定しないとサンプル画像生成がクラッシュする不具合を修正しました。PR [#339](https://github.com/kohya-ss/musubi-tuner/pull/339)
-
-- 2025/06/08
-    - wan_generate_video.pyとfpack_generate_video.pyのinteractiveモードで、`prompt-toolkit`がインストールされている場合、それを使用するようになりました。これにより、特にLinux環境でプロンプトの編集や補完が用意になります。PR [#330](https://github.com/kohya-ss/musubi-tuner/issues/312) 
-        - この機能はオプションです。有効にするには、`pip install prompt-toolkit`でインストールしてください。インストールしてある場合は自動的に有効になります。
-
-- 2025/05/30
-    - データセットの読み込み時にリサイズが正しく行われない場合がある不具合を修正しました。キャッシュの再作成をお願いします。PR [#312](https://github.com/kohya-ss/musubi-tuner/issues/312) sdbds 氏に感謝します。
-        - リサイズ前の画像の幅または高さがバケットの幅または高さと一致していて、かつもう片方が異なる場合（具体的には、たとえば元画像が640\*480で、バケットが640\*360の場合など）に不具合が発生していました。
-    - FramePackの1フレーム推論、学習のコードを大幅に改良しました。詳細は[FramePackの1フレーム推論のドキュメント](./docs/framepack_1f.md)を参照してください。
-        - **破壊的変更**: 1フレーム学習のデータセット形式、学習オプション、推論オプションが変更されました。ドキュメントに従って、データセット設定の変更、キャッシュの再作成、学習・推論オプションの変更を行ってください。
-    - FramePackの1フレーム推論と学習についてのドキュメントを追加しました。詳細は[前述のドキュメント](./docs/framepack_1f.md)を参照してください。
-
 ### リリースについて
 
 Musubi Tunerの解説記事執筆や、関連ツールの開発に取り組んでくださる方々に感謝いたします。このプロジェクトは開発中のため、互換性のない変更や機能追加が起きる可能性があります。想定外の互換性問題を避けるため、参照用として[リリース](https://github.com/kohya-ss/musubi-tuner/releases)をお使いください。
 
 最新のリリースとバージョン履歴は[リリースページ](https://github.com/kohya-ss/musubi-tuner/releases)で確認できます。
+
+### AIコーディングエージェントを使用する開発者の方へ
+
+このリポジトリでは、ClaudeやGeminiのようなAIエージェントが、プロジェクトの概要や構造を理解しやすくするためのエージェント向け文書（プロンプト）を用意しています。
+
+これらを使用するためには、プロジェクトのルートディレクトリに各エージェント向けの設定ファイルを作成し、明示的に読み込む必要があります。
+
+**セットアップ手順:**
+
+1.  プロジェクトのルートに `CLAUDE.md` や `GEMINI.md` ファイルを作成します。
+2.  `CLAUDE.md` に以下の行を追加して、リポジトリが推奨するプロンプトをインポートします（現在、両者はほぼ同じ内容です）：
+
+    ```markdown
+    @./.ai/claude.prompt.md
+    ```
+
+    Geminiの場合はこちらです：
+
+    ```markdown
+    @./.ai/gemini.prompt.md
+    ```
+
+3.  インポートした行の後に、必要な指示を適宜追加してください（例：`Always respond in Japanese.`）。
+
+このアプローチにより、共有されたプロジェクトのコンテキストを活用しつつ、エージェントに与える指示を各ユーザーが自由に制御できます。`CLAUDE.md` と `GEMINI.md` はすでに `.gitignore` に記載されているため、リポジトリにコミットされることはありません。
 
 ## 概要
 
@@ -193,7 +208,7 @@ Text EncoderにはComfyUI提供のモデルを使用させていただきます�
 
 ### データセット設定
 
-[こちら](./dataset/dataset_config.md)を参照してください。
+[こちら](./src/musubi_tuner/dataset/dataset_config.md)を参照してください。
 
 ### latentの事前キャッシュ
 
