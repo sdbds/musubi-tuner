@@ -949,10 +949,10 @@ class Flux(nn.Module):
         )
 
         self.offloader_double = ModelOffloader(
-            "double", self.num_double_blocks, self.double_blocks, double_blocks_to_swap, supports_backward, device  # , debug=True
+            "double", self.double_blocks, self.num_double_blocks, double_blocks_to_swap, supports_backward, device  # , debug=True
         )
         self.offloader_single = ModelOffloader(
-            "single", self.num_single_blocks, self.single_blocks, single_blocks_to_swap, supports_backward, device  # , debug=True
+            "single", self.single_blocks, self.num_single_blocks, single_blocks_to_swap, supports_backward, device  # , debug=True
         )
         print(
             f"FLUX: Block swap enabled. Swapping {num_blocks} blocks, double blocks: {double_blocks_to_swap}, single blocks: {single_blocks_to_swap}."
