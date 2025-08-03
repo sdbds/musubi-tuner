@@ -124,7 +124,7 @@ class WanNetworkTrainer(NetworkTrainer):
             if prompt_dict.get("end_image_path", None) is not None and self.i2v_training:
                 sample_prompts_image_embs[prompt_dict["end_image_path"]] = None
 
-        if len(sample_prompts_image_embs) > 0:
+        if len(sample_prompts_image_embs) > 0 and not self.config.v2_2:  # Wan2.2 does not use CLIP for I2V training
             logger.info(f"loading CLIP: {clip_path}")
             assert clip_path is not None, "CLIP path is required for I2V training / I2V学習にはCLIPのパスが必要です"
             clip = CLIPModel(dtype=config.clip_dtype, device=device, weight_path=clip_path)
@@ -192,7 +192,7 @@ class WanNetworkTrainer(NetworkTrainer):
         model: WanModel = transformer
         device = accelerator.device
         if cfg_scale is None:
-            cfg_scale = 5.0
+            cfg_scale = self.config.sample_guide_scale[0]  # use low noise guide scale by default
         do_classifier_free_guidance = do_classifier_free_guidance and cfg_scale != 1.0
 
         # prepare parameters
@@ -348,19 +348,24 @@ class WanNetworkTrainer(NetworkTrainer):
         arg_null = {"context": [context_null], "seq_len": max_seq_len}
 
         if self.i2v_training and not one_frame_mode:
-            arg_c["clip_fea"] = sample_parameter["clip_embeds"].to(device=device, dtype=dit_dtype)
-            arg_null["clip_fea"] = arg_c["clip_fea"]
-        if one_frame_mode:
-            if "end_image_clip_embeds" in sample_parameter:
-                arg_c["clip_fea"] = torch.cat(
-                    [sample_parameter["clip_embeds"], sample_parameter["end_image_clip_embeds"]], dim=0
-                ).to(device=device, dtype=dit_dtype)
-            else:
+            if not self.config.v2_2:
                 arg_c["clip_fea"] = sample_parameter["clip_embeds"].to(device=device, dtype=dit_dtype)
-            arg_null["clip_fea"] = arg_c["clip_fea"]
+                arg_null["clip_fea"] = arg_c["clip_fea"]
+
+        if one_frame_mode:
+            if not self.config.v2_2:
+                if "end_image_clip_embeds" in sample_parameter:
+                    arg_c["clip_fea"] = torch.cat(
+                        [sample_parameter["clip_embeds"], sample_parameter["end_image_clip_embeds"]], dim=0
+                    ).to(device=device, dtype=dit_dtype)
+                else:
+                    arg_c["clip_fea"] = sample_parameter["clip_embeds"].to(device=device, dtype=dit_dtype)
+                arg_null["clip_fea"] = arg_c["clip_fea"]
+
             arg_c["f_indices"] = [f_indices]
             arg_null["f_indices"] = arg_c["f_indices"]
             # print(f"One arg_c: {arg_c}, arg_null: {arg_null}")
+
         if self.i2v_training or self.control_training:
             arg_c["y"] = image_latents
             arg_null["y"] = image_latents
@@ -459,14 +464,16 @@ class WanNetworkTrainer(NetworkTrainer):
         if self.i2v_training:
             image_latents = batch["latents_image"]
             image_latents = image_latents.to(device=accelerator.device, dtype=network_dtype)
-            clip_fea = batch["clip"]
-            clip_fea = clip_fea.to(device=accelerator.device, dtype=network_dtype)
 
-            # clip_fea is [B, N, D] (normal) or [B, 1, N, D] (one frame) for I2V, and [B, 2, N, D] for FLF2V, we need to reshape it to [B, N, D] for I2V and [B*2, N, D] for FLF2V
-            if clip_fea.shape[1] == 1:
-                clip_fea = clip_fea.squeeze(1)
-            elif clip_fea.shape[1] == 2:
-                clip_fea = clip_fea.view(-1, clip_fea.shape[2], clip_fea.shape[3])
+            if not self.config.v2_2:
+                clip_fea = batch["clip"]
+                clip_fea = clip_fea.to(device=accelerator.device, dtype=network_dtype)
+
+                # clip_fea is [B, N, D] (normal) or [B, 1, N, D] (one frame) for I2V, and [B, 2, N, D] for FLF2V, we need to reshape it to [B, N, D] for I2V and [B*2, N, D] for FLF2V
+                if clip_fea.shape[1] == 1:
+                    clip_fea = clip_fea.squeeze(1)
+                elif clip_fea.shape[1] == 2:
+                    clip_fea = clip_fea.view(-1, clip_fea.shape[2], clip_fea.shape[3])
 
         if self.control_training:
             control_latents = batch["latents_control"]
@@ -518,7 +525,7 @@ def wan_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
         "--clip",
         type=str,
         default=None,
-        help="text encoder (CLIP) checkpoint path, optional. If training I2V model, this is required",
+        help="text encoder (CLIP) checkpoint path, optional. If training Wan2.1 I2V model, this is required",
     )
     parser.add_argument("--vae_cache_cpu", action="store_true", help="cache features in VAE on CPU")
     parser.add_argument("--one_frame", action="store_true", help="Use one frame sampling method for sample generation")

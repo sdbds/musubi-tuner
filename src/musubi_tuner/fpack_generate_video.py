@@ -475,7 +475,18 @@ def load_dit_model(args: argparse.Namespace, device: torch.device) -> HunyuanVid
         # merge LoRA weights statically
         if args.lora_weight is not None and len(args.lora_weight) > 0:
             # ugly hack to common merge_lora_weights function
-            merge_lora_weights(lora_framepack, model, args, device, convert_lora_for_framepack)
+            merge_lora_weights(
+                lora_framepack,
+                model,
+                args.lora_weight,
+                args.lora_multiplier,
+                args.include_patterns,
+                args.exclude_patterns,
+                device,
+                lycoris=True,
+                save_merged_model=args.save_merged_model,
+                converter=convert_lora_for_framepack,
+            )
 
         if args.fp8_scaled:
             state_dict = model.state_dict()  # bf16 state dict

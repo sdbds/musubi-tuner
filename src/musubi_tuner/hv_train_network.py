@@ -769,28 +769,35 @@ class NetworkTrainer:
             or args.timestep_sampling == "qinglong"
         ):
             skip_scaling = False
-            if args.timestep_sampling == "uniform" or args.timestep_sampling == "sigmoid":
-                # Simple random t-based noise sampling
-                if args.timestep_sampling == "sigmoid":
-                    t = torch.sigmoid(args.sigmoid_scale * torch.randn((batch_size,), device=device))
-                else:
-                    t = torch.rand((batch_size,), device=device)
 
-            elif args.timestep_sampling == "shift" or args.timestep_sampling == "flux_shift":
-                if args.timestep_sampling == "shift":
-                    shift = args.discrete_flow_shift
-                else:  # flux_shift
-                    h, w = latents.shape[-2:]
-                    # we are pre-packed so must adjust for packed size
-                    mu = train_utils.get_lin_function(y1=0.5, y2=1.15)((h // 2) * (w // 2))
-                    # def time_shift(mu: float, sigma: float, t: torch.Tensor):
-                    #     return math.exp(mu) / (math.exp(mu) + (1 / t - 1) ** sigma) # sigma=1.0
-                    shift = math.exp(mu)
+            def get_timesteps():
+                if args.timestep_sampling == "uniform" or args.timestep_sampling == "sigmoid":
+                    # Simple random t-based noise sampling
+                    if args.timestep_sampling == "sigmoid":
+                        t = torch.sigmoid(args.sigmoid_scale * torch.randn((batch_size,), device=device))
+                    else:
+                        t = torch.rand((batch_size,), device=device)
 
-                logits_norm = torch.randn(batch_size, device=device)
-                logits_norm = logits_norm * args.sigmoid_scale  # larger scale for more uniform sampling
-                t = logits_norm.sigmoid()
-                t = (t * shift) / (1 + (shift - 1) * t)
+                elif args.timestep_sampling == "shift" or args.timestep_sampling == "flux_shift":
+                    if args.timestep_sampling == "shift":
+                        shift = args.discrete_flow_shift
+                    else:  # flux_shift
+                        h, w = latents.shape[-2:]
+                        # we are pre-packed so must adjust for packed size
+                        mu = train_utils.get_lin_function(y1=0.5, y2=1.15)((h // 2) * (w // 2))
+                        # def time_shift(mu: float, sigma: float, t: torch.Tensor):
+                        #     return math.exp(mu) / (math.exp(mu) + (1 / t - 1) ** sigma) # sigma=1.0
+                        shift = math.exp(mu)
+
+                    logits_norm = torch.randn(batch_size, device=device)
+                    logits_norm = logits_norm * args.sigmoid_scale  # larger scale for more uniform sampling
+                    t = logits_norm.sigmoid()
+                    t = (t * shift) / (1 + (shift - 1) * t)
+                elif args.timestep_sampling == "logsnr":
+                    # https://arxiv.org/abs/2411.14793v3
+                    logsnr = torch.normal(mean=args.logit_mean, std=args.logit_std, size=(batch_size,), device=device)
+                    t = torch.sigmoid(-logsnr / 2)
+                return t  # 0 to 1
 
             elif args.timestep_sampling == "logsnr":
                 # https://arxiv.org/abs/2411.14793v3
@@ -861,6 +868,33 @@ class NetworkTrainer:
                 t_min /= 1000.0
                 t_max /= 1000.0
                 t = t * (t_max - t_min) + t_min  # scale to [t_min, t_max], default [0, 1]
+            t_min = args.min_timestep if args.min_timestep is not None else 0
+            t_max = args.max_timestep if args.max_timestep is not None else 1000.0
+            t_min /= 1000.0
+            t_max /= 1000.0
+
+            if not args.preserve_distribution_shape:
+                t = get_timesteps()
+                t = t * (t_max - t_min) + t_min  # scale to [t_min, t_max], default [0, 1]
+            else:
+                max_loops = 1000
+                available_t = []
+                for i in range(max_loops):
+                    t = get_timesteps()
+                    for t_i in t:
+                        if t_min <= t_i <= t_max:
+                            available_t.append(t_i)
+                        if len(available_t) == batch_size:
+                            break
+                    if len(available_t) == batch_size:
+                        break
+                if len(available_t) < batch_size:
+                    logger.warning(
+                        f"Could not sample {batch_size} valid timesteps in {max_loops} loops / {max_loops}ループで{batch_size}個の有効なタイムステップをサンプリングできませんでした"
+                    )
+                    available_t = get_timesteps()
+                else:
+                    t = torch.stack(available_t, dim=0)  # [batch_size, ]
 
             timesteps = t * 1000.0
             t = t.view(-1, 1, 1, 1, 1) if latents.ndim == 5 else t.view(-1, 1, 1, 1)
@@ -1528,7 +1562,7 @@ class NetworkTrainer:
 
         if train_dataset_group.num_train_items == 0:
             raise ValueError("No training items found in the dataset / データセットに学習データがありません")
-        
+
         current_epoch = Value("i", 0)
         current_step = Value("i", 0)
         ds_for_collator = train_dataset_group if args.max_data_loader_n_workers == 0 else None
@@ -2501,6 +2535,15 @@ def setup_parser_common() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="set maximum time step for training (1~1000, default is 1000) / 学習時のtime stepの最大値を設定する（1~1000で指定、省略時はデフォルト値(1000)）",
+    )
+    parser.add_argument(
+        "--preserve_distribution_shape",
+        action="store_true",
+        help="If specified, constrains timestep sampling to [min_timestep, max_timestep] "
+        "using rejection sampling, preserving the original distribution shape. "
+        "By default, the [0, 1] range is scaled, which distorts the distribution. Only effective when `timestep_sampling` is not 'sigma'."
+        " / 指定すると、タイムステップのサンプリングを[最小タイムステップ、最大タイムステップ]に制約し、元の分布形状を保持します。"
+        "デフォルトでは、[0, 1]の範囲がスケーリングされ、分布が歪むことがあります。timestep_samplingがsigma以外で有効です。",
     )
 
     parser.add_argument(

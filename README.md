@@ -346,6 +346,9 @@ Use `--sdpa` for PyTorch's scaled dot product attention. Use `--flash_attn` for 
 
 The format of LoRA trained is the same as `sd-scripts`.
 
+You can also specify the range of timesteps 
+with `--min_timestep` and `--max_timestep`. See [advanced configuration](./docs/advanced_config.md#specify-time-step-range-for-training--学習時のタイムステップ範囲の指定) for details.
+
 `--show_timesteps` can be set to `image` (requires `matplotlib`) or `console` to display timestep distribution and loss weighting during training.
 
 You can record logs during training. Refer to [Save and view logs in TensorBoard format](./docs/advanced_config.md#save-and-view-logs-in-tensorboard-format--tensorboard形式のログの保存と参照).

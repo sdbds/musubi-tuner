@@ -13,6 +13,7 @@
 - [PyTorch Dynamo optimization for model training](#pytorch-dynamo-optimization-for-model-training--モデルの学習におけるpytorch-dynamoの最適化)
 - [LoRA Post-Hoc EMA merging](#lora-post-hoc-ema-merging--loraのpost-hoc-emaマージ)
 - [MagCache](#magcache)
+- [Specify time step range for training](#specify-time-step-range-for-training--学習時のタイムステップ範囲の指定)
 
 ## How to specify `network_args` / `network_args`の指定方法
 
@@ -728,4 +729,74 @@ Musubi TunerにMagCache機能を実装しました。一部のコードはMagCac
 
 生成サンプルは英語での説明を参照してください。
 
+</details>
+
+## Specify time step range for training / 学習時のタイムステップ範囲の指定
+
+You can specify the range of timesteps for training. This is useful for focusing the training on a specific part of the diffusion process.
+
+- `--min_timestep`: Specifies the minimum timestep for training (0-999, default: 0).
+- `--max_timestep`: Specifies the maximum timestep for training (1-1000, default: 1000).
+- `--preserve_distribution_shape`: If specified, it constrains timestep sampling to the `[min_timestep, max_timestep]` range using rejection sampling, which preserves the original distribution shape. By default, the `[0, 1]` range is scaled, which can distort the distribution. This option is only effective when `timestep_sampling` is not 'sigma'.
+
+<details>
+<summary>日本語</summary>
+
+学習時のタイムステップの範囲を指定できます。これにより、拡散プロセスの特定の部分に学習を集中させることができます。
+
+- `--min_timestep`: 学習時の最小タイムステップを指定します（0-999、デフォルト: 0）。
+- `--max_timestep`: 学習時の最大タイムステップを指定します（1-1000、デフォルト: 1000）。
+- `--preserve_distribution_shape`: 指定すると、タイムステップのサンプリングを棄却サンプリング（条件に合わないものを捨てる）を用いて `[min_timestep, max_timestep]` の範囲に制約し、元の分布形状を保持します。デフォルトでは、`[0, 1]` の範囲がスケーリングされるため、分布が歪む可能性があります。このオプションは `timestep_sampling` が 'sigma' 以外の場合にのみ有効です。
+</details>
+
+### Example / 記述例
+
+To train only on the latter half of the timesteps (more detailed part) / タイムステップの後半（より詳細な部分）のみを学習する場合:
+
+```bash
+--min_timestep 500 --max_timestep 1000
+```
+
+To train only on the first half of the timesteps (more structural part) / タイムステップの前半（より構造的な部分）のみを学習する場合:
+
+```bash
+--min_timestep 0 --max_timestep 500
+```
+
+To train on a specific range while preserving the sampling distribution shape / サンプリング分布の形状を維持しつつ特定の範囲で学習する場合:
+
+```bash
+--min_timestep 200 --max_timestep 800 --preserve_distribution_shape
+```
+
+### Actual distribution shape / 実際の分布形状
+
+You can visualize the distribution shape of the timesteps with `--show_timesteps image` (or console) option. The distribution shape is determined by the `--min_timestep`, `--max_timestep`, and `--preserve_distribution_shape` options.
+
+In the following examples, the discrete flow shift is set to 3.0.
+
+When `--min_timestep` and `--max_timestep` are not specified, the distribution shape is as follows:
+
+![no_timestep](./shift_3.png)
+
+When `--min_timestep 500` and `--max_timestep 100` are specified, and `--preserve_distribution_shape` is not specified, the distribution shape is as follows:
+
+![timestep_500_1000](./shift_3_500_1000.png)
+
+When `--min_timestep 500` and `--max_timestep 100` are specified, and `--preserve_distribution_shape` is specified, the distribution shape is as follows:
+
+![timestep_500_1000_preserve](./shift_3_500_1000_preserve.png)
+
+<details>
+<summary>日本語</summary>
+
+タイムステップの分布形状は、`--show_timesteps image`（またはconsole）オプションで確認できます。分布形状は、`--min_timestep`、`--max_timestep`、および `--preserve_distribution_shape` オプションによって決まります。
+
+上の図はそれぞれ、離散フローシフトが3.0のとき、
+
+1. `--min_timestep` と `--max_timestep` が指定されていない場合
+2. `--min_timestep 500` と `--max_timestep 1000` が指定され、`--preserve_distribution_shape` が指定されていない場合
+3. `--min_timestep 500` と `--max_timestep 1000` が指定され、`--preserve_distribution_shape` が指定された場合
+
+の分布形状を示しています。
 </details>

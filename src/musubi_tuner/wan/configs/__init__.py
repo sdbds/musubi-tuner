@@ -8,6 +8,8 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 from musubi_tuner.wan.configs.wan_i2v_14B import i2v_14B
 from musubi_tuner.wan.configs.wan_t2v_1_3B import t2v_1_3B
 from musubi_tuner.wan.configs.wan_t2v_14B import t2v_14B
+from musubi_tuner.wan.configs.wan_i2v_A14B import i2v_A14B
+from musubi_tuner.wan.configs.wan_t2v_A14B import t2v_A14B
 
 # the config of t2i_14B is the same as t2v_14B
 t2i_14B = copy.deepcopy(t2v_14B)
@@ -48,6 +50,9 @@ WAN_CONFIGS = {
     "t2v-1.3B-FC": t2v_1_3B_FC,
     "t2v-14B-FC": t2v_14B_FC,
     "i2v-14B-FC": i2v_14B_FC,
+    # Wan 2.2 models
+    "i2v-A14B": i2v_A14B,
+    "t2v-A14B": t2v_A14B,
 }
 
 SIZE_CONFIGS = {
@@ -63,6 +68,8 @@ MAX_AREA_CONFIGS = {
     "1280*720": 1280 * 720,
     "480*832": 480 * 832,
     "832*480": 832 * 480,
+    "704*1280": 704 * 1280,
+    "1280*704": 1280 * 704,
 }
 
 SUPPORTED_SIZES = {
@@ -75,4 +82,8 @@ SUPPORTED_SIZES = {
     "t2v-1.3B-FC": ("480*832", "832*480"),
     "t2v-14B-FC": ("720*1280", "1280*720", "480*832", "832*480"),
     "i2v-14B-FC": ("720*1280", "1280*720", "480*832", "832*480"),
+    # Wan 2.2 models
+    "t2v-A14B": ("720*1280", "1280*720", "480*832", "832*480"),
+    "i2v-A14B": ("720*1280", "1280*720", "480*832", "832*480"),
+    "ti2v-5B": ("704*1280", "1280*704"),
 }

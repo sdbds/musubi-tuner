@@ -240,7 +240,7 @@ class ModelOffloader(Offloader):
             weighs_to_device(b, self.device)  # make sure weights are on device
 
         for b in blocks[self.num_blocks - self.blocks_to_swap :]:
-            b.to(self.device)  # move block to device first
+            b.to(self.device)  # move block to device first. this makes sure that buffers (non weights) are on the device
             weighs_to_device(b, "cpu")  # make sure weights are on cpu
 
         synchronize_device(self.device)

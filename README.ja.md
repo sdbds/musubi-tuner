@@ -306,6 +306,8 @@ VRAMが足りない場合は、`--blocks_to_swap`を指定して、一部のブ�
 
 学習されるLoRAの形式は、`sd-scripts`と同じです。
 
+`--min_timestep`と`--max_timestep`を指定すると、学習時のタイムステップの範囲を指定できます。詳細は[高度な設定](./docs/advanced_config.md#specify-time-step-range-for-training--学習時のタイムステップ範囲の指定)を参照してください。
+
 `--show_timesteps`に`image`（`matplotlib`が必要）または`console`を指定すると、学習時のtimestepsの分布とtimestepsごとのloss weightingが確認できます。
 
 学習時のログの記録が可能です。[TensorBoard形式のログの保存と参照](./docs/advanced_config.md#save-and-view-logs-in-tensorboard-format--tensorboard形式のログの保存と参照)を参照してください。

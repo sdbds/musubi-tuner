@@ -26,7 +26,7 @@ logging.basicConfig(level=logging.INFO)
 black_image_latents = {}  # global variable for black image latent, used in encode_and_save_batch_one_frame. key: tuple for shape
 
 
-def encode_and_save_batch(vae: WanVAE, clip: Optional[CLIPModel], batch: list[ItemInfo], one_frame: bool = False):
+def encode_and_save_batch(vae: WanVAE, clip: Optional[CLIPModel], i2v: bool, batch: list[ItemInfo], one_frame: bool = False):
     if one_frame:
         encode_and_save_batch_one_frame(vae, clip, batch)
         return
@@ -50,13 +50,16 @@ def encode_and_save_batch(vae: WanVAE, clip: Optional[CLIPModel], batch: list[It
     latent = torch.stack(latent, dim=0)  # B, C, F, H, W
     latent = latent.to(vae.dtype)  # convert to bfloat16, we are not sure if this is correct
 
-    if clip is not None:
+    if i2v:
         # extract first frame of contents
         images = contents[:, :, 0:1, :, :]  # B, C, F, H, W, non contiguous view is fine
 
-        with torch.amp.autocast(device_type=clip.device.type, dtype=torch.float16), torch.no_grad():
-            clip_context = clip.visual(images)
-        clip_context = clip_context.to(torch.float16)  # convert to fp16
+        if clip is not None:
+            with torch.amp.autocast(device_type=clip.device.type, dtype=torch.float16), torch.no_grad():
+                clip_context = clip.visual(images)
+            clip_context = clip_context.to(torch.float16)  # convert to fp16
+        else:
+            clip_context = None
 
         # encode image latent for I2V
         B, _, _, lat_h, lat_w = latent.shape
@@ -117,7 +120,7 @@ def encode_and_save_batch(vae: WanVAE, clip: Optional[CLIPModel], batch: list[It
     for i, item in enumerate(batch):
         l = latent[i]
         cctx = clip_context[i] if clip is not None else None
-        y_i = y[i] if clip is not None else None
+        y_i = y[i] if i2v else None
         control_latent_i = control_latent[i] if control_latent is not None else None
         # print(f"save latent cache: {item.latent_cache_path}, latent shape: {l.shape}")
         save_latent_cache_wan(item, l, cctx, y_i, control_latent_i)
@@ -173,7 +176,7 @@ def encode_and_save_batch_one_frame(vae: WanVAE, clip: Optional[CLIPModel], batc
     for i in range(images.shape[0]):
         with torch.amp.autocast(device_type=clip.device.type, dtype=torch.float16), torch.no_grad():
             clip_context.append(clip.visual(images[i : i + 1]))
-    clip_context = torch.stack(clip_context, dim=0) # B, num_control_images, N, D
+    clip_context = torch.stack(clip_context, dim=0)  # B, num_control_images, N, D
     clip_context = clip_context.to(torch.float16)  # convert to fp16
 
     B, C, _, lat_h, lat_w = latent.shape
@@ -217,6 +220,9 @@ def main():
 
     args = parser.parse_args()
 
+    if args.clip is not None:
+        args.i2v = True
+
     device = args.device if args.device is not None else "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(device)
 
@@ -252,7 +258,7 @@ def main():
 
     # Encode images
     def encode(one_batch: list[ItemInfo]):
-        encode_and_save_batch(vae, clip, one_batch, args.one_frame)
+        encode_and_save_batch(vae, clip, args.i2v, one_batch, args.one_frame)
 
     cache_latents.encode_datasets(datasets, encode, args)
 
@@ -260,10 +266,15 @@ def main():
 def wan_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--vae_cache_cpu", action="store_true", help="cache features in VAE on CPU")
     parser.add_argument(
+        "--i2v",
+        action="store_true",
+        help="I2V model, encode the first frame as control image. If clip is set, this is automatically set to True",
+    )
+    parser.add_argument(
         "--clip",
         type=str,
         default=None,
-        help="text encoder (CLIP) checkpoint path, optional. If training I2V model, this is required",
+        help="text encoder (CLIP) checkpoint path, optional. If training Wan2.1 I2V model, this is required",
     )
     parser.add_argument(
         "--one_frame",
