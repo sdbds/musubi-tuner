@@ -256,7 +256,7 @@ class ModelOffloader(Offloader):
         if self.blocks_to_swap is None or self.blocks_to_swap == 0:
             return
 
-        # if supports_backward and backward is enabled, we swap blocks more than blocks_to_swap in backward pass
+        # if backward is enabled, we do not swap blocks in forward pass more than blocks_to_swap, because it should be on GPU
         if not self.forward_only and block_idx >= self.blocks_to_swap:
             return
 

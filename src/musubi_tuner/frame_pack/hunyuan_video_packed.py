@@ -15,6 +15,7 @@ import torch.nn.functional as F
 import numpy as np
 
 from musubi_tuner.modules.custom_offloading_utils import ModelOffloader
+from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
 from musubi_tuner.utils.safetensors_utils import load_split_weights
 from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
 from accelerate import init_empty_weights
@@ -1458,6 +1459,10 @@ class HunyuanVideoPatchEmbedForCleanLatents(nn.Module):
         return
 
 
+FP8_OPTIMIZATION_TARGET_KEYS = ["transformer_blocks", "single_transformer_blocks"]
+FP8_OPTIMIZATION_EXCLUDE_KEYS = ["norm"]  # Exclude norm layers (e.g., LayerNorm, RMSNorm) from FP8
+
+
 class HunyuanVideoTransformer3DModelPacked(nn.Module):  # (PreTrainedModelMixin, GenerationMixin,
     # ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginalModelMixin):
     # @register_to_config
@@ -1955,17 +1960,14 @@ class HunyuanVideoTransformer3DModelPacked(nn.Module):  # (PreTrainedModelMixin,
             use_scaled_mm (bool):
                 Whether to use scaled matrix multiplication for FP8.
         """
-        TARGET_KEYS = ["transformer_blocks", "single_transformer_blocks"]
-        EXCLUDE_KEYS = ["norm"]  # Exclude norm layers (e.g., LayerNorm, RMSNorm) from FP8
 
         # inplace optimization
-        state_dict = optimize_state_dict_with_fp8(state_dict, device, TARGET_KEYS, EXCLUDE_KEYS, move_to_device=move_to_device)
+        state_dict = optimize_state_dict_with_fp8(state_dict, device, FP8_OPTIMIZATION_TARGET_KEYS, FP8_OPTIMIZATION_EXCLUDE_KEYS, move_to_device=move_to_device)
 
         # apply monkey patching
         apply_fp8_monkey_patch(self, state_dict, use_scaled_mm=use_scaled_mm)
 
         return state_dict
-
 
 def load_packed_model(
     device: Union[str, torch.device],
@@ -1975,7 +1977,28 @@ def load_packed_model(
     fp8_scaled: bool = False,
     split_attn: bool = False,
     for_inference: bool = False,
+    lora_weights_list: Optional[Dict[str, torch.Tensor]] = None,
+    lora_multipliers: Optional[List[float]] = None,
 ) -> HunyuanVideoTransformer3DModelPacked:
+    """
+    Load a packed DiT model from a given path.
+    If fp8_scaled is True, the model will be optimized to fp8 dynamically.
+
+    Args:
+        device (Union[str, torch.device]): The device to calculate etc. (usually "cuda").
+        dit_path (str): The path to the DiT model file or directory.
+        attn_mode (str): The attention mode to use.
+        loading_device (Union[str, torch.device]): The device to load the model weights to.
+        fp8_scaled (bool): Whether to optimize the model weights to fp8.
+        split_attn (bool): Whether to use split attention.
+        for_inference (bool): Whether to create the model for inference.
+        lora_weights_list (Optional[Dict[str, torch.Tensor]]): List of state_dicts for LoRA weights.
+        lora_multipliers (Optional[List[float]]): List of multipliers for LoRA weights.
+
+    Returns:
+        HunyuanVideoTransformer3DModelPacked: The loaded DiT model.
+    """
+
     # TODO support split_attn
     device = torch.device(device)
     loading_device = torch.device(loading_device)
@@ -2020,17 +2043,22 @@ def load_packed_model(
             split_attn=split_attn,
         )
 
-    # if fp8_scaled, load model weights to CPU to reduce VRAM usage. Otherwise, load to the specified device (CPU for block swap or CUDA for others)
-    dit_loading_device = torch.device("cpu") if fp8_scaled else loading_device
-    logger.info(f"Loading DiT model from {dit_path}, device={dit_loading_device}")
+    # load model weights with dynamic fp8 optimization and LoRA merging if needed
+    logger.info(f"Loading DiT model from {dit_path}, device={loading_device}")
 
-    # load model weights with the specified dtype or as is
-    sd = load_split_weights(dit_path, device=dit_loading_device, disable_mmap=True)
+    sd = load_safetensors_with_lora_and_fp8(
+        model_files=dit_path,
+        lora_weights_list=lora_weights_list,
+        lora_multipliers=lora_multipliers,
+        fp8_optimization=fp8_scaled,
+        calc_device=device,
+        move_to_device=(loading_device == device),
+        target_keys=FP8_OPTIMIZATION_TARGET_KEYS,
+        exclude_keys=FP8_OPTIMIZATION_EXCLUDE_KEYS,
+    )
 
     if fp8_scaled:
-        # fp8 optimization: calculate on CUDA, move back to CPU if loading_device is CPU (block swap)
-        logger.info(f"Optimizing model weights to fp8. This may take a while.")
-        sd = model.fp8_optimization(sd, device, move_to_device=loading_device.type == "cpu")
+        apply_fp8_monkey_patch(model, sd, use_scaled_mm=False)
 
         if loading_device.type != "cpu":
             # make sure all the model weights are on the loading_device

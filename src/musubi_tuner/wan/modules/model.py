@@ -1,6 +1,6 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 import math
-from typing import Optional, Union
+from typing import Dict, List, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -9,6 +9,7 @@ from accelerate import init_empty_weights
 
 import logging
 
+from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
 from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen, load_safetensors
 
 logger = logging.getLogger(__name__)
@@ -497,6 +498,19 @@ class MLPProj(torch.nn.Module):
         return clip_extra_context_tokens
 
 
+FP8_OPTIMIZATION_TARGET_KEYS = ["blocks"]
+FP8_OPTIMIZATION_EXCLUDE_KEYS = [
+    "norm",
+    "patch_embedding",
+    "text_embedding",
+    "time_embedding",
+    "time_projection",
+    "head",
+    "modulation",
+    "img_emb",
+]
+
+
 class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
     r"""
     Wan diffusion backbone supporting both text-to-video and image-to-video.
@@ -647,20 +661,10 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
             move_to_device (bool):
                 Whether to move the weight to the device after optimization.
         """
-        TARGET_KEYS = ["blocks"]
-        EXCLUDE_KEYS = [
-            "norm",
-            "patch_embedding",
-            "text_embedding",
-            "time_embedding",
-            "time_projection",
-            "head",
-            "modulation",
-            "img_emb",
-        ]
-
         # inplace optimization
-        state_dict = optimize_state_dict_with_fp8(state_dict, device, TARGET_KEYS, EXCLUDE_KEYS, move_to_device=move_to_device)
+        state_dict = optimize_state_dict_with_fp8(
+            state_dict, device, FP8_OPTIMIZATION_TARGET_KEYS, FP8_OPTIMIZATION_EXCLUDE_KEYS, move_to_device=move_to_device
+        )
 
         # apply monkey patching
         apply_fp8_monkey_patch(self, state_dict, use_scaled_mm=use_scaled_mm)
@@ -765,8 +769,8 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
             y = None
 
         # embeddings
-        x = [self.patch_embedding(u.unsqueeze(0)) for u in x] # x[0].shape = [1, 5120, F, H, W]
-        grid_sizes = torch.stack([torch.tensor(u.shape[2:], dtype=torch.long) for u in x]) # list of [F, H, W]
+        x = [self.patch_embedding(u.unsqueeze(0)) for u in x]  # x[0].shape = [1, 5120, F, H, W]
+        grid_sizes = torch.stack([torch.tensor(u.shape[2:], dtype=torch.long) for u in x])  # list of [F, H, W]
 
         freqs_list = []
         for i, fhw in enumerate(grid_sizes):
@@ -903,7 +907,25 @@ def load_wan_model(
     loading_device: Union[str, torch.device],
     dit_weight_dtype: Optional[torch.dtype],
     fp8_scaled: bool = False,
+    lora_weights_list: Optional[Dict[str, torch.Tensor]] = None,
+    lora_multipliers: Optional[List[float]] = None,
 ) -> WanModel:
+    """
+    Load a WAN model from the specified checkpoint.
+
+    Args:
+        config (any): Configuration object containing model parameters.
+        device (Union[str, torch.device]): Device to load the model on.
+        dit_path (str): Path to the DiT model checkpoint.
+        attn_mode (str): Attention mode to use, e.g., "torch", "flash", etc.
+        split_attn (bool): Whether to use split attention.
+        loading_device (Union[str, torch.device]): Device to load the model weights on.
+        dit_weight_dtype (Optional[torch.dtype]): Data type of the DiT weights.
+            If None, it will be loaded as is (same as the state_dict) or scaled for fp8. if not None, model weights will be casted to this dtype.
+        fp8_scaled (bool): Whether to use fp8 scaling for the model weights.
+        lora_weights_list (Optional[Dict[str, torch.Tensor]]): LoRA weights to apply, if any.
+        lora_multipliers (Optional[List[float]]): LoRA multipliers for the weights, if any.
+    """
     # dit_weight_dtype is None for fp8_scaled
     assert (not fp8_scaled and dit_weight_dtype is not None) or (fp8_scaled and dit_weight_dtype is None)
 
@@ -929,12 +951,19 @@ def load_wan_model(
         if dit_weight_dtype is not None:
             model.to(dit_weight_dtype)
 
-    # if fp8_scaled, load model weights to CPU to reduce VRAM usage. Otherwise, load to the specified device (CPU for block swap or CUDA for others)
-    wan_loading_device = torch.device("cpu") if fp8_scaled else loading_device
-    logger.info(f"Loading DiT model from {dit_path}, device={wan_loading_device}, dtype={dit_weight_dtype}")
+    # load model weights with dynamic fp8 optimization and LoRA merging if needed
+    logger.info(f"Loading DiT model from {dit_path}, device={loading_device}")
 
-    # load model weights with the specified dtype or as is
-    sd = load_safetensors(dit_path, wan_loading_device, disable_mmap=True, dtype=dit_weight_dtype)
+    sd = load_safetensors_with_lora_and_fp8(
+        model_files=dit_path,
+        lora_weights_list=lora_weights_list,
+        lora_multipliers=lora_multipliers,
+        fp8_optimization=fp8_scaled,
+        calc_device=device,
+        move_to_device=(loading_device == device),
+        target_keys=FP8_OPTIMIZATION_TARGET_KEYS,
+        exclude_keys=FP8_OPTIMIZATION_EXCLUDE_KEYS,
+    )
 
     # remove "model.diffusion_model." prefix: 1.3B model has this prefix
     for key in list(sd.keys()):
@@ -942,9 +971,7 @@ def load_wan_model(
             sd[key[22:]] = sd.pop(key)
 
     if fp8_scaled:
-        # fp8 optimization: calculate on CUDA, move back to CPU if loading_device is CPU (block swap)
-        logger.info(f"Optimizing model weights to fp8. This may take a while.")
-        sd = model.fp8_optimization(sd, device, move_to_device=loading_device.type == "cpu")
+        apply_fp8_monkey_patch(model, sd, use_scaled_mm=False)
 
         if loading_device.type != "cpu":
             # make sure all the model weights are on the loading_device

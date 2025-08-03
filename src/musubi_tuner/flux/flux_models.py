@@ -1026,7 +1026,7 @@ class Flux(nn.Module):
             img, txt = block(img=img, txt=txt, vec=vec, pe=pe, control_lengths=control_lengths)
 
             if self.blocks_to_swap:
-                self.offloader_double.submit_move_blocks(self.double_blocks, block_idx)
+                self.offloader_double.submit_move_blocks_forward(self.double_blocks, block_idx)
 
         img = torch.cat((txt, img), 1)
 
@@ -1037,7 +1037,7 @@ class Flux(nn.Module):
             img = block(img, vec=vec, pe=pe, control_lengths=control_lengths)
 
             if self.blocks_to_swap:
-                self.offloader_single.submit_move_blocks(self.single_blocks, block_idx)
+                self.offloader_single.submit_move_blocks_forward(self.single_blocks, block_idx)
 
         img = img[:, txt.shape[1] :, ...]
 

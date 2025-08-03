@@ -23,6 +23,7 @@ from tqdm import tqdm
 
 from musubi_tuner.dataset import image_video_dataset
 from musubi_tuner.networks import lora_wan
+from musubi_tuner.utils.lora_utils import filter_lora_state_dict
 from musubi_tuner.utils.safetensors_utils import mem_eff_save_file, load_safetensors
 from musubi_tuner.wan.configs import WAN_CONFIGS, SUPPORTED_SIZES
 import musubi_tuner.wan as wan
@@ -57,7 +58,7 @@ class GenerationSettings:
         self.device = device
         self.cfg = cfg
         self.dit_dtype = dit_dtype
-        self.dit_weight_dtype = dit_weight_dtype
+        self.dit_weight_dtype = dit_weight_dtype  # may be None if fp8_scaled, may be float8 if fp8 not scaled
         self.vae_dtype = vae_dtype
 
 
@@ -518,16 +519,102 @@ def load_dit_model(
     Returns:
         WanModel: loaded DiT model
     """
+
+    # If LyCORIS is enabled, we will load the model to CPU and then merge LoRA weights (static method)
+
     loading_device = "cpu"
-    if args.blocks_to_swap == 0 and args.lora_weight is None and not args.fp8_scaled:
+    if args.blocks_to_swap == 0 and not args.lycoris:
         loading_device = device
 
-    loading_weight_dtype = dit_weight_dtype
-    if args.fp8_scaled or args.lora_weight is not None:
-        loading_weight_dtype = dit_dtype  # load as-is
+    # load LoRA weights
+    if not args.lycoris and args.lora_weight is not None and len(args.lora_weight) > 0:
+        lora_weights_list = []
+        for lora_weight in args.lora_weight:
+            logger.info(f"Loading LoRA weight from: {lora_weight}")
+            lora_sd = load_file(lora_weight)  # load on CPU, dtype is as is
+            lora_sd = filter_lora_state_dict(lora_sd, args.include_patterns, args.exclude_patterns)
+            lora_weights_list.append(lora_sd)
+    else:
+        lora_weights_list = None
 
-    # do not fp8 optimize because we will merge LoRA weights
-    model = load_wan_model(config, device, args.dit, args.attn_mode, False, loading_device, loading_weight_dtype, False)
+    loading_weight_dtype = dit_weight_dtype
+    if args.fp8_scaled and not args.lycoris:
+        loading_weight_dtype = None  # we will load weights as-is and then optimize to fp8
+
+    model = load_wan_model(
+        config,
+        device,
+        args.dit,
+        args.attn_mode,
+        False,
+        loading_device,
+        loading_weight_dtype,
+        args.fp8_scaled and not args.lycoris,
+        lora_weights_list=lora_weights_list,
+        lora_multipliers=args.lora_multiplier,
+    )
+
+    # merge LoRA weights
+    if args.lycoris:
+        if args.lora_weight is not None and len(args.lora_weight) > 0:
+            merge_lora_weights(lora_wan, model, args, device)
+
+        if args.fp8_scaled:
+            # load state dict as-is and optimize to fp8
+            state_dict = model.state_dict()
+
+            # if no blocks to swap, we can move the weights to GPU after optimization on GPU (omit redundant CPU->GPU copy)
+            move_to_device = args.blocks_to_swap == 0  # if blocks_to_swap > 0, we will keep the model on CPU
+            state_dict = model.fp8_optimization(state_dict, device, move_to_device, use_scaled_mm=args.fp8_fast)
+
+            info = model.load_state_dict(state_dict, strict=True, assign=True)
+            logger.info(f"Loaded FP8 optimized weights: {info}")
+
+    # if we only want to save the model, we can skip the rest
+    if args.save_merged_model:
+        return None
+
+    if not args.fp8_scaled:
+        # simple cast to dit_weight_dtype
+        target_dtype = None  # load as-is (dit_weight_dtype == dtype of the weights in state_dict)
+        target_device = None
+
+        if dit_weight_dtype is not None:  # in case of args.fp8 and not args.fp8_scaled
+            logger.info(f"Convert model to {dit_weight_dtype}")
+            target_dtype = dit_weight_dtype
+
+        if args.blocks_to_swap == 0:
+            logger.info(f"Move model to device: {device}")
+            target_device = device
+
+        model.to(target_device, target_dtype)  # move and cast  at the same time. this reduces redundant copy operations
+
+    if args.compile:
+        compile_backend, compile_mode, compile_dynamic, compile_fullgraph = args.compile_args
+        logger.info(
+            f"Torch Compiling[Backend: {compile_backend}; Mode: {compile_mode}; Dynamic: {compile_dynamic}; Fullgraph: {compile_fullgraph}]"
+        )
+        torch._dynamo.config.cache_size_limit = 32
+        for i in range(len(model.blocks)):
+            model.blocks[i] = torch.compile(
+                model.blocks[i],
+                backend=compile_backend,
+                mode=compile_mode,
+                dynamic=compile_dynamic.lower() in "true",
+                fullgraph=compile_fullgraph.lower() in "true",
+            )
+
+    if args.blocks_to_swap > 0:
+        logger.info(f"Enable swap {args.blocks_to_swap} blocks to CPU from device: {device}")
+        model.enable_block_swap(args.blocks_to_swap, device, supports_backward=False)
+        model.move_to_device_except_swap_blocks(device)
+        model.prepare_block_swap_before_forward()
+    else:
+        # make sure the model is on the right device
+        model.to(device)
+
+    model.eval().requires_grad_(False)
+    clean_memory_on_device(device)
 
     return model
 
@@ -607,74 +694,6 @@ def merge_lora_weights(
         logger.info(f"Saving merged model to {args.save_merged_model}")
         mem_eff_save_file(model.state_dict(), args.save_merged_model)  # save_file needs a lot of memory
         logger.info("Merged model saved")
-
-
-def optimize_model(
-    model: WanModel, args: argparse.Namespace, device: torch.device, dit_dtype: torch.dtype, dit_weight_dtype: torch.dtype
-) -> None:
-    """optimize the model (FP8 conversion, device move etc.)
-
-    Args:
-        model: dit model
-        args: command line arguments
-        device: device to use
-        dit_dtype: dtype for the model
-        dit_weight_dtype: dtype for the model weights
-    """
-    if args.fp8_scaled:
-        # load state dict as-is and optimize to fp8
-        state_dict = model.state_dict()
-
-        # if no blocks to swap, we can move the weights to GPU after optimization on GPU (omit redundant CPU->GPU copy)
-        move_to_device = args.blocks_to_swap == 0  # if blocks_to_swap > 0, we will keep the model on CPU
-        state_dict = model.fp8_optimization(state_dict, device, move_to_device, use_scaled_mm=args.fp8_fast)
-
-        info = model.load_state_dict(state_dict, strict=True, assign=True)
-        logger.info(f"Loaded FP8 optimized weights: {info}")
-
-        if args.blocks_to_swap == 0:
-            model.to(device)  # make sure all parameters are on the right device (e.g. RoPE etc.)
-    else:
-        # simple cast to dit_dtype
-        target_dtype = None  # load as-is (dit_weight_dtype == dtype of the weights in state_dict)
-        target_device = None
-
-        if dit_weight_dtype is not None:  # in case of args.fp8 and not args.fp8_scaled
-            logger.info(f"Convert model to {dit_weight_dtype}")
-            target_dtype = dit_weight_dtype
-
-        if args.blocks_to_swap == 0:
-            logger.info(f"Move model to device: {device}")
-            target_device = device
-
-        model.to(target_device, target_dtype)  # move and cast  at the same time. this reduces redundant copy operations
-
-    if args.compile:
-        compile_backend, compile_mode, compile_dynamic, compile_fullgraph = args.compile_args
-        logger.info(
-            f"Torch Compiling[Backend: {compile_backend}; Mode: {compile_mode}; Dynamic: {compile_dynamic}; Fullgraph: {compile_fullgraph}]"
-        )
-        torch._dynamo.config.cache_size_limit = 32
-        for i in range(len(model.blocks)):
-            model.blocks[i] = torch.compile(
-                model.blocks[i],
-                backend=compile_backend,
-                mode=compile_mode,
-                dynamic=compile_dynamic.lower() in "true",
-                fullgraph=compile_fullgraph.lower() in "true",
-            )
-
-    if args.blocks_to_swap > 0:
-        logger.info(f"Enable swap {args.blocks_to_swap} blocks to CPU from device: {device}")
-        model.enable_block_swap(args.blocks_to_swap, device, supports_backward=False)
-        model.move_to_device_except_swap_blocks(device)
-        model.prepare_block_swap_before_forward()
-    else:
-        # make sure the model is on the right device
-        model.to(device)
-
-    model.eval().requires_grad_(False)
-    clean_memory_on_device(device)
 
 
 def prepare_t2v_inputs(
@@ -964,7 +983,7 @@ def prepare_i2v_inputs(
         with torch.amp.autocast(device_type=device.type, dtype=torch.float16), torch.no_grad():
             clip_context = clip.visual([img_tensor[:, None, :, :]])
             # I2V end image is not officially supported, so no additional CLIP context
-            if end_img is not None and config.flf2v: 
+            if end_img is not None and config.flf2v:
                 end_img_tensor = TF.to_tensor(end_img).sub_(0.5).div_(0.5).to(device)
                 end_clip_context = clip.visual([end_img_tensor[:, None, :, :]])
                 clip_context = torch.concat([clip_context, end_clip_context], dim=0)
@@ -1365,16 +1384,9 @@ def generate(
         # load DiT model
         model = load_dit_model(args, cfg, device, dit_dtype, dit_weight_dtype, is_i2v)
 
-        # merge LoRA weights
-        if args.lora_weight is not None and len(args.lora_weight) > 0:
-            merge_lora_weights(lora_wan, model, args, device)
-
-            # if we only want to save the model, we can skip the rest
-            if args.save_merged_model:
-                return None
-
-        # optimize model: fp8 conversion, block swap etc.
-        optimize_model(model, args, device, dit_dtype, dit_weight_dtype)
+        # if we only want to save the model, we can skip the rest
+        if args.save_merged_model:
+            return None
 
     # setup scheduler
     scheduler, timesteps = setup_scheduler(args, cfg, device)
@@ -1699,19 +1711,13 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
         vae = load_vae(args, cfg, device, vae_dtype)
         vae.to_device("cpu")
 
-    # 4. Load DiT model
+    # 4. Load DiT model, 5. Merge LoRA weights if needed, and 6. Optimize model
     logger.info("Loading DiT model")
     model = load_dit_model(args, cfg, device, dit_dtype, dit_weight_dtype, is_i2v)
 
-    # 5. Merge LoRA weights if needed
-    if args.lora_weight is not None and len(args.lora_weight) > 0:
-        merge_lora_weights(lora_wan, model, args, device)
-        if args.save_merged_model:
-            logger.info("Model merged and saved. Exiting.")
-            return
-
-    # 6. Optimize model
-    optimize_model(model, args, device, dit_dtype, dit_weight_dtype)
+    if args.save_merged_model:
+        logger.info("Model merged and saved. Exiting.")
+        return
 
     # Create shared models dict for generate function
     shared_models = {"vae": vae, "model": model, "encoded_contexts": encoded_contexts}
@@ -1882,7 +1888,7 @@ def process_interactive(args: argparse.Namespace) -> None:
                             with torch.amp.autocast(device_type=device.type, dtype=torch.float16), torch.no_grad():
                                 end_clip_context = clip.visual([end_img_tensor[:, None, :, :]])
                             clip_context = torch.concat([clip_context, end_clip_context], dim=0)
-                            
+
                         encoded_context["clip_context"] = clip_context
 
                     # Move CLIP to CPU after use
@@ -1901,16 +1907,12 @@ def process_interactive(args: argparse.Namespace) -> None:
                 if model is None:
                     logger.info("Loading DiT model")
                     model = load_dit_model(args, cfg, device, dit_dtype, dit_weight_dtype, is_i2v)
-
-                    # Merge LoRA weights if needed
-                    if args.lora_weight is not None and len(args.lora_weight) > 0:
-                        merge_lora_weights(lora_wan, model, args, device)
-
-                    # Optimize model
-                    optimize_model(model, args, device, dit_dtype, dit_weight_dtype)
                 else:
                     # Move model to GPU if it was offloaded
-                    model.to(device)
+                    if args.blocks_to_swap > 0:
+                        model.prepare_block_swap_before_forward()
+                    else:
+                        model.to(device)
 
                 # Create shared models dict
                 shared_models = {"vae": vae, "model": model, "encoded_contexts": {prompt_data["prompt"]: encoded_context}}

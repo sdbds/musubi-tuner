@@ -45,9 +45,9 @@
 
 ## Introduction
 
-This repository provides scripts for training LoRA (Low-Rank Adaptation) models with HunyuanVideo, Wan2.1 and FramePack architectures. 
+This repository provides scripts for training LoRA (Low-Rank Adaptation) models with HunyuanVideo, Wan2.1, FramePack and FLUX.1 Kontext architectures. 
 
-This repository is unofficial and not affiliated with the official HunyanVideo/Wan2.1/FramePack repositories. 
+This repository is unofficial and not affiliated with the official HunyanVideo/Wan2.1/FramePack/FLUX.1 Kontext repositories. 
 
 For Wan2.1, please also refer to [Wan2.1 documentation](./docs/wan.md). For FramePack, please also refer to [FramePack documentation](./docs/framepack.md). For FLUX.1 Kontext, please refer to [FLUX.1 Kontext documentation](./docs/flux_kontext.md).
 
@@ -60,6 +60,12 @@ If you find this project helpful, please consider supporting its development via
 ### Recent Updates
 
 - GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
+
+- August 2, 2025:
+    - Reduced peak memory usage during model loading for FramePack and Wan2.1 when using `--fp8_scaled`. This reduces VRAM usage during model loading before training and inference.
+
+- August 1, 2025:
+    - Fixed the issue where block swapping did not work in FLUX. Kontext LoRA training. Thanks to sdbds for [PR #402](https://github.com/kohya-ss/musubi-tuner/pull/402). [PR #403](https://github.com/kohya-ss/musubi-tuner/pull/403).
 
 - July 31, 2025:
     - Added [a section for developers using AI coding agents](#for-developers-using-ai-coding-agents). If you are using AI agents, please read this section.
