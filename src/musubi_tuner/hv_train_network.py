@@ -768,8 +768,6 @@ class NetworkTrainer:
             or args.timestep_sampling == "logsnr"
             or args.timestep_sampling == "qinglong"
         ):
-            skip_scaling = False
-
             def get_timesteps():
                 if args.timestep_sampling == "uniform" or args.timestep_sampling == "sigmoid":
                     # Simple random t-based noise sampling
@@ -793,81 +791,54 @@ class NetworkTrainer:
                     logits_norm = logits_norm * args.sigmoid_scale  # larger scale for more uniform sampling
                     t = logits_norm.sigmoid()
                     t = (t * shift) / (1 + (shift - 1) * t)
+                    
                 elif args.timestep_sampling == "logsnr":
                     # https://arxiv.org/abs/2411.14793v3
                     logsnr = torch.normal(mean=args.logit_mean, std=args.logit_std, size=(batch_size,), device=device)
                     t = torch.sigmoid(-logsnr / 2)
+                    
+                elif args.timestep_sampling == "qinglong":
+                    # Qinglong triple hybrid sampling: flux_shift:logsnr:logsnr2 = 1:7:2
+                    # First decide which method to use for each sample independently
+                    decision_t = torch.rand((batch_size,), device=device)
+                    
+                    # Create masks based on 1:7:2 ratio
+                    flux_mask = decision_t < 0.7  # 70% for flux_shift
+                    logsnr_mask = (decision_t >= 0.7) & (decision_t < 0.8)  # 10% for logsnr
+                    logsnr_mask2 = decision_t >= 0.8  # 20% for logsnr with -logit_mean
+                    
+                    # Initialize output tensor
+                    t = torch.zeros((batch_size,), device=device)
+                    
+                    # Generate flux_shift samples for selected indices (70%)
+                    if flux_mask.any():
+                        flux_count = flux_mask.sum().item()
+                        h, w = latents.shape[-2:]
+                        mu = train_utils.get_lin_function(y1=0.5, y2=1.15)((h // 2) * (w // 2))
+                        shift = math.exp(mu)
+                        
+                        logits_norm_flux = torch.randn(flux_count, device=device)
+                        logits_norm_flux = logits_norm_flux * args.sigmoid_scale
+                        t_flux = logits_norm_flux.sigmoid()
+                        t_flux = (t_flux * shift) / (1 + (shift - 1) * t_flux)
+                        t[flux_mask] = t_flux
+                    
+                    # Generate logsnr samples for selected indices (10%)
+                    if logsnr_mask.any():
+                        logsnr_count = logsnr_mask.sum().item()
+                        logsnr = torch.normal(mean=args.logit_mean, std=args.logit_std, size=(logsnr_count,), device=device)
+                        t_logsnr = torch.sigmoid(-logsnr / 2)
+                        t[logsnr_mask] = t_logsnr
+                    
+                    # Generate logsnr2 samples with -logit_mean for selected indices (20%)
+                    if logsnr_mask2.any():
+                        logsnr2_count = logsnr_mask2.sum().item()
+                        logsnr2 = torch.normal(mean=5.36, std=1.0, size=(logsnr2_count,), device=device)
+                        t_logsnr2 = torch.sigmoid(-logsnr2 / 2)
+                        t[logsnr_mask2] = t_logsnr2
+
                 return t  # 0 to 1
 
-            elif args.timestep_sampling == "logsnr":
-                # https://arxiv.org/abs/2411.14793v3
-                logsnr = torch.normal(mean=args.logit_mean, std=args.logit_std, size=(batch_size,), device=device)
-                t = torch.sigmoid(-logsnr / 2)
-
-            elif args.timestep_sampling == "qinglong":
-                # Qinglong triple hybrid sampling: flux_shift:logsnr:logsnr2 = 1:7:2
-                # First decide which method to use for each sample independently
-                decision_t = torch.rand((batch_size,), device=device)
-                
-                # Apply t_min and t_max scaling to decision values
-                t_min = args.min_timestep if args.min_timestep is not None else 0
-                t_max = args.max_timestep if args.max_timestep is not None else 1000.0
-                t_min_scaled = t_min / 1000.0
-                t_max_scaled = t_max / 1000.0
-                
-                # Create masks based on 1:7:2 ratio
-                flux_mask = decision_t < 0.7  # 70% for flux_shift
-                logsnr_mask = (decision_t >= 0.7) & (decision_t < 0.8)  # 10% for logsnr
-                logsnr_mask2 = decision_t >= 0.8  # 20% for logsnr with -logit_mean
-                
-                # Initialize output tensor
-                t = torch.zeros((batch_size,), device=device)
-                
-                # Generate flux_shift samples for selected indices (70%)
-                if flux_mask.any():
-                    flux_count = flux_mask.sum().item()
-                    h, w = latents.shape[-2:]
-                    mu = train_utils.get_lin_function(y1=0.5, y2=1.15)((h // 2) * (w // 2))
-                    shift = math.exp(mu)
-                    
-                    logits_norm_flux = torch.randn(flux_count, device=device)
-                    logits_norm_flux = logits_norm_flux * args.sigmoid_scale
-                    t_flux = logits_norm_flux.sigmoid()
-                    t_flux = (t_flux * shift) / (1 + (shift - 1) * t_flux)
-                    
-                    # Scale flux results
-                    t_flux_scaled = t_flux * (t_max_scaled - t_min_scaled) + t_min_scaled
-                    t[flux_mask] = t_flux_scaled
-                
-                # Generate logsnr samples for selected indices (10%)
-                if logsnr_mask.any():
-                    logsnr_count = logsnr_mask.sum().item()
-                    logsnr = torch.normal(mean=args.logit_mean, std=args.logit_std, size=(logsnr_count,), device=device)
-                    t_logsnr = torch.sigmoid(-logsnr / 2)
-                    
-                    # Scale logsnr results
-                    t_logsnr_scaled = t_logsnr * (t_max_scaled - t_min_scaled) + t_min_scaled
-                    t[logsnr_mask] = t_logsnr_scaled
-                
-                # Generate logsnr2 samples with -logit_mean for selected indices (20%)
-                if logsnr_mask2.any():
-                    logsnr2_count = logsnr_mask2.sum().item()
-                    logsnr2 = torch.normal(mean=5.36, std=1.0, size=(logsnr2_count,), device=device)
-                    t_logsnr2 = torch.sigmoid(-logsnr2 / 2)
-                    
-                    # Scale logsnr2 results
-                    t_logsnr2_scaled = t_logsnr2 * (t_max_scaled - t_min_scaled) + t_min_scaled
-                    t[logsnr_mask2] = t_logsnr2_scaled
-                
-                # Skip the normal t_min/t_max scaling later since we already applied it
-                skip_scaling = True
-
-            if not skip_scaling:
-                t_min = args.min_timestep if args.min_timestep is not None else 0
-                t_max = args.max_timestep if args.max_timestep is not None else 1000.0
-                t_min /= 1000.0
-                t_max /= 1000.0
-                t = t * (t_max - t_min) + t_min  # scale to [t_min, t_max], default [0, 1]
             t_min = args.min_timestep if args.min_timestep is not None else 0
             t_max = args.max_timestep if args.max_timestep is not None else 1000.0
             t_min /= 1000.0
