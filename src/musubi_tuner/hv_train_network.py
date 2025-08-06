@@ -1,4 +1,4 @@
-import ast
+﻿import ast
 import asyncio
 from datetime import timedelta
 import gc
@@ -803,14 +803,14 @@ class NetworkTrainer:
                     decision_t = torch.rand((batch_size,), device=device)
                     
                     # Create masks based on 1:7:2 ratio
-                    flux_mask = decision_t < 0.7  # 70% for flux_shift
-                    logsnr_mask = (decision_t >= 0.7) & (decision_t < 0.8)  # 10% for logsnr
-                    logsnr_mask2 = decision_t >= 0.8  # 20% for logsnr with -logit_mean
+                    flux_mask = decision_t < 0.79  # 79% for flux_shift
+                    logsnr_mask = (decision_t >= 0.79) & (decision_t < 0.9)  # 11% for logsnr
+                    logsnr_mask2 = decision_t >= 0.9  # 10% for logsnr with -logit_mean
                     
                     # Initialize output tensor
                     t = torch.zeros((batch_size,), device=device)
                     
-                    # Generate flux_shift samples for selected indices (70%)
+                    # Generate flux_shift samples for selected indices (79%)
                     if flux_mask.any():
                         flux_count = flux_mask.sum().item()
                         h, w = latents.shape[-2:]
@@ -823,14 +823,14 @@ class NetworkTrainer:
                         t_flux = (t_flux * shift) / (1 + (shift - 1) * t_flux)
                         t[flux_mask] = t_flux
                     
-                    # Generate logsnr samples for selected indices (10%)
+                    # Generate logsnr samples for selected indices (11%)
                     if logsnr_mask.any():
                         logsnr_count = logsnr_mask.sum().item()
                         logsnr = torch.normal(mean=args.logit_mean, std=args.logit_std, size=(logsnr_count,), device=device)
                         t_logsnr = torch.sigmoid(-logsnr / 2)
                         t[logsnr_mask] = t_logsnr
                     
-                    # Generate logsnr2 samples with -logit_mean for selected indices (20%)
+                    # Generate logsnr2 samples with -logit_mean for selected indices (10%)
                     if logsnr_mask2.any():
                         logsnr2_count = logsnr_mask2.sum().item()
                         logsnr2 = torch.normal(mean=5.36, std=1.0, size=(logsnr2_count,), device=device)
