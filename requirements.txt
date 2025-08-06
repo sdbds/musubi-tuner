@@ -9,7 +9,7 @@ diffusers>=0.32.1
 einops>=0.7.0
 huggingface-hub[hf_xet,hf_transfer]>=0.30.2
 opencv-python==4.10.0.84
-pillow
+pillow>=11.3.0
 safetensors==0.4.5
 toml==0.10.2
 tqdm>=4.67.1
@@ -29,7 +29,6 @@ matplotlib==3.10.0
 tensorboard
 wandb
 prompt-toolkit==3.0.51
-pillow-avif-plugin
 
 # optimizer
 pytorch-optimizer
