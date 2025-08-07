@@ -836,6 +836,7 @@ def prepare_text_inputs(
 
     if not (shared_models and "text_encoder1" in shared_models):  # if loaded locally
         del tokenizer1, text_encoder1, tokenizer2, text_encoder2
+        gc.collect()  # transformer==4.54.1 seems to need this to free memory
     else:  # if shared, move back to original device (likely CPU)
         if text_encoder1:
             text_encoder1.to(text_encoder1_original_device)
@@ -1906,6 +1907,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
 
     # Models should be removed from device after prepare_text_inputs
     del tokenizer1_batch, text_encoder1_batch, tokenizer2_batch, text_encoder2_batch, temp_shared_models_txt, conds_cache_batch
+    gc.collect()  # transformer==4.54.1 seems to need this to free memory
     clean_memory_on_device(device)
 
     # 3. Load DiT Model once

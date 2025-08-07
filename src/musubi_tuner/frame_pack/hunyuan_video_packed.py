@@ -728,7 +728,8 @@ def get_cu_seqlens(text_mask, img_len):
         cu_seqlens[2 * i + 1] = s1
         cu_seqlens[2 * i + 2] = s2
 
-    return cu_seqlens
+    seq_len = text_len + img_len
+    return cu_seqlens, seq_len
 
 
 def apply_rotary_emb_transposed(x, freqs_cis):
@@ -740,7 +741,8 @@ def apply_rotary_emb_transposed(x, freqs_cis):
     return (x.float() * cos + x_rotated.float() * sin).to(x.dtype)
 
 
-def attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv, attn_mode=None, split_attn=False):
+def attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv, seq_len, attn_mode=None, split_attn=False):
+    # q,k,v: [batch_size, seqlen, heads, head_dim]
     if cu_seqlens_q is None and cu_seqlens_kv is None and max_seqlen_q is None and max_seqlen_kv is None:
         if attn_mode == "sageattn" or attn_mode is None and sageattn is not None:
             x = sageattn(q, k, v, tensor_layout="NHD")
@@ -760,29 +762,52 @@ def attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seq
         return x
     if split_attn:
         if attn_mode == "sageattn" or attn_mode is None and sageattn is not None:
-            x = torch.empty_like(q)
+            x = []
             for i in range(q.size(0)):
-                x[i : i + 1] = sageattn(q[i : i + 1], k[i : i + 1], v[i : i + 1], tensor_layout="NHD")
+                seq_len_i = seq_len[i]
+                x_i = sageattn(q[i : i + 1, :seq_len_i], k[i : i + 1, :seq_len_i], v[i : i + 1, :seq_len_i], tensor_layout="NHD")
+                if seq_len_i < max_seqlen_q:
+                    x_i = torch.nn.functional.pad(x_i, (0, 0, 0, 0, 0, max_seqlen_q - seq_len_i), mode="constant", value=0.0)
+                x.append(x_i)
+            x = torch.cat(x, dim=0)
             return x
 
         if attn_mode == "flash" or attn_mode is None and flash_attn_func is not None:
-            x = torch.empty_like(q)
+            x = []
             for i in range(q.size(0)):
-                x[i : i + 1] = flash_attn_func(q[i : i + 1], k[i : i + 1], v[i : i + 1])
+                seq_len_i = seq_len[i]
+                x_i = flash_attn_func(q[i : i + 1, :seq_len_i], k[i : i + 1, :seq_len_i], v[i : i + 1, :seq_len_i])
+                if seq_len_i < max_seqlen_q:
+                    x_i = torch.nn.functional.pad(x_i, (0, 0, 0, 0, 0, max_seqlen_q - seq_len_i), mode="constant", value=0.0)
+                x.append(x_i)
+            x = torch.cat(x, dim=0)
             return x
 
         if attn_mode == "xformers" or attn_mode is None and xformers_attn_func is not None:
-            x = torch.empty_like(q)
+            x = []
             for i in range(q.size(0)):
-                x[i : i + 1] = xformers_attn_func(q[i : i + 1], k[i : i + 1], v[i : i + 1])
+                seq_len_i = seq_len[i]
+                x_i = xformers_attn_func(q[i : i + 1, :seq_len_i], k[i : i + 1, :seq_len_i], v[i : i + 1, :seq_len_i])
+                if seq_len_i < max_seqlen_q:
+                    x_i = torch.nn.functional.pad(x_i, (0, 0, 0, 0, 0, max_seqlen_q - seq_len_i), mode="constant", value=0.0)
+                x.append(x_i)
+            x = torch.cat(x, dim=0)
             return x
 
+        assert attn_mode is None or attn_mode == "torch", f"Unsupported attention mode: {attn_mode}. Supported modes: 'sageattn', 'flash', 'xformers', 'torch'."
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
-        x = torch.empty_like(q)
+        x = []
         for i in range(q.size(0)):
-            x[i : i + 1] = torch.nn.functional.scaled_dot_product_attention(q[i : i + 1], k[i : i + 1], v[i : i + 1])
+            seq_len_i = seq_len[i]
+            x_i = torch.nn.functional.scaled_dot_product_attention(
+                q[i : i + 1, :, :seq_len_i], k[i : i + 1, :, :seq_len_i], v[i : i + 1, :, :seq_len_i]
+            )
+            if seq_len_i < max_seqlen_q:
+                x_i = torch.nn.functional.pad(x_i, (0, 0, 0, max_seqlen_q - seq_len_i, 0, 0), mode="constant", value=0.0)
+            x.append(x_i)
+        x = torch.cat(x, dim=0)
         x = x.transpose(1, 2)
         return x
 
@@ -798,7 +823,7 @@ def attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seq
         del q, k, v  # free memory
     else:
         raise NotImplementedError("No Attn Installed or batch_size > 1 is not supported in this configuration. Try `--split_attn`.")
-    x = x.view(batch_size, max_seqlen_q, *x.shape[2:])
+    x = x.view(batch_size, max_seqlen_q, *x.shape[1:])
     return x
 
 
@@ -813,7 +838,7 @@ class HunyuanAttnProcessorFlashAttnDouble:
         attn_mode: Optional[str] = None,
         split_attn: Optional[bool] = False,
     ):
-        cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv = attention_mask
+        cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv, seq_len = attention_mask
 
         # Project image latents
         query = attn.to_q(hidden_states)
@@ -853,7 +878,16 @@ class HunyuanAttnProcessorFlashAttnDouble:
         del encoder_query, encoder_key, encoder_value  # free memory
 
         hidden_states_attn = attn_varlen_func(
-            query, key, value, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv, attn_mode=attn_mode, split_attn=split_attn
+            query,
+            key,
+            value,
+            cu_seqlens_q,
+            cu_seqlens_kv,
+            max_seqlen_q,
+            max_seqlen_kv,
+            seq_len,
+            attn_mode=attn_mode,
+            split_attn=split_attn,
         )
         del query, key, value  # free memory
         hidden_states_attn = hidden_states_attn.flatten(-2)
@@ -880,7 +914,7 @@ class HunyuanAttnProcessorFlashAttnSingle:
         attn_mode: Optional[str] = None,
         split_attn: Optional[bool] = False,
     ):
-        cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv = attention_mask
+        cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv, seq_len = attention_mask
         txt_length = encoder_hidden_states.shape[1]  # Store text length
 
         # Concatenate image and context inputs
@@ -905,7 +939,16 @@ class HunyuanAttnProcessorFlashAttnSingle:
         del image_rotary_emb  # free memory
 
         hidden_states = attn_varlen_func(
-            query, key, value, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv, attn_mode=attn_mode, split_attn=split_attn
+            query,
+            key,
+            value,
+            cu_seqlens_q,
+            cu_seqlens_kv,
+            max_seqlen_q,
+            max_seqlen_kv,
+            seq_len,
+            attn_mode=attn_mode,
+            split_attn=split_attn,
         )
         del query, key, value  # free memory
         hidden_states = hidden_states.flatten(-2)
@@ -1511,6 +1554,8 @@ class HunyuanVideoTransformer3DModelPacked(nn.Module):  # (PreTrainedModelMixin,
         self.rope = HunyuanVideoRotaryPosEmbed(rope_axes_dim, rope_theta)
 
         # 3. Dual stream transformer blocks
+        self.attn_mode = attn_mode
+        self.split_attn = split_attn
         self.transformer_blocks = nn.ModuleList(
             [
                 HunyuanVideoTransformerBlock(
@@ -1830,23 +1875,24 @@ class HunyuanVideoTransformer3DModelPacked(nn.Module):  # (PreTrainedModelMixin,
             del extra_encoder_hidden_states, extra_attention_mask  # free memory
 
         with torch.no_grad():
-            if batch_size == 1:
+            if batch_size == 1 and not self.split_attn:
                 # When batch size is 1, we do not need any masks or var-len funcs since cropping is mathematically same to what we want
                 # If they are not same, then their impls are wrong. Ours are always the correct one.
                 text_len = encoder_attention_mask.sum().item()
                 encoder_hidden_states = encoder_hidden_states[:, :text_len]
-                attention_mask = None, None, None, None
+                attention_mask = None, None, None, None, None
             else:
+                # If batch size = 1 and split_attn is True, it will be same as above
                 img_seq_len = hidden_states.shape[1]
                 txt_seq_len = encoder_hidden_states.shape[1]
 
-                cu_seqlens_q = get_cu_seqlens(encoder_attention_mask, img_seq_len)
+                cu_seqlens_q, seq_len = get_cu_seqlens(encoder_attention_mask, img_seq_len)
                 cu_seqlens_kv = cu_seqlens_q
                 max_seqlen_q = img_seq_len + txt_seq_len
                 max_seqlen_kv = max_seqlen_q
 
-                attention_mask = cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv
-                del cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv  # free memory
+                attention_mask = cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv, seq_len
+                del cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv, seq_len  # free memory
         del encoder_attention_mask  # free memory
 
         if self.enable_teacache:
@@ -1962,12 +2008,15 @@ class HunyuanVideoTransformer3DModelPacked(nn.Module):  # (PreTrainedModelMixin,
         """
 
         # inplace optimization
-        state_dict = optimize_state_dict_with_fp8(state_dict, device, FP8_OPTIMIZATION_TARGET_KEYS, FP8_OPTIMIZATION_EXCLUDE_KEYS, move_to_device=move_to_device)
+        state_dict = optimize_state_dict_with_fp8(
+            state_dict, device, FP8_OPTIMIZATION_TARGET_KEYS, FP8_OPTIMIZATION_EXCLUDE_KEYS, move_to_device=move_to_device
+        )
 
         # apply monkey patching
         apply_fp8_monkey_patch(self, state_dict, use_scaled_mm=use_scaled_mm)
 
         return state_dict
+
 
 def load_packed_model(
     device: Union[str, torch.device],

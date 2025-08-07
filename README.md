@@ -61,6 +61,9 @@ If you find this project helpful, please consider supporting its development via
 
 - GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- August 7, 2025:
+    - Added new sampling methods for timesteps: `logsnr` and `qinglong`. Thank you to sdbds for proposing this in [PR #407](https://github.com/kohya-ss/musubi-tuner/pull/407). `logsnr` is designed for style learning, while `qinglong` is a hybrid sampling method that considers style learning, model stability, and detail reproduction. For details, see the [Style-friendly SNR Sampler documentation](./docs/advanced_config.md#style-friendly-snr-sampler).
+
 - August 2, 2025:
     - Reduced peak memory usage during model loading for FramePack and Wan2.1 when using `--fp8_scaled`. This reduces VRAM usage during model loading before training and inference.
 

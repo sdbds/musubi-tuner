@@ -13,7 +13,7 @@
 - [PyTorch Dynamo optimization for model training](#pytorch-dynamo-optimization-for-model-training--モデルの学習におけるpytorch-dynamoの最適化)
 - [LoRA Post-Hoc EMA merging](#lora-post-hoc-ema-merging--loraのpost-hoc-emaマージ)
 - [MagCache](#magcache)
-- [Specify time step range for training](#specify-time-step-range-for-training--学習時のタイムステップ範囲の指定)
+- [Style-Friendly SNR Sampler](#style-friendly-snr-sampler)
 
 ## How to specify `network_args` / `network_args`の指定方法
 
@@ -731,72 +731,84 @@ Musubi TunerにMagCache機能を実装しました。一部のコードはMagCac
 
 </details>
 
-## Specify time step range for training / 学習時のタイムステップ範囲の指定
+## Style-Friendly SNR Sampler
 
-You can specify the range of timesteps for training. This is useful for focusing the training on a specific part of the diffusion process.
+This sampler is based on the paper [Style-Friendly SNR Sampler for Style-Driven Generation](https://arxiv.org/abs/2411.14793). The paper argues that stylistic features in diffusion models are predominantly learned at high noise levels. This sampler biases the noise level (timestep) sampling towards these higher noise levels, which can significantly improve the model's ability to learn and reproduce specific styles.
 
-- `--min_timestep`: Specifies the minimum timestep for training (0-999, default: 0).
-- `--max_timestep`: Specifies the maximum timestep for training (1-1000, default: 1000).
-- `--preserve_distribution_shape`: If specified, it constrains timestep sampling to the `[min_timestep, max_timestep]` range using rejection sampling, which preserves the original distribution shape. By default, the `[0, 1]` range is scaled, which can distort the distribution. This option is only effective when `timestep_sampling` is not 'sigma'.
+This feature is enabled by specifying `--timestep_sampling`.
 
 <details>
 <summary>日本語</summary>
 
-学習時のタイムステップの範囲を指定できます。これにより、拡散プロセスの特定の部分に学習を集中させることができます。
+このサンプラーは、論文「[Style-Friendly SNR Sampler for Style-Driven Generation](https://arxiv.org/abs/2411.14793)」に基づいています。この論文では、拡散モデルにおけるスタイル特徴は、主にノイズレベルが高い領域で学習されると主張しています。このサンプラーは、ノイズレベル（タイムステップ）のサンプリングを意図的に高ノイズレベル側に偏らせることで、モデルが特定のスタイルを学習・再現する能力を大幅に向上させることができます。
 
-- `--min_timestep`: 学習時の最小タイムステップを指定します（0-999、デフォルト: 0）。
-- `--max_timestep`: 学習時の最大タイムステップを指定します（1-1000、デフォルト: 1000）。
-- `--preserve_distribution_shape`: 指定すると、タイムステップのサンプリングを棄却サンプリング（条件に合わないものを捨てる）を用いて `[min_timestep, max_timestep]` の範囲に制約し、元の分布形状を保持します。デフォルトでは、`[0, 1]` の範囲がスケーリングされるため、分布が歪む可能性があります。このオプションは `timestep_sampling` が 'sigma' 以外の場合にのみ有効です。
+この機能は `--timestep_sampling` を指定することで有効になります。
 </details>
 
-### Example / 記述例
+### `logsnr` Sampler
 
-To train only on the latter half of the timesteps (more detailed part) / タイムステップの後半（より詳細な部分）のみを学習する場合:
+This is a direct implementation of the sampler proposed in the paper. It samples the log-SNR value from a normal distribution. By setting a low mean and a large standard deviation, it focuses the training on high-noise levels crucial for style learning.
 
-```bash
---min_timestep 500 --max_timestep 1000
-```
+To use this, specify `logsnr` for `--timestep_sampling`. You can also configure the mean and standard deviation of the log-SNR distribution with `--logit_mean` and `--logit_std`.
 
-To train only on the first half of the timesteps (more structural part) / タイムステップの前半（より構造的な部分）のみを学習する場合:
+The paper recommends `logit_mean=-6.0` and `logit_std` of 2.0 or 3.0.
 
 ```bash
---min_timestep 0 --max_timestep 500
+accelerate launch ... \
+    --timestep_sampling logsnr \
+    --logit_mean -6.0 \
+    --logit_std 2.0
 ```
 
-To train on a specific range while preserving the sampling distribution shape / サンプリング分布の形状を維持しつつ特定の範囲で学習する場合:
+Following is the distribution of the logsnr sampler:
 
-```bash
---min_timestep 200 --max_timestep 800 --preserve_distribution_shape
-```
-
-### Actual distribution shape / 実際の分布形状
-
-You can visualize the distribution shape of the timesteps with `--show_timesteps image` (or console) option. The distribution shape is determined by the `--min_timestep`, `--max_timestep`, and `--preserve_distribution_shape` options.
-
-In the following examples, the discrete flow shift is set to 3.0.
-
-When `--min_timestep` and `--max_timestep` are not specified, the distribution shape is as follows:
-
-![no_timestep](./shift_3.png)
-
-When `--min_timestep 500` and `--max_timestep 100` are specified, and `--preserve_distribution_shape` is not specified, the distribution shape is as follows:
-
-![timestep_500_1000](./shift_3_500_1000.png)
-
-When `--min_timestep 500` and `--max_timestep 100` are specified, and `--preserve_distribution_shape` is specified, the distribution shape is as follows:
-
-![timestep_500_1000_preserve](./shift_3_500_1000_preserve.png)
+![Distribution of logsnr sampler](logsnr_distribution.png)
 
 <details>
 <summary>日本語</summary>
 
-タイムステップの分布形状は、`--show_timesteps image`（またはconsole）オプションで確認できます。分布形状は、`--min_timestep`、`--max_timestep`、および `--preserve_distribution_shape` オプションによって決まります。
+論文で提案された通りのサンプラーの実装です。log-SNR値を正規分布からサンプリングします。低い平均値と大きな標準偏差を設定することで、スタイルの学習に不可欠な高ノイズレベル領域に学習を集中させます。
 
-上の図はそれぞれ、離散フローシフトが3.0のとき、
+使用するには、`--timestep_sampling` に `logsnr` を指定します。また、`--logit_mean` と `--logit_std` でlog-SNR分布の平均と標準偏差を設定できます。
 
-1. `--min_timestep` と `--max_timestep` が指定されていない場合
-2. `--min_timestep 500` と `--max_timestep 1000` が指定され、`--preserve_distribution_shape` が指定されていない場合
-3. `--min_timestep 500` と `--max_timestep 1000` が指定され、`--preserve_distribution_shape` が指定された場合
+論文では `logit_mean=-6.0`、`logit_std` は2.0または3.0が推奨されています。
 
-の分布形状を示しています。
+</details>
+
+
+### `qinglong` Sampler (Hybrid Sampler)
+
+This is a hybrid sampling method that combines three different samplers to balance style learning, model stability, and detail preservation. It is an experimental feature inspired by the Style-Friendly SNR Sampler. It was proposed by sdbds (Qing Long) in PR [#407](https://github.com/kohya-ss/musubi-tuner/pull/407). 
+
+In each training step, one of the following samplers is chosen for each sample in the batch based on a predefined ratio:
+
+1.  **flux_shift (80%)**: The standard sampler for high-resolution models. Focuses on overall stability.
+2.  **logsnr (7.5%)**: The Style-Friendly sampler. Focuses on style learning.
+3.  **logsnr2 (12.5%)**: A sampler that focuses on low-noise regions (high log-SNR values). Aims to improve the learning of fine details.
+
+To use this, specify `qinglong` for `--timestep_sampling`.
+
+```bash
+accelerate launch ... \
+    --timestep_sampling qinglong \
+    --logit_mean -6.0 \
+    --logit_std 2.0
+```
+
+Following is the distribution of the qinglong sampler:
+
+![Distribution of qinglong sampler](qinglong_distribution.png)
+
+<details>
+<summary>日本語</summary>
+
+これは、スタイルの学習、モデルの安定性、ディテールの再現性のバランスを取るために、3つの異なるサンプラーを組み合わせたハイブリッドサンプリング手法です。Style-Friendly SNR Samplerにインスパイアされた実験的な機能です。PR [#407](https://github.com/kohya-ss/musubi-tuner/pull/407) で sdbds (Qing Long) 氏により提案されました。
+
+各学習ステップにおいて、バッチ内の各サンプルに対して、あらかじめ定義された比率に基づき以下のいずれかのサンプラーが選択されます。
+
+1.  **flux_shift (80%)**: 高解像度モデル向けの標準的なサンプラー。全体的な安定性を重視します。
+2.  **logsnr (7.5%)**: Style-Friendlyサンプラー。スタイルの学習を重視します。
+3.  **logsnr2 (12.5%)**: 低ノイズ領域（高いlog-SNR値）に焦点を当てたサンプラー。細部のディテール学習を向上させることを目的とします。
+
+使用するには、`--timestep_sampling` に `qinglong` を指定します。
 </details>

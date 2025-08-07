@@ -669,11 +669,11 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
 
     @property
     def dtype(self):
-        return next(self.parameters()).dtype
+        return self.patch_embedding.weight.dtype
 
     @property
     def device(self):
-        return next(self.parameters()).device
+        return self.patch_embedding.weight.device
 
     def fp8_optimization(
         self, state_dict: dict[str, torch.Tensor], device: torch.device, move_to_device: bool, use_scaled_mm: bool = False
@@ -1021,6 +1021,10 @@ def load_wan_model(
                 sd[key] = sd[key].to(loading_device)
 
     info = model.load_state_dict(sd, strict=True, assign=True)
+    if dit_weight_dtype is not None:
+        # cast model weights to the specified dtype. This makes sure that the model is in the correct dtype
+        logger.info(f"Casting model weights to {dit_weight_dtype}")
+        model = model.to(dit_weight_dtype)
     logger.info(f"Loaded DiT model from {dit_path}, info={info}")
 
     return model

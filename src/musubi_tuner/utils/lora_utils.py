@@ -42,6 +42,7 @@ def filter_lora_state_dict(
 
     return weights_sd
 
+
 def load_safetensors_with_lora_and_fp8(
     model_files: Union[str, List[str]],
     lora_weights_list: Optional[Dict[str, torch.Tensor]],
@@ -49,6 +50,7 @@ def load_safetensors_with_lora_and_fp8(
     fp8_optimization: bool,
     calc_device: torch.device,
     move_to_device: bool = False,
+    dit_weight_dtype: Optional[torch.dtype] = None,
     target_keys: Optional[List[str]] = None,
     exclude_keys: Optional[List[str]] = None,
 ) -> dict[str, torch.Tensor]:
@@ -177,7 +179,14 @@ def load_safetensors_with_lora_and_fp8(
         weight_hook = weight_hook_func
 
     state_dict = load_safetensors_with_fp8_optimization_and_hook(
-        model_files, fp8_optimization, calc_device, move_to_device, target_keys, exclude_keys, weight_hook=weight_hook
+        model_files,
+        fp8_optimization,
+        calc_device,
+        move_to_device,
+        dit_weight_dtype,
+        target_keys,
+        exclude_keys,
+        weight_hook=weight_hook,
     )
 
     for lora_weight_keys in list_of_lora_weight_keys:
@@ -195,6 +204,7 @@ def load_safetensors_with_fp8_optimization_and_hook(
     fp8_optimization: bool,
     calc_device: torch.device,
     move_to_device: bool = False,
+    dit_weight_dtype: Optional[torch.dtype] = None,
     target_keys: Optional[List[str]] = None,
     exclude_keys: Optional[List[str]] = None,
     weight_hook: callable = None,
@@ -204,6 +214,7 @@ def load_safetensors_with_fp8_optimization_and_hook(
     """
     if fp8_optimization:
         logger.info(f"Loading state dict with FP8 optimization. Hook enabled: {weight_hook is not None}")
+        # dit_weight_dtype is not used because we use fp8 optimization
         state_dict = load_safetensors_with_fp8_optimization(
             model_files, calc_device, target_keys, exclude_keys, move_to_device=move_to_device, weight_hook=weight_hook
         )
@@ -217,7 +228,13 @@ def load_safetensors_with_fp8_optimization_and_hook(
                     if weight_hook is not None:
                         value = weight_hook(key, value)
                     if move_to_device:
-                        value = value.to(calc_device)
+                        if dit_weight_dtype is None:
+                            value = value.to(calc_device)
+                        else:
+                            value = value.to(calc_device, dtype=dit_weight_dtype)
+                    elif dit_weight_dtype is not None:
+                        value = value.to(dit_weight_dtype)
+
                     state_dict[key] = value
 
     return state_dict
