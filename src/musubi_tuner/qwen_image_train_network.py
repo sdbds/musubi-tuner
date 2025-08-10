@@ -288,8 +288,6 @@ class QwenImageNetworkTrainer(NetworkTrainer):
         if args.gradient_checkpointing:
             noisy_model_input.requires_grad_(True)
             vl_embed.requires_grad_(True)
-            if vl_mask is not None:
-                vl_mask.requires_grad_(True)
 
         # call DiT
         noisy_model_input = noisy_model_input.to(device=accelerator.device, dtype=network_dtype)

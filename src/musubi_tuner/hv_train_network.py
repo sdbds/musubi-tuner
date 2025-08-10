@@ -1144,17 +1144,17 @@ class NetworkTrainer:
             except ImportError:
                 raise ImportError("No wandb / wandb がインストールされていないようです")
         except:  # wandb 無効時
-            pass
+            wandb = None
 
         if video.shape[2] == 1:
             image_paths = save_images_grid(video, save_dir, save_path, create_subdir=False)
-            if wandb_tracker is not None:
+            if wandb_tracker is not None and wandb is not None:
                 for image_path in image_paths:
                     wandb_tracker.log({f"sample_{prompt_idx}": wandb.Image(image_path)}, step=steps)
         else:
             video_path = os.path.join(save_dir, save_path) + ".mp4"
             save_videos_grid(video, video_path)
-            if wandb_tracker is not None:
+            if wandb_tracker is not None and wandb is not None:
                 wandb_tracker.log({f"sample_{prompt_idx}": wandb.Video(video_path)}, step=steps)
 
         # Move models back to initial state

@@ -52,6 +52,9 @@ Wan2.1/2.2については、[Wan2.1/2.2のドキュメント](./docs/wan.md)も�
 
 - GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- 2025/08/10
+    - Qwen-Imageに対応しました。PR [#408](https://github.com/kohya-ss/musubi-tuner/pull/408) 詳細は[Qwen-Imageのドキュメント](./docs/qwen_image.md)を参照してください。
+    
 - 2025/08/09
     - wandbにログ出力用設定しているとき、サンプル生成画像もwandbに出力されるようになりました。PR [#420](https://github.com/kohya-ss/musubi-tuner/pull/420) xhiroga 氏に感謝します。
 

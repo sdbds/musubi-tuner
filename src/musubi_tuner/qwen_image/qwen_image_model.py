@@ -16,7 +16,7 @@
 
 import inspect
 import numbers
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 import math
 
 # import numpy as np
@@ -25,30 +25,10 @@ from torch import nn
 from torch.nn import functional as F
 from accelerate import init_empty_weights
 
-# from transformers import Qwen2_5_VLForConditionalGeneration, Qwen2Tokenizer
-# from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
-# from musubi_tuner.qwen_image.qwen_image_autoencoder_kl import AutoencoderKLQwenImage
-
-# from ...image_processor import VaeImageProcessor
-# from ...models import AutoencoderKLQwenImage, QwenImageTransformer2DModel
-# from ...schedulers import FlowMatchEulerDiscreteScheduler
-# from ...utils import is_torch_xla_available, logging, replace_example_docstring
-# from ...utils.torch_utils import randn_tensor
-# from ..pipeline_utils import DiffusionPipeline
-# from .pipeline_output import QwenImagePipelineOutput
-
 from musubi_tuner.modules.custom_offloading_utils import ModelOffloader
 from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch
-from musubi_tuner.qwen_image.qwen_image_autoencoder_kl import AutoencoderKLQwenImage
 from musubi_tuner.qwen_image.qwen_image_modules import get_activation
 from musubi_tuner.hunyuan_model.attention import attention as hunyuan_attention
-
-# if is_torch_xla_available():
-#     import torch_xla.core.xla_model as xm
-
-#     XLA_AVAILABLE = True
-# else:
-#     XLA_AVAILABLE = False
 
 import logging
 
@@ -57,8 +37,6 @@ from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-
-# logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 EXAMPLE_DOC_STRING = """
     Examples:
@@ -621,6 +599,8 @@ class Attention(nn.Module):
         bias: bool = False,
         qk_norm: Optional[str] = None,
         eps: float = 1e-5,
+        attn_mode: str = "torch",
+        split_attn: bool = False,
     ):
         super().__init__()
         assert cross_attention_dim is None, "cross_attention_dim should be None for Qwen double-stream attention."
@@ -643,6 +623,9 @@ class Attention(nn.Module):
         self.heads = out_dim // dim_head if out_dim is not None else heads
 
         self.added_kv_proj_dim = added_kv_proj_dim
+
+        self.attn_mode = attn_mode
+        self.split_attn = split_attn
 
         self.norm_q = RMSNorm(dim_head, eps=eps)
         self.norm_k = RMSNorm(dim_head, eps=eps)
@@ -673,6 +656,7 @@ class Attention(nn.Module):
         encoder_hidden_states_mask: torch.FloatTensor = None,
         attention_mask: Optional[torch.FloatTensor] = None,
         image_rotary_emb: Optional[torch.Tensor] = None,
+        txt_seq_lens: Optional[torch.Tensor] = None,
     ) -> torch.FloatTensor:
         if encoder_hidden_states is None:
             raise ValueError("QwenDoubleStreamAttnProcessor2_0 requires encoder_hidden_states (text stream)")
@@ -713,30 +697,55 @@ class Attention(nn.Module):
             txt_key = apply_rotary_emb_qwen(txt_key, txt_freqs, use_real=False)
 
         # Concatenate for joint attention
-        # Order: [text, image]
-        joint_query = torch.cat([txt_query, img_query], dim=1)
-        joint_key = torch.cat([txt_key, img_key], dim=1)
-        joint_value = torch.cat([txt_value, img_value], dim=1)
+        # Order: [image, txt]
+        joint_query = torch.cat([img_query, txt_query], dim=1)
+        joint_key = torch.cat([img_key, txt_key], dim=1)
+        joint_value = torch.cat([img_value, txt_value], dim=1)
 
         # Compute joint attention
         # joint_query: [B, S, H, D], joint_key: [B, S, H, D], joint_value: [B, S, H, D]
-        joint_query = joint_query.transpose(1, 2)  # [B, H, S, D]
-        joint_key = joint_key.transpose(1, 2)  # [B, H, S, D]
-        joint_value = joint_value.transpose(1, 2)  # [B, H, S, D]
-        joint_hidden_states = torch.nn.functional.scaled_dot_product_attention(
-            joint_query, joint_key, joint_value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
+        seq_img = img_query.shape[1]
+        total_len = seq_img + txt_seq_lens
+        qkv = [joint_query, joint_key, joint_value]
+        joint_hidden_states = hunyuan_attention(
+            qkv, mode=self.attn_mode, attn_mask=attention_mask, total_len=total_len if self.split_attn else None
         )
-        # joint_hidden_states: [B, H, S, D]
-        joint_hidden_states = joint_hidden_states.transpose(1, 2)  # [B, S, H, D]
-        # backend=self._attention_backend,
+        # joint_hidden_states: [B, S, H*D]
 
-        # Reshape back
-        joint_hidden_states = joint_hidden_states.flatten(2, 3)
         joint_hidden_states = joint_hidden_states.to(joint_query.dtype)
 
         # Split attention outputs back
-        txt_attn_output = joint_hidden_states[:, :seq_txt, :]  # Text part
-        img_attn_output = joint_hidden_states[:, seq_txt:, :]  # Image part
+        img_attn_output = joint_hidden_states[:, :seq_img, :]  # Image part
+        txt_attn_output = joint_hidden_states[:, seq_img:, :]  # Text part
+
+        # Original implementation
+        # ----
+        # # Concatenate for joint attention
+        # # Order: [text, image]
+        # joint_query = torch.cat([txt_query, img_query], dim=1)
+        # joint_key = torch.cat([txt_key, img_key], dim=1)
+        # joint_value = torch.cat([txt_value, img_value], dim=1)
+
+        # # Compute joint attention
+        # # joint_query: [B, S, H, D], joint_key: [B, S, H, D], joint_value: [B, S, H, D]
+        # joint_query = joint_query.transpose(1, 2)  # [B, H, S, D]
+        # joint_key = joint_key.transpose(1, 2)  # [B, H, S, D]
+        # joint_value = joint_value.transpose(1, 2)  # [B, H, S, D]
+        # joint_hidden_states = torch.nn.functional.scaled_dot_product_attention(
+        #     joint_query, joint_key, joint_value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
+        # )
+        # # joint_hidden_states: [B, H, S, D]
+        # joint_hidden_states = joint_hidden_states.transpose(1, 2)  # [B, S, H, D]
+        # # backend=self._attention_backend,
+
+        # # Reshape back
+        # joint_hidden_states = joint_hidden_states.flatten(2, 3)
+        # joint_hidden_states = joint_hidden_states.to(joint_query.dtype)
+
+        # # Split attention outputs back
+        # txt_attn_output = joint_hidden_states[:, :seq_txt, :]  # Text part
+        # img_attn_output = joint_hidden_states[:, seq_txt:, :]  # Image part
+        # ----
 
         # Apply output projections
         img_attn_output = self.to_out[0](img_attn_output)
@@ -749,12 +758,23 @@ class Attention(nn.Module):
 
 # @maybe_allow_in_graph
 class QwenImageTransformerBlock(nn.Module):
-    def __init__(self, dim: int, num_attention_heads: int, attention_head_dim: int, qk_norm: str = "rms_norm", eps: float = 1e-6):
+    def __init__(
+        self,
+        dim: int,
+        num_attention_heads: int,
+        attention_head_dim: int,
+        qk_norm: str = "rms_norm",
+        eps: float = 1e-6,
+        attn_mode: str = "torch",
+        split_attn: bool = False,
+    ):
         super().__init__()
 
         self.dim = dim
         self.num_attention_heads = num_attention_heads
         self.attention_head_dim = attention_head_dim
+        self.attn_mode = attn_mode
+        self.split_attn = split_attn
 
         # Image processing modules
         self.img_mod = nn.Sequential(
@@ -773,6 +793,8 @@ class QwenImageTransformerBlock(nn.Module):
             bias=True,
             qk_norm=qk_norm,
             eps=eps,
+            attn_mode=attn_mode,
+            split_attn=split_attn,
         )
         # processor=QwenDoubleStreamAttnProcessor2_0(),
         self.img_norm2 = nn.LayerNorm(dim, elementwise_affine=False, eps=eps)
@@ -800,6 +822,7 @@ class QwenImageTransformerBlock(nn.Module):
         encoder_hidden_states_mask: torch.Tensor,
         temb: torch.Tensor,
         image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        txt_seq_lens: Optional[torch.Tensor] = None,
         joint_attention_kwargs: Optional[Dict[str, Any]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Get modulation parameters for both streams
@@ -830,6 +853,7 @@ class QwenImageTransformerBlock(nn.Module):
             encoder_hidden_states=txt_modulated,  # Text stream (will be processed as "context")
             encoder_hidden_states_mask=encoder_hidden_states_mask,
             image_rotary_emb=image_rotary_emb,
+            txt_seq_lens=txt_seq_lens,
             **joint_attention_kwargs,
         )
 
@@ -903,11 +927,15 @@ class QwenImageTransformer2DModel(nn.Module):  # ModelMixin, ConfigMixin, PeftAd
         joint_attention_dim: int = 3584,
         guidance_embeds: bool = False,  # TODO: this should probably be removed
         axes_dims_rope: Tuple[int, int, int] = (16, 56, 56),
+        attn_mode: str = "torch",
+        split_attn: bool = False,
     ):
         super().__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels or in_channels
         self.inner_dim = num_attention_heads * attention_head_dim
+        self.attn_mode = attn_mode
+        self.split_attn = split_attn
 
         self.pos_embed = QwenEmbedRope(theta=10000, axes_dim=list(axes_dims_rope), scale_rope=True)
 
@@ -921,7 +949,11 @@ class QwenImageTransformer2DModel(nn.Module):  # ModelMixin, ConfigMixin, PeftAd
         self.transformer_blocks = nn.ModuleList(
             [
                 QwenImageTransformerBlock(
-                    dim=self.inner_dim, num_attention_heads=num_attention_heads, attention_head_dim=attention_head_dim
+                    dim=self.inner_dim,
+                    num_attention_heads=num_attention_heads,
+                    attention_head_dim=attention_head_dim,
+                    attn_mode=attn_mode,
+                    split_attn=split_attn,
                 )
                 for _ in range(num_layers)
             ]
@@ -1068,6 +1100,9 @@ class QwenImageTransformer2DModel(nn.Module):  # ModelMixin, ConfigMixin, PeftAd
 
         image_rotary_emb = self.pos_embed(img_shapes, txt_seq_lens, device=hidden_states.device)
 
+        # block expects tensor instead of list
+        txt_seq_lens = torch.tensor(txt_seq_lens, device=hidden_states.device) if txt_seq_lens is not None else None
+
         for index_block, block in enumerate(self.transformer_blocks):
             if self.blocks_to_swap:
                 self.offloader.wait_for_block(index_block)
@@ -1080,6 +1115,7 @@ class QwenImageTransformer2DModel(nn.Module):  # ModelMixin, ConfigMixin, PeftAd
                     encoder_hidden_states_mask,
                     temb,
                     image_rotary_emb,
+                    txt_seq_lens,
                 )
 
             else:
@@ -1089,6 +1125,7 @@ class QwenImageTransformer2DModel(nn.Module):  # ModelMixin, ConfigMixin, PeftAd
                     encoder_hidden_states_mask=encoder_hidden_states_mask,
                     temb=temb,
                     image_rotary_emb=image_rotary_emb,
+                    txt_seq_lens=txt_seq_lens,
                     joint_attention_kwargs=attention_kwargs,
                 )
 
@@ -1178,6 +1215,8 @@ def load_qwen_image_model(
             joint_attention_dim=3584,
             guidance_embeds=False,
             axes_dims_rope=(16, 56, 56),
+            attn_mode=attn_mode,
+            split_attn=split_attn,
         )
         if dit_weight_dtype is not None:
             model.to(dit_weight_dtype)
