@@ -80,6 +80,8 @@ ARCHITECTURE_FRAMEPACK = "fp"
 ARCHITECTURE_FRAMEPACK_FULL = "framepack"
 ARCHITECTURE_FLUX_KONTEXT = "fk"
 ARCHITECTURE_FLUX_KONTEXT_FULL = "flux_kontext"
+ARCHITECTURE_QWEN_IMAGE = "qi"
+ARCHITECTURE_QWEN_IMAGE_FULL = "qwen_image"
 
 
 def glob_images(directory, base="*"):
@@ -195,7 +197,7 @@ class ItemInfo:
 
 
 def save_latent_cache(item_info: ItemInfo, latent: torch.Tensor):
-    """HunyuanVideo architecture only. HunyuanVideo doesn't support I2V and control latents"""
+    """HunyuanVideo architecture. HunyuanVideo doesn't support I2V and control latents"""
     assert latent.dim() == 4, "latent should be 4D tensor (frame, channel, height, width)"
 
     _, F, H, W = latent.shape
@@ -213,7 +215,7 @@ def save_latent_cache_wan(
     control_latent: Optional[torch.Tensor],
     f_indices: Optional[list[int]] = None,
 ):
-    """Wan architecture only"""
+    """Wan architecture"""
     assert latent.dim() == 4, "latent should be 4D tensor (frame, channel, height, width)"
 
     _, F, H, W = latent.shape
@@ -248,7 +250,7 @@ def save_latent_cache_framepack(
     clean_latent_4x_indices: torch.Tensor,
     image_embeddings: torch.Tensor,
 ):
-    """FramePack architecture only"""
+    """FramePack architecture"""
     assert latent.dim() == 4, "latent should be 4D tensor (frame, channel, height, width)"
 
     _, F, H, W = latent.shape
@@ -280,7 +282,7 @@ def save_latent_cache_flux_kontext(
     latent: torch.Tensor,
     control_latent: torch.Tensor,
 ):
-    """FLUX.1 Kontext architecture only"""
+    """FLUX.1 Kontext architecture"""
     assert latent.dim() == 3, "latent should be 3D tensor (channel, height, width)"
 
     _, H, W = latent.shape
@@ -291,6 +293,20 @@ def save_latent_cache_flux_kontext(
     sd[f"varlen_control_{dtype_str}"] = control_latent.detach().cpu().contiguous()
 
     save_latent_cache_common(item_info, sd, ARCHITECTURE_FLUX_KONTEXT_FULL)
+
+
+def save_latent_cache_qwen_image(
+    item_info: ItemInfo,
+    latent: torch.Tensor
+):
+    """Qwen-Image architecture"""
+    assert latent.dim() == 4, "latent should be 4D tensor (frame, channel, height, width)"
+
+    _, F, H, W = latent.shape
+    dtype_str = dtype_to_str(latent.dtype)
+    sd = {f"latents_{F}x{H}x{W}_{dtype_str}": latent.detach().cpu().contiguous()}
+
+    save_latent_cache_common(item_info, sd, ARCHITECTURE_QWEN_IMAGE_FULL)
 
 
 def save_latent_cache_common(item_info: ItemInfo, sd: dict[str, torch.Tensor], arch_fullname: str):
@@ -316,7 +332,7 @@ def save_latent_cache_common(item_info: ItemInfo, sd: dict[str, torch.Tensor], a
 
 
 def save_text_encoder_output_cache(item_info: ItemInfo, embed: torch.Tensor, mask: Optional[torch.Tensor], is_llm: bool):
-    """HunyuanVideo architecture only"""
+    """HunyuanVideo architecture"""
     assert (
         embed.dim() == 1 or embed.dim() == 2
     ), f"embed should be 2D tensor (feature, hidden_size) or (hidden_size,), got {embed.shape}"
@@ -333,7 +349,7 @@ def save_text_encoder_output_cache(item_info: ItemInfo, embed: torch.Tensor, mas
 
 
 def save_text_encoder_output_cache_wan(item_info: ItemInfo, embed: torch.Tensor):
-    """Wan architecture only. Wan2.1 only has a single text encoder"""
+    """Wan architecture. Wan2.1 only has a single text encoder"""
 
     sd = {}
     dtype_str = dtype_to_str(embed.dtype)
@@ -346,7 +362,7 @@ def save_text_encoder_output_cache_wan(item_info: ItemInfo, embed: torch.Tensor)
 def save_text_encoder_output_cache_framepack(
     item_info: ItemInfo, llama_vec: torch.Tensor, llama_attention_mask: torch.Tensor, clip_l_pooler: torch.Tensor
 ):
-    """FramePack architecture only."""
+    """FramePack architecture."""
     sd = {}
     dtype_str = dtype_to_str(llama_vec.dtype)
     sd[f"llama_vec_{dtype_str}"] = llama_vec.detach().cpu()
@@ -358,7 +374,7 @@ def save_text_encoder_output_cache_framepack(
 
 
 def save_text_encoder_output_cache_flux_kontext(item_info: ItemInfo, t5_vec: torch.Tensor, clip_l_pooler: torch.Tensor):
-    """Flux Kontext architecture only."""
+    """Flux Kontext architecture."""
 
     sd = {}
     dtype_str = dtype_to_str(t5_vec.dtype)
@@ -367,6 +383,15 @@ def save_text_encoder_output_cache_flux_kontext(item_info: ItemInfo, t5_vec: tor
     sd[f"clip_l_pooler_{dtype_str}"] = clip_l_pooler.detach().cpu()
 
     save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_FLUX_KONTEXT_FULL)
+
+
+def save_text_encoder_output_cache_qwen_image(item_info: ItemInfo, embed: torch.Tensor):
+    """Qwen-Image architecture."""
+    sd = {}
+    dtype_str = dtype_to_str(embed.dtype)
+    sd[f"varlen_vl_embed_{dtype_str}"] = embed.detach().cpu()
+
+    save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_QWEN_IMAGE_FULL)
 
 
 def save_text_encoder_output_cache_common(item_info: ItemInfo, sd: dict[str, torch.Tensor], arch_fullname: str):
@@ -410,6 +435,7 @@ class BucketSelector:
     RESOLUTION_STEPS_WAN = 16
     RESOLUTION_STEPS_FRAMEPACK = 16
     RESOLUTION_STEPS_FLUX_KONTEXT = 16
+    RESOLUTION_STEPS_QWEN_IMAGE = 16
 
     def __init__(
         self, resolution: Tuple[int, int], enable_bucket: bool = True, no_upscale: bool = False, architecture: str = "no_default"
@@ -426,6 +452,8 @@ class BucketSelector:
             self.reso_steps = BucketSelector.RESOLUTION_STEPS_FRAMEPACK
         elif self.architecture == ARCHITECTURE_FLUX_KONTEXT:
             self.reso_steps = BucketSelector.RESOLUTION_STEPS_FLUX_KONTEXT
+        elif self.architecture == ARCHITECTURE_QWEN_IMAGE:
+            self.reso_steps = BucketSelector.RESOLUTION_STEPS_QWEN_IMAGE
         else:
             raise ValueError(f"Invalid architecture: {self.architecture}")
 
