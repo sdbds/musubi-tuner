@@ -45,11 +45,11 @@
 
 ## Introduction
 
-This repository provides scripts for training LoRA (Low-Rank Adaptation) models with HunyuanVideo, Wan2.1, FramePack and FLUX.1 Kontext architectures. 
+This repository provides scripts for training LoRA (Low-Rank Adaptation) models with HunyuanVideo, Wan2.1/2.2, FramePack and FLUX.1 Kontext architectures. 
 
-This repository is unofficial and not affiliated with the official HunyanVideo/Wan2.1/FramePack/FLUX.1 Kontext repositories. 
+This repository is unofficial and not affiliated with the official HunyanVideo/Wan2.1/2.2/FramePack/FLUX.1 Kontext repositories. 
 
-For Wan2.1, please also refer to [Wan2.1 documentation](./docs/wan.md). For FramePack, please also refer to [FramePack documentation](./docs/framepack.md). For FLUX.1 Kontext, please refer to [FLUX.1 Kontext documentation](./docs/flux_kontext.md).
+For Wan2.1/2.2, please also refer to [Wan2.1/2.2 documentation](./docs/wan.md). For FramePack, please also refer to [FramePack documentation](./docs/framepack.md). For FLUX.1 Kontext, please refer to [FLUX.1 Kontext documentation](./docs/flux_kontext.md).
 
 *This repository is under development.*
 
@@ -60,6 +60,14 @@ If you find this project helpful, please consider supporting its development via
 ### Recent Updates
 
 - GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
+
+- August 9, 2025:
+    - When logging to wandb, sample generation images are now also logged to wandb. Thanks to xhiroga for [PR #420](https://github.com/kohya-ss/musubi-tuner/pull/420).
+    
+- August 8, 2025:
+    - Added support for Wan2.2.  [PR #399](https://github.com/kohya-ss/musubi-tuner/pull/399). See [Wan2.1/2.2 documentation](./docs/wan.md). 
+
+        Wan2.2 consists of two models: high noise and low noise. During LoRA training, you can choose either one or both. Please refer to the documentation for details on specifying timesteps.
 
 - August 7, 2025:
     - Added new sampling methods for timesteps: `logsnr` and `qinglong`. Thank you to sdbds for proposing this in [PR #407](https://github.com/kohya-ss/musubi-tuner/pull/407). `logsnr` is designed for style learning, while `qinglong` is a hybrid sampling method that considers style learning, model stability, and detail reproduction. For details, see the [Style-friendly SNR Sampler documentation](./docs/advanced_config.md#style-friendly-snr-sampler).
@@ -78,19 +86,6 @@ If you find this project helpful, please consider supporting its development via
 
 - July 28, 2025:
     - Added LoRA training for FLUX.1 Kontext \[dev\]. For details, see the [FLUX.1 Kontext LoRA training documentation](./docs/flux_kontext.md).
-
-- June 25, 2025:
-    - Added support for one-frame inference and training in Wan2.1 architecture. For details, see the [Wan's one frame inference documentation](./docs/wan_1f.md).
-
-- June 17, 2025:
-    - Added support for [MagCache](https://github.com/Zehong-Ma/MagCache) in FramePack's inference script. See [Advanced Configuration](./docs/advanced_config.md#magcache) for details.
-    - Implemented caching of Text Encoder outputs in both interactive and batch modes in FramePack's inference script. Additionally, we reviewed the processing order and adjusted the timing of model offloading to reduce processing time during continuous generation.
-
-- June 13, 2025:
-    - Added `--sima_rel` option to `lora_post_hoc_ema.py`. This allows you to use Power Function EMA when applying Post Hoc EMA. For details, see [this document](./docs/advanced_config.md#lora-post-hoc-ema-merging--loraのpost-hoc-emaマージ).
-
-- June 12, 2025:
-    - Added `lora_post_hoc_ema.py` for Post Hoc EMA of LoRA models. This allows you to apply Post Hoc EMA after training a LoRA model to improve accuracy. For details, see [this document](./docs/advanced_config.md#lora-post-hoc-ema-merging--loraのpost-hoc-emaマージ).
 
 ### Releases
 

@@ -791,7 +791,7 @@ class NetworkTrainer:
                     logits_norm = logits_norm * args.sigmoid_scale  # larger scale for more uniform sampling
                     t = logits_norm.sigmoid()
                     t = (t * shift) / (1 + (shift - 1) * t)
-                    
+
                 elif args.timestep_sampling == "logsnr":
                     # https://arxiv.org/abs/2411.14793v3
                     logsnr = torch.normal(mean=args.logit_mean, std=args.logit_std, size=(batch_size,), device=device)
@@ -816,7 +816,7 @@ class NetworkTrainer:
                         h, w = latents.shape[-2:]
                         mu = train_utils.get_lin_function(y1=0.5, y2=1.15)((h // 2) * (w // 2))
                         shift = math.exp(mu)
-                        
+
                         logits_norm_flux = torch.randn(flux_count, device=device)
                         logits_norm_flux = logits_norm_flux * args.sigmoid_scale
                         t_flux = logits_norm_flux.sigmoid()
@@ -835,6 +835,7 @@ class NetworkTrainer:
                         logsnr2_count = logsnr_mask2.sum().item()
                         logsnr2 = torch.normal(mean=5.36, std=1.0, size=(logsnr2_count,), device=device)
                         t_logsnr2 = torch.sigmoid(-logsnr2 / 2)
+
                         t[logsnr_mask2] = t_logsnr2
 
                 return t  # 0 to 1
@@ -1134,10 +1135,27 @@ class NetworkTrainer:
         save_path = (
             f"{'' if args.output_name is None else args.output_name + '_'}{num_suffix}_{prompt_idx:02d}_{ts_str}{seed_suffix}"
         )
+
+        wandb_tracker = None
+        try:
+            wandb_tracker = accelerator.get_tracker("wandb")  # raises ValueError if wandb is not initialized
+            try:
+                import wandb
+            except ImportError:
+                raise ImportError("No wandb / wandb がインストールされていないようです")
+        except:  # wandb 無効時
+            pass
+
         if video.shape[2] == 1:
-            save_images_grid(video, save_dir, save_path, create_subdir=False)
+            image_paths = save_images_grid(video, save_dir, save_path, create_subdir=False)
+            if wandb_tracker is not None:
+                for image_path in image_paths:
+                    wandb_tracker.log({f"sample_{prompt_idx}": wandb.Image(image_path)}, step=steps)
         else:
-            save_videos_grid(video, os.path.join(save_dir, save_path) + ".mp4")
+            video_path = os.path.join(save_dir, save_path) + ".mp4"
+            save_videos_grid(video, video_path)
+            if wandb_tracker is not None:
+                wandb_tracker.log({f"sample_{prompt_idx}": wandb.Video(video_path)}, step=steps)
 
         # Move models back to initial state
         vae.to("cpu")

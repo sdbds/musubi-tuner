@@ -345,7 +345,7 @@ def get_task_defaults(task: str, size: Optional[Tuple[int, int]] = None) -> Tupl
         size: size of the video (width, height)
 
     Returns:
-        Tuple[int, float, float, float, flow_shift, int, bool]: (infer_steps, boundary, flow_shift, guidance_scale, guidance_scale_high_noise, video_length, needs_clip)
+        Tuple[int, Optional[float], float, float, float, int, bool]: (infer_steps, boundary, flow_shift, guidance_scale, guidance_scale_high_noise, video_length, needs_clip)
     """
     width, height = size if size else (0, 0)
 
@@ -2061,7 +2061,6 @@ def process_interactive(args: argparse.Namespace) -> None:
                 # Move model to CPU after generation
                 for model in models:
                     model.to("cpu")
-                del model
 
                 # Save latent if needed
                 height, width, _ = check_inputs(prompt_args)

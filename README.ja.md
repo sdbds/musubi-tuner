@@ -37,9 +37,9 @@
 
 ## はじめに
 
-このリポジトリは、HunyuanVideo、Wan2.1、FramePack、FLUX.1 KontextのLoRA学習用のコマンドラインツールです。このリポジトリは非公式であり、公式のHunyuanVideoやWan2.1、FramePack、FLUX.1 Kontextのリポジトリとは関係ありません。
+このリポジトリは、HunyuanVideo、Wan2.1/2.2、FramePack、FLUX.1 KontextのLoRA学習用のコマンドラインツールです。このリポジトリは非公式であり、公式のHunyuanVideoやWan2.1/2.2、FramePack、FLUX.1 Kontextのリポジトリとは関係ありません。
 
-Wan2.1については、[Wan2.1のドキュメント](./docs/wan.md)も参照してください。FramePackについては、[FramePackのドキュメント](./docs/framepack.md)を、FLUX.1 Kontextについては[FLUX.1 Kontextのドキュメント](./docs/flux_kontext.md)を参照してください。
+Wan2.1/2.2については、[Wan2.1/2.2のドキュメント](./docs/wan.md)も参照してください。FramePackについては、[FramePackのドキュメント](./docs/framepack.md)を、FLUX.1 Kontextについては[FLUX.1 Kontextのドキュメント](./docs/flux_kontext.md)を参照してください。
 
 *リポジトリは開発中です。*
 
@@ -51,6 +51,14 @@ Wan2.1については、[Wan2.1のドキュメント](./docs/wan.md)も参照し
 ### 最近の更新
 
 - GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
+
+- 2025/08/09
+    - wandbにログ出力用設定しているとき、サンプル生成画像もwandbに出力されるようになりました。PR [#420](https://github.com/kohya-ss/musubi-tuner/pull/420) xhiroga 氏に感謝します。
+
+- 2025/08/08
+    - Wan2.2に対応しました。PR [#399](https://github.com/kohya-ss/musubi-tuner/pull/399) 詳細は[Wan2.1/2.2のドキュメント](./docs/wan.md)を参照してください。
+    
+        Wan2.2はhigh noiseとlow noiseの二つのモデルから構成され、LoRAの学習時にどちらか一方、または両方を選択することができます。それに伴いtimestepの指定が必要になりますので、ドキュメントをご確認ください。
 
 - 2025/08/07
     - タイムステップのサンプリングに新しく `logsnr` と `qinglong` のサンプリング手法を追加しました。PR [#407](https://github.com/kohya-ss/musubi-tuner/pull/407) でsdbds氏により提案されました。sdbds氏に感謝します。logsnrはスタイルの学習に特化し、qinglongはスタイル学習、モデルの安定性、ディテールの再現性を考慮したハイブリッドサンプリング手法です。詳細は[こちらのドキュメント](./docs/advanced_config.md#style-friendly-snr-sampler)を参照してください。
@@ -70,19 +78,6 @@ Wan2.1については、[Wan2.1のドキュメント](./docs/wan.md)も参照し
 
 - 2025/07/28
     - FLUX.1 KontextのLoRA学習を追加しました。詳細は[FLUX.1 KontextのLoRA学習のドキュメント](./docs/flux_kontext.md)を参照してください。
-
-- 2025/06/25
-    - Wan2.1アーキテクチャで1フレーム推論および学習をサポートしました。詳細は[Wanの1フレーム推論のドキュメント](./docs/wan_1f.md)を参照してください。
-
-- 2025/06/17
-    - FramePackの推論スクリプトで [MagCache](https://github.com/Zehong-Ma/MagCache) をサポートしました。詳しくは[高度な設定](./docs/advanced_config.md#magcache)を参照してください。
-    - FramePackの推論スクリプトで、対話モードおよびバッチモードでText Encoderの出力をキャッシュするようにしました。また処理順を見直し、モデルオフロードのタイミングを調整することで、連続生成時の処理時間を短縮しました。
-
-- 2025/06/13
-    - `lora_post_hoc_ema.py`に`--sima_rel`オプションを追加しました。これにより、Post Hoc EMAの適用時にPower Function EMAを使用することができます。詳細は[こちらのドキュメント](./docs/advanced_config.md#lora-post-hoc-ema-merging--loraのpost-hoc-emaマージ)を参照してください。
-    
-- 2025/06/12
-    - LoRAモデルのPost Hoc EMAを行う`lora_post_hoc_ema.py`を追加しました。LoRAモデルの学習後に、Post Hoc EMAを適用してモデルの精度を向上させることができます。詳細は[こちらのドキュメント](./docs/advanced_config.md#lora-post-hoc-ema-merging--loraのpost-hoc-emaマージ)を参照してください。
 
 ### リリースについて
 
