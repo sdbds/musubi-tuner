@@ -61,6 +61,9 @@ If you find this project helpful, please consider supporting its development via
 
 - GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- August 11, 2025:
+    - Added `--lazy_loading` option for delayed loading of DiT models when using Wan2.2 high/low models in `wan_generate_video.py`. [PR #427](https://github.com/kohya-ss/musubi-tuner/pull/427) See [Wan2.2 documentation](./docs/wan.md#inference--推論) for details.
+
 - August 10, 2025:
     - Added support for Qwen-Image. See [Qwen-Image documentation](./docs/qwen_image.md) for details.
 

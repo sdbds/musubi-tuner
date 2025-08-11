@@ -76,6 +76,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dit", type=str, default=None, help="DiT checkpoint path")
     parser.add_argument("--dit_high_noise", type=str, default=None, help="DiT checkpoint path for high noise (optional)")
     parser.add_argument("--offload_inactive_dit", action="store_true", help="Offload DiT model to CPU")
+    parser.add_argument("--lazy_loading", action="store_true", help="Enable lazy loading for DiT models")
     parser.add_argument("--vae", type=str, default=None, help="VAE checkpoint path")
     parser.add_argument("--vae_dtype", type=str, default=None, help="data type for VAE, default is bfloat16")
     parser.add_argument("--vae_cache_cpu", action="store_true", help="cache features in VAE on CPU")
@@ -405,7 +406,9 @@ def setup_args(args: argparse.Namespace) -> argparse.Namespace:
         assert args.video_length == 1, f"video_length should be 1 for task {args.task}"
     if args.timestep_boundary is not None:
         if args.timestep_boundary > 1.0:
-            logger.warning(f"timestep_boundary {args.timestep_boundary} is greater than 1.0, setting to {args.timestep_boundary / 1000.0}")
+            logger.warning(
+                f"timestep_boundary {args.timestep_boundary} is greater than 1.0, setting to {args.timestep_boundary / 1000.0}"
+            )
             args.timestep_boundary = args.timestep_boundary / 1000.0
 
     # parse slg_layers
@@ -544,15 +547,20 @@ def load_dit_models(
     dit_dtype: torch.dtype,
     dit_weight_dtype: Optional[torch.dtype] = None,
     is_i2v: bool = False,
-) -> Tuple[WanModel, ...]:
+) -> List[WanModel]:
     """load DiT models
 
     Returns:
-        Tuple[WanModel, ...]: loaded DiT models. If args.dit_high_noise is specified, returns a tuple with two models: high noise and low noise.
+        List[WanModel]: loaded DiT models. If args.dit_high_noise is specified, returns a list with two models: high noise and low noise.
     """
+    use_high_model = args.dit_high_noise is not None and len(args.dit_high_noise) > 0
+    if use_high_model and args.lazy_loading:
+        logger.info(f"Using lazy loading")
+        return [None, None]  # lazy loading will load models on demand
+
     model = load_dit_model(args, args.dit, args.lora_weight, args.lora_multiplier, config, device, dit_weight_dtype)
 
-    if args.dit_high_noise is not None and len(args.dit_high_noise) > 0:
+    if use_high_model:
         if args.offload_inactive_dit:
             logger.warning(f"Offloading low noise DiT model to CPU, high noise DiT will be loaded on GPU")
             model.to("cpu")
@@ -567,9 +575,9 @@ def load_dit_models(
             device,
             dit_weight_dtype,
         )
-        return (dit_high_noise, model)
+        return [dit_high_noise, model]
 
-    return (model,)
+    return [model]
 
 
 def load_dit_model(
@@ -1274,11 +1282,12 @@ def setup_scheduler(args: argparse.Namespace, config, device: torch.device) -> T
 
 
 def run_sampling(
-    models: Tuple[WanModel, ...],
+    models: List[WanModel],
     noise: torch.Tensor,
     scheduler: Any,
     timesteps: torch.Tensor,
     args: argparse.Namespace,
+    gen_settings: GenerationSettings,
     inputs: Tuple[dict, dict],
     device: torch.device,
     seed_g: torch.Generator,
@@ -1380,12 +1389,39 @@ def run_sampling(
         if not is_high_noise and prev_high_noise:
             guidance_scale = args.guidance_scale
             logger.info(f"Switching to low noise at step {i}, t={t}, guidance_scale={guidance_scale}")
+
+            del model
+            gc.collect()
+
+            if len(models) > 1 and (args.offload_inactive_dit or args.lazy_loading):
+                if args.blocks_to_swap > 0:
+                    # prepare block swap for low noise model
+                    logger.info("Waiting for 5 seconds to finish block swap")
+                    time.sleep(5)
+
+                if args.offload_inactive_dit:
+                    logger.info(f"Switching model to CPU/GPU for both low and high noise models")
+                    models[0].to("cpu")
+
+                    if args.blocks_to_swap > 0:
+                        # prepare block swap for low noise model
+                        models[-1].move_to_device_except_swap_blocks(device)
+                        models[-1].prepare_block_swap_before_forward()
+
+                else:  # lazy loading
+                    pass
+
+                gc.collect()
+                clean_memory_on_device(device)
+
             model = models[-1]  # use low noise model for low noise steps
-            if len(models) > 1 and args.offload_inactive_dit:
-                logger.info(f"Switching model to CPU/GPU for both low and high noise models")
-                models[0].to("cpu")
-                model.move_to_device_except_swap_blocks(device)
-                model.prepare_block_swap_before_forward()
+
+        if model is None:
+            # lazy loading
+            dit_path = args.dit_high_noise if is_high_noise else args.dit
+            model = load_dit_model(
+                args, dit_path, args.lora_weight, args.lora_multiplier, gen_settings.cfg, device, gen_settings.dit_weight_dtype
+            )
 
         prev_high_noise = is_high_noise
 
@@ -1519,7 +1555,7 @@ def generate(
     seed_g.manual_seed(seed)
 
     # run sampling
-    latent = run_sampling(models, noise, scheduler, timesteps, args, inputs, device, seed_g, accelerator, is_i2v)
+    latent = run_sampling(models, noise, scheduler, timesteps, args, gen_settings, inputs, device, seed_g, accelerator, is_i2v)
     if one_frame_inference_index is not None:
         latent = latent[:, one_frame_inference_index : one_frame_inference_index + 1, :]
         latent = latent.contiguous()  # safetensors requires contiguous tensors :(
@@ -2149,6 +2185,10 @@ def get_generation_settings(args: argparse.Namespace) -> GenerationSettings:
 def main():
     # Parse arguments
     args = parse_args()
+
+    assert not (
+        args.offload_inactive_dit and args.lazy_loading
+    ), "--offload_inactive_dit and --lazy_loading cannot be used together"
 
     # Check if latents are provided
     latents_mode = args.latent_path is not None and len(args.latent_path) > 0
