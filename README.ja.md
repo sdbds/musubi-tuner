@@ -53,6 +53,7 @@ Wan2.1/2.2については、[Wan2.1/2.2のドキュメント](./docs/wan.md)も�
 - GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
 - 2025/08/11
+    - `--timestep_sampling`に`qwen_shift`が追加されました。これはQwen-Imageの推論時と同じ方法で、各画像の解像度に基づいた動的シフト値を使用します。またこれに伴い`qinglong`は`qinglong_flux`と`qinglong_qwen`に分割されました。PR [#428](https://github.com/kohya-ss/musubi-tuner/pull/428) sdbds氏に感謝します。詳細は[Qwen-Imageのドキュメント](./docs/qwen_image.md#timestep_sampling--タイムステップのサンプリング)および[高度な設定](./docs/advanced_config.md#style-friendly-snr-sampler)を参照してください。
     - `wan_generate_video.py` でWan2.2のhigh/lowモデルを使用するときに、遅延読み込みを行う`--lazy_loading`オプションを追加しました。PR [#427](https://github.com/kohya-ss/musubi-tuner/pull/427) 詳細は[こちら](./docs/wan.md#inference--推論)を参照してください。
 
 - 2025/08/10
@@ -312,7 +313,7 @@ VRAMが足りない場合は、`--blocks_to_swap`を指定して、一部のブ�
 
 `--min_timestep`と`--max_timestep`を指定すると、学習時のタイムステップの範囲を指定できます。詳細は[高度な設定](./docs/advanced_config.md#specify-time-step-range-for-training--学習時のタイムステップ範囲の指定)を参照してください。
 
-`--show_timesteps`に`image`（`matplotlib`が必要）または`console`を指定すると、学習時のtimestepsの分布とtimestepsごとのloss weightingが確認できます。
+`--show_timesteps`に`image`（`matplotlib`が必要）または`console`を指定すると、学習時のtimestepsの分布とtimestepsごとのloss weightingが確認できます。（`flux_shift`と`qwen_shift`を使用する場合は画像の解像度が1024x1024の場合の分布になります。）
 
 学習時のログの記録が可能です。[TensorBoard形式のログの保存と参照](./docs/advanced_config.md#save-and-view-logs-in-tensorboard-format--tensorboard形式のログの保存と参照)を参照してください。
 

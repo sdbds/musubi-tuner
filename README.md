@@ -62,6 +62,10 @@ If you find this project helpful, please consider supporting its development via
 - GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
 - August 11, 2025:
+    - Added `--timestep_sampling` option with `qwen_shift`. This uses the same method as during inference for Qwen-Image, employing dynamic shift values based on the resolution of each image (typically around 2.2 for 1328x1328 images). Additionally, `qinglong` has been split into `qinglong_flux` and `qinglong_qwen`. Thanks to sdbds for [PR #428](https://github.com/kohya-ss/musubi-tuner/pull/428). 
+    
+        For details, see the [Qwen-Image documentation](./docs/qwen_image.md#timestep_sampling--タイムステップのサンプリング) and [Advanced Configuration](./docs/advanced_config.md#style-friendly-snr-sampler).
+
     - Added `--lazy_loading` option for delayed loading of DiT models when using Wan2.2 high/low models in `wan_generate_video.py`. [PR #427](https://github.com/kohya-ss/musubi-tuner/pull/427) See [Wan2.2 documentation](./docs/wan.md#inference--推論) for details.
 
 - August 10, 2025:
@@ -353,7 +357,7 @@ The format of LoRA trained is the same as `sd-scripts`.
 You can also specify the range of timesteps 
 with `--min_timestep` and `--max_timestep`. See [advanced configuration](./docs/advanced_config.md#specify-time-step-range-for-training--学習時のタイムステップ範囲の指定) for details.
 
-`--show_timesteps` can be set to `image` (requires `matplotlib`) or `console` to display timestep distribution and loss weighting during training.
+`--show_timesteps` can be set to `image` (requires `matplotlib`) or `console` to display timestep distribution and loss weighting during training. (When using `flux_shift` and `qwen_shift`, the distribution will be for images with a resolution of 1024x1024.)
 
 You can record logs during training. Refer to [Save and view logs in TensorBoard format](./docs/advanced_config.md#save-and-view-logs-in-tensorboard-format--tensorboard形式のログの保存と参照).
 

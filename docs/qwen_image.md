@@ -113,14 +113,15 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/mus
 
 `--fp8_vl` is recommended for GPUs with less than 16GB of VRAM.
 
-`--sdpa` uses PyTorch's scaled dot product attention. Other options like `--xformers`, `--flash_attn`, and `--flash3` are available, but only `--sdpa` and `--xformers` have been tested.
+`--sdpa` uses PyTorch's scaled dot product attention. Other options like `--xformers` and `--flash_attn` are available. `flash3` cannot be used currently.
 
 If you specify `--split_attn`, the attention computation will be split, slightly reducing memory usage. Please specify `--split_attn` if you are using anything other than `--sdpa`.
 
+`--timestep_sampling` allows you to choose the sampling method for the timesteps. `shift` with `--discrete_flow_shift` is the default. `qwen_shift` is also available. `qwen_shift` is a same method during inference. It uses the dynamic shift value based on the resolution of each image (typically around 2.2 for 1328x1328 images).
+
+`--discrete_flow_shift` is set quite low for Qwen-Image during inference (as described), so a lower value than other models may be preferable.
+
 The appropriate settings for each parameter are unknown. Feedback is welcome.
-
-`--discrete_flow_shift` is set quite low for Qwen-Image during inference (around 2.2), so a lower value than other models may be preferable.
-
 
 ### VRAM Usage Estimates with Memory Saving Options
 
@@ -151,13 +152,15 @@ Qwen-Imageの学習は専用のスクリプト`qwen_image_train_network.py`を�
 
 GPUのVRAMが16GB未満の場合は、`--fp8_vl`を推奨します。
 
-`--sdpa`はPyTorchのscaled dot product attentionを用います。他に `--xformers`、`--flash_attn`、`--flash3` があります。`--sdpa` と `--xformers` のみ動作確認済みです。
+`--sdpa`はPyTorchのscaled dot product attentionを用います。他に `--xformers`、`--flash_attn` があります。`--flash3`は現在使用できません。
 
 `--split_attn` を指定すると、attentionの計算が分割され、メモリ使用量がわずかに削減されます。`--sdpa` 以外を使用する場合は、`--split_attn` を指定してください。
 
-それぞれのパラメータの適切な設定は不明です。フィードバックをお待ちしています。
+`--timestep_sampling` では、タイムステップのサンプリング方法を選択できます。`shift` と `--discrete_flow_shift` の組み合わせがデフォルトです。`qwen_shift` も利用可能です。`qwen_shift` は推論時と同じ方法で、各画像の解像度に基づいた動的シフト値を使用します（通常、1328x1328画像の場合は約2.2です）。
 
-`--discrete_flow_shift`はQwen-Imageでは推論時にかなり低めなため（2.2程度）、他のモデルよりも低めが良いかもしれません。
+`--discrete_flow_shift`は、Qwen-Imageでは前述のように推論時にかなり低めなため、他のモデルよりも低めが良いかもしれません。
+
+それぞれのパラメータの適切な設定は不明です。フィードバックをお待ちしています。
 
 ### メモリ節約オプションを使用した場合のVRAM使用量の目安
 

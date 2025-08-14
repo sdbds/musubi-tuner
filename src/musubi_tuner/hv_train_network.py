@@ -915,7 +915,7 @@ class NetworkTrainer:
         noise_scheduler = FlowMatchDiscreteScheduler(shift=args.discrete_flow_shift, reverse=True, solver="euler")
         # print(f"Noise scheduler timesteps: {noise_scheduler.timesteps}")
 
-        latents = torch.zeros(BATCH_SIZE, 1, 1, 1, 1, dtype=torch.float16)
+        latents = torch.zeros(BATCH_SIZE, 1, 1, 1024 // 8, 1024 // 8, dtype=torch.float16)
         noise = torch.ones_like(latents)
 
         # sample timesteps

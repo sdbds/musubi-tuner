@@ -777,28 +777,28 @@ Following is the distribution of the logsnr sampler:
 </details>
 
 
-### `qinglong` Sampler (Hybrid Sampler)
+### `qinglong_flux` and `qinglong_qwen` Sampler (Hybrid Sampler)
 
 This is a hybrid sampling method that combines three different samplers to balance style learning, model stability, and detail preservation. It is an experimental feature inspired by the Style-Friendly SNR Sampler. It was proposed by sdbds (Qing Long) in PR [#407](https://github.com/kohya-ss/musubi-tuner/pull/407). 
 
 In each training step, one of the following samplers is chosen for each sample in the batch based on a predefined ratio:
 
-1.  **flux_shift (80%)**: The standard sampler for high-resolution models. Focuses on overall stability.
+1.  **flux_shift or qwen_shift (80%)**: The standard sampler for high-resolution models. Focuses on overall stability.
 2.  **logsnr (7.5%)**: The Style-Friendly sampler. Focuses on style learning.
 3.  **logsnr2 (12.5%)**: A sampler that focuses on low-noise regions (high log-SNR values). Aims to improve the learning of fine details.
 
-To use this, specify `qinglong` for `--timestep_sampling`.
+To use this, specify `qinglong_flux` or `qinglong_qwen` for `--timestep_sampling`.
 
 ```bash
 accelerate launch ... \
-    --timestep_sampling qinglong \
+    --timestep_sampling qinglong_flux \
     --logit_mean -6.0 \
     --logit_std 2.0
 ```
 
-Following is the distribution of the qinglong sampler:
+Following is the distribution of the qinglong flux sampler:
 
-![Distribution of qinglong sampler](qinglong_distribution.png)
+![Distribution of qinglong flux sampler](qinglong_distribution.png)
 
 <details>
 <summary>日本語</summary>
@@ -807,11 +807,11 @@ Following is the distribution of the qinglong sampler:
 
 各学習ステップにおいて、バッチ内の各サンプルに対して、あらかじめ定義された比率に基づき以下のいずれかのサンプラーが選択されます。
 
-1.  **flux_shift (80%)**: 高解像度モデル向けの標準的なサンプラー。全体的な安定性を重視します。
+1.  **flux_shift または qwen_shift (80%)**: 高解像度モデル向けの標準的なサンプラー。全体的な安定性を重視します。
 2.  **logsnr (7.5%)**: Style-Friendlyサンプラー。スタイルの学習を重視します。
 3.  **logsnr2 (12.5%)**: 低ノイズ領域（高いlog-SNR値）に焦点を当てたサンプラー。細部のディテール学習を向上させることを目的とします。
 
-使用するには、`--timestep_sampling` に `qinglong` を指定します。
+使用するには、`--timestep_sampling` に `qinglong_flux` または `qinglong_qwen` を指定します。
 
 </details>
 
