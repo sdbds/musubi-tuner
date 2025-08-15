@@ -61,6 +61,9 @@ If you find this project helpful, please consider supporting its development via
 
 - GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- August 14, 2025:
+    - `convert_lora.py` now supports conversion for Qwen-Image LoRA models with Diffusers format. PR [#444](https://github.com/kohya-ss/musubi-tuner/pull/444) See [here](#convert-lora-to-another-format) for more details.
+
 - August 11, 2025:
     - Added `--timestep_sampling` option with `qwen_shift`. This uses the same method as during inference for Qwen-Image, employing dynamic shift values based on the resolution of each image (typically around 2.2 for 1328x1328 images). Additionally, `qinglong` has been split into `qinglong_flux` and `qinglong_qwen`. Thanks to sdbds for [PR #428](https://github.com/kohya-ss/musubi-tuner/pull/428). 
     
@@ -479,7 +482,7 @@ You can also perform image2video inference with SkyReels V1 I2V model. Specify t
 
 ### Convert LoRA to another format
 
-You can convert LoRA to a format compatible with ComfyUI (presumed to be Diffusion-pipe) using the following command:
+You can convert LoRA to a format (presumed to be Diffusion-pipe) compatible with another inference environment (Diffusers, ComfyUI etc.) using the following command:
 
 ```bash
 python src/musubi_tuner/convert_lora.py --input path/to/musubi_lora.safetensors --output path/to/another_format.safetensors --target other
@@ -495,7 +498,7 @@ Specify the input and output file paths with `--input` and `--output`, respectiv
 
 Specify `other` for `--target`. Use `default` to convert from another format to the format of this repository.
 
-Wan2.1 is also supported. 
+Wan2.1 and Qwen-Image are also supported. `--diffusers_prefix transformers` may be required for Diffusers inference.
 
 ## Miscellaneous
 
