@@ -52,6 +52,15 @@ Wan2.1/2.2については、[Wan2.1/2.2のドキュメント](./docs/wan.md)も�
 
 - GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- 2025/08/18
+    - `qwen_image_train_network.py`の訓練時の`--network_module networks.lora_qwen_image`の指定について、ドキュメントへの記載が漏れていました。[ドキュメント](./docs/qwen_image.md#training--学習)を修正しました。
+
+- 2025/08/16
+    - Qwen-ImageのVLMを利用したキャプション生成ツールを追加しました。PR [#460](https://github.com/kohya-ss/musubi-tuner/pull/460) 詳細は[ドキュメント](./docs/tools.md#image-captioning-with-qwen25-vl-srcmusubi_tunercaption_images_by_qwen_vlpy)を参照してください。
+
+- 2025/08/15
+    - Timestep Bucketing機能が追加されました。これにより、タイムステップの分布がより均一になり、学習が安定します。PR [#418](https://github.com/kohya-ss/musubi-tuner/pull/418) 詳細は[Timestep Bucketingのドキュメント](./docs/advanced_config.md#timestep-bucketing-for-uniform-sampling--均一なサンプリングのためのtimestep-bucketing)を参照してください。
+
 - 2025/08/14
     - `convert_lora.py`がQwen-ImageのLoRAをサポートしました。PR [#444](https://github.com/kohya-ss/musubi-tuner/pull/444) Diffusers形式との相互変換が可能です。詳細は[LoRAの形式の変換](#loraの形式の変換)を参照してください。
 
@@ -78,16 +87,6 @@ Wan2.1/2.2については、[Wan2.1/2.2のドキュメント](./docs/wan.md)も�
 
 - 2025/08/01
     - FLUX. KontextのLoRA学習でblock swapが動作しない不具合を修正しました。[PR #402](https://github.com/kohya-ss/musubi-tuner/pull/402) および [PR #403](https://github.com/kohya-ss/musubi-tuner/pull/403) sdbds氏に感謝します。
-
-- 2025/07/31
-    - [AI コーディングエージェントを使用する開発者の方へのセクション](#aiコーディングエージェントを使用する開発者の方へ)を追加しました。AIエージェントを利用する場合はご一読ください。
-
-- 2025/07/29
-    - 依存関係が不足していてFLUX.1 KontextのLoRA学習ができない不具合を修正しました。`sentencepiece`が必要です。
-        - `pyproject.toml`に`sentencepiece`を追加しました。
-
-- 2025/07/28
-    - FLUX.1 KontextのLoRA学習を追加しました。詳細は[FLUX.1 KontextのLoRA学習のドキュメント](./docs/flux_kontext.md)を参照してください。
 
 ### リリースについて
 

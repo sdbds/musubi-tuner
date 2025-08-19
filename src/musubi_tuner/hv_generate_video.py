@@ -1,5 +1,6 @@
 import argparse
 from datetime import datetime
+import gc
 from pathlib import Path
 import random
 import sys
@@ -64,6 +65,7 @@ def synchronize_device(device: torch.device):
 
 def get_time_flag():
     return datetime.fromtimestamp(time.time()).strftime("%Y%m%d-%H%M%S-%f")[:-3]
+
 
 def save_videos_grid(videos: torch.Tensor, path: str, rescale=False, n_rows=1, fps=24):
     """save videos by video tensor
@@ -154,6 +156,7 @@ def save_images_grid(
         image.save(image_path)
 
     return image_paths
+
 
 # region Encoding prompt
 
@@ -300,6 +303,7 @@ def encode_input_prompt(prompt: Union[str, list[str]], args, device, fp8_llm=Fal
     else:
         prompt_embeds, prompt_mask = encode_prompt(prompt, device, num_videos, text_encoder)
     text_encoder = None
+    gc.collect()  # transformers==4.54.1 needs this
     clean_memory_on_device(device)
 
     logger.info(f"Encoding prompt with text encoder 2")
@@ -312,6 +316,7 @@ def encode_input_prompt(prompt: Union[str, list[str]], args, device, fp8_llm=Fal
     prompt_mask_2 = prompt_mask_2.to("cpu")
 
     text_encoder_2 = None
+    gc.collect()
     clean_memory_on_device(device)
 
     return prompt_embeds, prompt_mask, prompt_embeds_2, prompt_mask_2
