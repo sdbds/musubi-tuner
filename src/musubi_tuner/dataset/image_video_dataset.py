@@ -295,16 +295,18 @@ def save_latent_cache_flux_kontext(
     save_latent_cache_common(item_info, sd, ARCHITECTURE_FLUX_KONTEXT_FULL)
 
 
-def save_latent_cache_qwen_image(
-    item_info: ItemInfo,
-    latent: torch.Tensor
-):
+def save_latent_cache_qwen_image(item_info: ItemInfo, latent: torch.Tensor, control_latent: Optional[torch.Tensor]):
     """Qwen-Image architecture"""
     assert latent.dim() == 4, "latent should be 4D tensor (frame, channel, height, width)"
+    assert (
+        control_latent is None or control_latent.dim() == 4
+    ), "control_latent should be 4D tensor (frame, channel, height, width) or None"
 
     _, F, H, W = latent.shape
     dtype_str = dtype_to_str(latent.dtype)
     sd = {f"latents_{F}x{H}x{W}_{dtype_str}": latent.detach().cpu().contiguous()}
+    if control_latent is not None:
+        sd[f"latents_control_{F}x{H}x{W}_{dtype_str}"] = control_latent.detach().cpu().contiguous()
 
     save_latent_cache_common(item_info, sd, ARCHITECTURE_QWEN_IMAGE_FULL)
 
@@ -1522,6 +1524,10 @@ class ImageDataset(BaseDataset):
 
                     item_info = ItemInfo(item_key, caption, original_size, bucket_reso, content=image)
                     item_info.latent_cache_path = self.get_latent_cache_path(item_info)
+
+                    # for VLM, which require image in addition to text, like Qwen-Image-Edit
+                    item_info.text_encoder_output_cache_path = self.get_text_encoder_output_cache_path(item_info)
+
                     item_info.fp_latent_window_size = self.fp_latent_window_size
                     item_info.fp_1f_clean_indices = self.fp_1f_clean_indices
                     item_info.fp_1f_target_index = self.fp_1f_target_index
