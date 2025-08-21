@@ -878,9 +878,9 @@ class NetworkTrainer:
                     decision_t = torch.rand((batch_size,), device=device)
 
                     # Create masks based on decision_t: 0.79 for mid_shift, 0.9 for logsnr, and 0.1 for logsnr2
-                    mid_mask = decision_t < 0.79 if args.timestep_sampling == "qinglong_flux" else decision_t < 0.9 # 79% for mid_shift
+                    mid_mask = decision_t < 0.79 if args.timestep_sampling == "qinglong_flux" else decision_t < 0.95 # 79% for mid_shift
                     logsnr_mask = (decision_t >= 0.79) & (decision_t < 0.9) # 11% for logsnr in qinglong_flux
-                    logsnr_mask2 = decision_t >= 0.9 # 10% for logsnr with -logit_mean
+                    logsnr_mask2 = decision_t >= 0.9 if args.timestep_sampling == "qinglong_flux" else decision_t >= 0.95 # 10% for logsnr with -logit_mean
 
                     # Initialize output tensor
                     t = torch.zeros((batch_size,), device=device)
