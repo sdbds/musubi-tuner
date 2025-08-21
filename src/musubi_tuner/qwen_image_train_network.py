@@ -76,14 +76,11 @@ class QwenImageNetworkTrainer(NetworkTrainer):
                         "control_image_path" in prompt_dict and len(prompt_dict["control_image_path"]) > 0
                     ), f"control_image_path not found in sample prompt"
                     control_image_path = prompt_dict["control_image_path"][0]  # only use the first control image
-                    control_image = Image.open(control_image_path).convert("RGB")
-                    width = prompt_dict.get("width", 256)
-                    height = prompt_dict.get("height", 256)
-                    control_image_tensor, control_image_np, _ = image_utils.preprocess_image(control_image, width, height)
+                    control_image_tensor, control_image_np, _ = qwen_image_utils.preprocess_control_image(control_image_path, True)
 
                     prompt_dict["control_image_tensor"] = control_image_tensor
                 else:
-                    control_image_tensor, control_image_path, control_image_np = None, None, None
+                    control_image_path, control_image_tensor, control_image_np = None, None, None
 
                 if "negative_prompt" not in prompt_dict:
                     prompt_dict["negative_prompt"] = " "
@@ -185,9 +182,9 @@ class QwenImageNetworkTrainer(NetworkTrainer):
             vae.to("cpu")
             clean_memory_on_device(device)
 
+            img_shapes = [[img_shapes[0], (1, control_latent.shape[-2] // 2, control_latent.shape[-1] // 2)]]
             control_latent = qwen_image_utils.pack_latents(control_latent)
             control_latent = control_latent.to(device=device, dtype=torch.bfloat16)
-            img_shapes = [[img_shapes[0], img_shapes[0]]]
         else:
             control_latent = None
 
@@ -331,11 +328,12 @@ class QwenImageNetworkTrainer(NetworkTrainer):
         # control
         if is_edit:
             latents_control = batch["latents_control"]  # B, C, 1, H, W
+            latents_control_shape = latents_control.shape
             latents_control = qwen_image_utils.pack_latents(latents_control)
 
             noisy_model_input = torch.cat([noisy_model_input, latents_control], dim=1)  # B, C*2, 1, H, W
         else:
-            latents_control = None
+            latents_control, latents_control_shape = None, None
 
         # context
         vl_embed = batch["vl_embed"]  # list of (L, D)
@@ -367,7 +365,7 @@ class QwenImageNetworkTrainer(NetworkTrainer):
 
         img_shapes = [(1, lat_h // 2, lat_w // 2)]
         if is_edit:
-            img_shapes = [[img_shapes[0], img_shapes[0]]]
+            img_shapes = [[img_shapes[0], (1, latents_control_shape[-2] // 2, latents_control_shape[-1] // 2)]]
 
         guidance = None
         timesteps = timesteps / 1000.0

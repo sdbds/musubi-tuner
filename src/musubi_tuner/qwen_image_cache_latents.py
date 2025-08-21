@@ -31,7 +31,7 @@ def preprocess_contents_qwen_image(batch: List[ItemInfo]) -> tuple[torch.Tensor]
         contents.append(torch.from_numpy(item.content))  # target image
 
         if item.control_content is not None and len(item.control_content) > 0:
-            controls.append(torch.from_numpy(item.control_content[0]))
+            controls.append(torch.from_numpy(item.control_content[0][..., :3]))  # ensure RGB, remove alpha if present
 
     contents = torch.stack(contents, dim=0)  # B, H, W, C
     contents = contents.permute(0, 3, 1, 2)  # B, H, W, C -> B, C, H, W

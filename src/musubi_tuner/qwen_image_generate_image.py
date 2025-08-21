@@ -85,7 +85,13 @@ def parse_args() -> argparse.Namespace:
         "--control_image_path",
         type=str,
         default=None,
-        help="path to control (reference) image for Qwen-Image-Edit, resized and cropped to `--image_size`",
+        help="path to control (reference) image for Qwen-Image-Edit, by default resized and cropped to 1M pixels keeping aspect ratio.",
+    )
+    parser.add_argument("--resize_control_to_image_size", action="store_true", help="resize control image to match image size")
+    parser.add_argument(
+        "--resize_control_to_official_size",
+        action="store_true",
+        help="resize control image to match official size (1M pixels keeping aspect ratio)",
     )
     parser.add_argument("--infer_steps", type=int, default=25, help="number of inference steps, default is 25")
     parser.add_argument("--save_path", type=str, required=True, help="path to save generated video")
@@ -362,8 +368,9 @@ def prepare_image_inputs(
     height, width = check_inputs(args)
 
     if args.control_image_path is not None:
-        control_image = Image.open(args.control_image_path).convert("RGB")
-        control_image_tensor, control_image_np, _ = image_utils.preprocess_image(control_image, width, height)
+        control_image_tensor, control_image_np, _ = qwen_image_utils.preprocess_control_image(
+            args.control_image_path, args.resize_control_to_official_size, (width, height)
+        )
 
         # VAE encoding
         logger.info(f"Encoding control image to latent space with VAE")
@@ -378,7 +385,6 @@ def prepare_image_inputs(
         clean_memory_on_device(device)
 
         control_latent = control_latent.cpu()
-        print(f"Control latent: {control_latent.shape}, device: {control_latent.device}")
 
     else:
         control_latent = None
@@ -439,8 +445,6 @@ def prepare_text_inputs(
     # Store original devices to move back later if they were shared. This does nothing if shared_models is None
     text_encoder_original_device = text_encoder.device if text_encoder else None
 
-    logger.info(f"Encoding prompt with Text Encoder")
-
     # Ensure text_encoder is not None before proceeding
     if not text_encoder or not tokenizer:
         raise ValueError("Text encoder or tokenizer is not loaded properly.")
@@ -477,8 +481,14 @@ def prepare_text_inputs(
         else:
             return qwen_image_utils.get_qwen_prompt_embeds_with_image(vl_processor, text_encoder, p, im)
 
+    logger.info(f"Encoding prompt with Text Encoder. Control image: {image.shape if image is not None else None}")
+
     prompt = args.prompt
-    cache_key = (prompt, args.control_image_path)  # control_image_path may be None
+
+    # cache_key includes this because embed may be changed if resize_resize_control_to_image_size is True
+    height, width = check_inputs(args)
+    cache_key = (prompt, args.control_image_path, (width, height))  # control_image_path may be None
+
     if cache_key in conds_cache:
         embed, mask = conds_cache[cache_key]
     else:
@@ -491,7 +501,7 @@ def prepare_text_inputs(
         conds_cache[cache_key] = (embed, mask)
 
     negative_prompt = args.negative_prompt
-    cache_key = (negative_prompt, args.control_image_path)
+    cache_key = (negative_prompt, args.control_image_path, (width, height))
     if cache_key in conds_cache:
         negative_embed, negative_mask = conds_cache[cache_key]
     else:
@@ -617,15 +627,15 @@ def generate(
     if not is_edit:
         img_shapes = [(1, height // VAE_SCALE_FACTOR // 2, width // VAE_SCALE_FACTOR // 2)]
     else:
-        # currently image and control image have the same shape
-        control_latent = qwen_image_utils.pack_latents(control_latent)
         img_shapes = [
             [
                 (1, height // VAE_SCALE_FACTOR // 2, width // VAE_SCALE_FACTOR // 2),  # image
-                (1, height // VAE_SCALE_FACTOR // 2, width // VAE_SCALE_FACTOR // 2),  # control
+                (1, control_latent.shape[-2] // 2, control_latent.shape[-1] // 2),  # control
             ]
         ]
+        control_latent = qwen_image_utils.pack_latents(control_latent)
         control_latent = control_latent.to(device)
+    logger.info(f"Embed: {embed.shape}, negative_embed: {negative_embed.shape}, img_shapes: {img_shapes}")
 
     # 5. Prepare timesteps
     num_inference_steps = args.infer_steps
@@ -911,16 +921,19 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
 
     if args.edit:
         vae_for_batch.to(device)  # Move VAE to device for control image encoding
+
         for i, prompt_args_item in enumerate(all_prompt_args_list):
             logger.info(f"Preprocessing control image for prompt {i+1}/{len(all_prompt_args_list)}: {prompt_args_item.prompt}")
             assert prompt_args_item.control_image_path is not None, "Qwen-Image-Edit requires control_image_path"
             control_data = prepare_image_inputs(args, device)
             all_precomputed_image_data.append(control_data)
+
         vae_for_batch.to("cpu")  # Move VAE back to CPU after control image encoding
         clean_memory_on_device(device)  # Clean up VAE memory
 
     for i, prompt_args_item in enumerate(all_prompt_args_list):
         logger.info(f"Text preprocessing for prompt {i+1}/{len(all_prompt_args_list)}: {prompt_args_item.prompt}")
+
         # prepare_text_inputs will move text_encoders to device temporarily
         text_data = prepare_text_inputs(prompt_args_item, all_precomputed_image_data[i][1], device, temp_shared_models_txt)
 

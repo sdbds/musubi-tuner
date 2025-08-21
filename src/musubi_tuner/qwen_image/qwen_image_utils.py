@@ -9,9 +9,12 @@ from transformers import Qwen2_5_VLConfig, Qwen2_5_VLForConditionalGeneration, Q
 from transformers.image_utils import ImageInput
 from accelerate import init_empty_weights
 from diffusers.utils.torch_utils import randn_tensor
+from PIL import Image
 
+from musubi_tuner.dataset import image_video_dataset
 from musubi_tuner.flux.flux_utils import is_fp8
 from musubi_tuner.qwen_image.qwen_image_autoencoder_kl import AutoencoderKLQwenImage
+from musubi_tuner.utils import image_utils
 from musubi_tuner.utils.safetensors_utils import load_safetensors, load_split_weights
 
 logger = logging.getLogger(__name__)
@@ -360,6 +363,9 @@ def get_qwen_prompt_embeds(
                 input_ids=txt_tokens.input_ids, attention_mask=txt_tokens.attention_mask, output_hidden_states=True
             )
     hidden_states = encoder_hidden_states.hidden_states[-1]
+    if hidden_states.shape[1] > tokenizer_max_length + drop_idx:
+        logger.warning(f"Hidden states shape {hidden_states.shape} exceeds max length {tokenizer_max_length + drop_idx}")
+
     split_hidden_states = extract_masked_hidden(hidden_states, txt_tokens.attention_mask)
     split_hidden_states = [e[drop_idx:] for e in split_hidden_states]
     attn_mask_list = [torch.ones(e.size(0), dtype=torch.long, device=e.device) for e in split_hidden_states]
@@ -414,6 +420,9 @@ def get_qwen_prompt_embeds_with_image(
             )
 
     hidden_states = encoder_hidden_states.hidden_states[-1]
+    # if hidden_states.shape[1] > tokenizer_max_length + drop_idx:
+    #     logger.warning(f"Hidden states shape {hidden_states.shape} exceeds max length {tokenizer_max_length + drop_idx}")
+
     split_hidden_states = extract_masked_hidden(hidden_states, model_inputs.attention_mask)
     split_hidden_states = [e[drop_idx:] for e in split_hidden_states]
     attn_mask_list = [torch.ones(e.size(0), dtype=torch.long, device=e.device) for e in split_hidden_states]
@@ -610,6 +619,36 @@ def prepare_latents(batch_size, num_channels_latents, height, width, dtype, devi
     latents = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
     latents = pack_latents(latents)
     return latents
+
+
+def preprocess_control_image(
+    control_image_path: str, resize_to_prefered: bool = True, resize_size: Optional[Tuple[int, int]] = None
+) -> tuple[Image.Image, torch.Tensor, np.ndarray, Optional[np.ndarray]]:
+    """
+    Preprocess the control image for the model. See `preprocess_image` for details.
+
+    Args:
+        control_image_path (str): Path to the control image.
+        resize_to_prefered (bool): Whether to resize the image to the preferred resolution (based on the model's requirements).
+        resize_size (Optional[Tuple[int, int]]): Override target size for resizing if resize_to_prefered is False, with (width, height).
+
+    Returns:
+        Tuple[Image.Image, torch.Tensor, np.ndarray, Optional[np.ndarray]]: same as `preprocess_image`.
+    """
+    # See:
+    # https://github.com/huggingface/diffusers/pull/12188
+    # https://github.com/huggingface/diffusers/pull/12190
+
+    control_image = Image.open(control_image_path)
+
+    if resize_to_prefered or resize_size is None:
+        resolution = (1024, 1024) if resize_to_prefered else control_image.size
+        resize_size = image_video_dataset.BucketSelector.calculate_bucket_resolution(
+            control_image.size, resolution, architecture=image_video_dataset.ARCHITECTURE_QWEN_IMAGE
+        )
+
+    control_image_tensor, control_image_np, _ = image_utils.preprocess_image(control_image, *resize_size)
+    return control_image_tensor, control_image_np, None
 
 
 # endregion vae and latents
