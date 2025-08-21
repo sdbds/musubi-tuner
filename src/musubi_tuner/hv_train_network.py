@@ -879,7 +879,7 @@ class NetworkTrainer:
 
                     # Create masks based on decision_t: 0.79 for mid_shift, 0.9 for logsnr, and 0.1 for logsnr2
                     mid_mask = decision_t < 0.79 if args.timestep_sampling == "qinglong_flux" else decision_t < 0.9 # 79% for mid_shift
-                    logsnr_mask = (decision_t >= 0.79) & (decision_t < 0.9) if args.timestep_sampling == "qinglong_flux" else False # 11% for logsnr
+                    logsnr_mask = (decision_t >= 0.79) & (decision_t < 0.9) # 11% for logsnr in qinglong_flux
                     logsnr_mask2 = decision_t >= 0.9 # 10% for logsnr with -logit_mean
 
                     # Initialize output tensor
@@ -902,7 +902,7 @@ class NetworkTrainer:
                         t[mid_mask] = t_mid
 
                     # Generate logsnr samples for selected indices (11%)
-                    if logsnr_mask.any():
+                    if (args.timestep_sampling != "qinglong_qwen") and logsnr_mask.any():
                         logsnr_count = logsnr_mask.sum().item()
                         logsnr = rand_logsnr(
                             logsnr_count,
