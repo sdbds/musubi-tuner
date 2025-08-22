@@ -363,7 +363,7 @@ def load_dit_model(
 
 def prepare_image_inputs(
     args: argparse.Namespace, device: torch.device, vae: AutoencoderKLQwenImage
-) -> tuple[torch.Tensor, np.ndarray]:
+) -> tuple[Optional[torch.Tensor], Optional[np.ndarray]]:
     """Prepare image-related inputs for Kontext: AE encoding."""
     height, width = check_inputs(args)
 
@@ -925,7 +925,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
         for i, prompt_args_item in enumerate(all_prompt_args_list):
             logger.info(f"Preprocessing control image for prompt {i+1}/{len(all_prompt_args_list)}: {prompt_args_item.prompt}")
             assert prompt_args_item.control_image_path is not None, "Qwen-Image-Edit requires control_image_path"
-            control_data = prepare_image_inputs(args, device)
+            control_data = prepare_image_inputs(args, device, vae_for_batch)
             all_precomputed_image_data.append(control_data)
 
         vae_for_batch.to("cpu")  # Move VAE back to CPU after control image encoding
@@ -937,7 +937,15 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
         # prepare_text_inputs will move text_encoders to device temporarily
         text_data = prepare_text_inputs(prompt_args_item, all_precomputed_image_data[i][1], device, temp_shared_models_txt)
 
-        text_data["control"] = all_precomputed_image_data[i]
+        if args.edit:
+            control_image_data = all_precomputed_image_data[i]
+            control_image_feature = control_image_data[1]
+        else:
+            control_image_data = None
+            control_image_feature = None
+        text_data = prepare_text_inputs(prompt_args_item, control_image_feature, device, temp_shared_models_txt)
+
+        text_data["control"] = control_image_data
         all_precomputed_text_data.append(text_data)
 
     # Models should be removed from device after prepare_text_inputs

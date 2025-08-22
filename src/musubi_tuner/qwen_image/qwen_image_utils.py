@@ -623,7 +623,7 @@ def prepare_latents(batch_size, num_channels_latents, height, width, dtype, devi
 
 def preprocess_control_image(
     control_image_path: str, resize_to_prefered: bool = True, resize_size: Optional[Tuple[int, int]] = None
-) -> tuple[Image.Image, torch.Tensor, np.ndarray, Optional[np.ndarray]]:
+) -> tuple[torch.Tensor, np.ndarray, Optional[np.ndarray]]:
     """
     Preprocess the control image for the model. See `preprocess_image` for details.
 
@@ -633,7 +633,7 @@ def preprocess_control_image(
         resize_size (Optional[Tuple[int, int]]): Override target size for resizing if resize_to_prefered is False, with (width, height).
 
     Returns:
-        Tuple[Image.Image, torch.Tensor, np.ndarray, Optional[np.ndarray]]: same as `preprocess_image`.
+        Tuple[torch.Tensor, np.ndarray, Optional[np.ndarray]]: same as `preprocess_image`, but alpha is always None
     """
     # See:
     # https://github.com/huggingface/diffusers/pull/12188
