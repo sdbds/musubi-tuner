@@ -10,6 +10,7 @@
 - [Musubi Tuner](#musubi-tuner)
   - [Table of Contents](#table-of-contents)
   - [Introduction](#introduction)
+    - [Sponsors](#sponsors)
     - [Support the Project](#support-the-project)
     - [Recent Updates](#recent-updates)
     - [Releases](#releases)
@@ -52,6 +53,14 @@ This repository is unofficial and not affiliated with the official HunyanVideo/W
 For Wan2.1/2.2, please also refer to [Wan2.1/2.2 documentation](./docs/wan.md). For FramePack, please also refer to [FramePack documentation](./docs/framepack.md). For FLUX.1 Kontext, please refer to [FLUX.1 Kontext documentation](./docs/flux_kontext.md).
 
 *This repository is under development.*
+
+### Sponsors
+
+We are grateful to the following companies for their generous sponsorship:
+
+<a href="https://aihub.co.jp/top-en">
+  <img src="./images/logo_aihub.png" alt="AiHUB Inc." title="AiHUB Inc." height="100px">
+</a>
 
 ### Support the Project
 

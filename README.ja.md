@@ -8,6 +8,7 @@
 <summary>クリックすると展開します</summary>
 
 - [はじめに](#はじめに)
+    - [スポンサー](#スポンサー)
     - [スポンサー募集のお知らせ](#スポンサー募集のお知らせ)
     - [最近の更新](#最近の更新)
     - [リリースについて](#リリースについて)
@@ -42,6 +43,14 @@
 Wan2.1/2.2については、[Wan2.1/2.2のドキュメント](./docs/wan.md)も参照してください。FramePackについては、[FramePackのドキュメント](./docs/framepack.md)を、FLUX.1 Kontextについては[FLUX.1 Kontextのドキュメント](./docs/flux_kontext.md)を参照してください。
 
 *リポジトリは開発中です。*
+
+### スポンサー
+
+このプロジェクトを支援してくださる企業・団体の皆様に深く感謝いたします。
+
+<a href="https://aihub.co.jp/">
+  <img src="./images/logo_aihub.png" alt="AiHUB株式会社" title="AiHUB株式会社" height="100px">
+</a>
 
 ### スポンサー募集のお知らせ
 
