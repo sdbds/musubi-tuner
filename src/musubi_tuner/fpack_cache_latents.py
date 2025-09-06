@@ -2,14 +2,13 @@ import argparse
 import logging
 import math
 import os
-from typing import List, Optional
+from typing import List
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 from transformers import SiglipImageProcessor, SiglipVisionModel
-from PIL import Image
 
 from musubi_tuner.dataset import config_utils
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer

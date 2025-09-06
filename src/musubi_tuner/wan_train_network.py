@@ -1,5 +1,4 @@
 import argparse
-import random
 from typing import List, Optional
 from PIL import Image
 
@@ -7,7 +6,7 @@ import numpy as np
 import torch
 import torchvision.transforms.functional as TF
 from tqdm import tqdm
-from accelerate import Accelerator, init_empty_weights
+from accelerate import Accelerator
 
 from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_WAN, ARCHITECTURE_WAN_FULL, load_video
 from musubi_tuner.hv_generate_video import resize_image_to_bucket
@@ -28,7 +27,6 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 from musubi_tuner.utils import model_utils
-from musubi_tuner.utils.safetensors_utils import load_safetensors, MemoryEfficientSafeOpen
 from musubi_tuner.wan.configs import WAN_CONFIGS
 from musubi_tuner.wan.modules.clip import CLIPModel
 from musubi_tuner.wan.modules.model import WanModel, detect_wan_sd_dtype, load_wan_model
@@ -86,7 +84,7 @@ class WanNetworkTrainer(NetworkTrainer):
                 ), "Block swap is not supported with offloading inactive DiT / 非アクティブDiTをオフロードする設定ではブロックスワップはサポートされていません"
             if args.num_timestep_buckets is not None:
                 logger.warning(
-                    f"num_timestep_buckets is not working well with high and low models training / high and lowモデルのトレーニングではnum_timestep_bucketsがうまく機能しません"
+                    "num_timestep_buckets is not working well with high and low models training / high and lowモデルのトレーニングではnum_timestep_bucketsがうまく機能しません"
                 )
 
         self.timestep_boundary = (
@@ -159,7 +157,7 @@ class WanNetworkTrainer(NetworkTrainer):
             clip = CLIPModel(dtype=config.clip_dtype, device=device, weight_path=clip_path)
             clip.model.to(device)
 
-            logger.info(f"Encoding image to CLIP context")
+            logger.info("Encoding image to CLIP context")
             with torch.amp.autocast(device_type=device.type, dtype=torch.float16), torch.no_grad():
                 for image_path in sample_prompts_image_embs:
                     logger.info(f"Encoding image: {image_path}")
@@ -444,7 +442,7 @@ class WanNetworkTrainer(NetworkTrainer):
         video = video.unsqueeze(0)  # add batch dim
         del latent
 
-        logger.info(f"Decoding complete")
+        logger.info("Decoding complete")
         video = video.to(torch.float32).cpu()
         video = (video / 2 + 0.5).clamp(0, 1)  # -1 to 1 -> 0 to 1
 

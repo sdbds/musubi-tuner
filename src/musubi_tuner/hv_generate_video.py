@@ -1,12 +1,11 @@
 import argparse
 from datetime import datetime
 import gc
-from pathlib import Path
+from importlib.util import find_spec
 import random
-import sys
 import os
 import time
-from typing import Optional, Union
+from typing import Union
 
 import numpy as np
 import torch
@@ -30,14 +29,13 @@ from musubi_tuner.hunyuan_model.fp8_optimization import convert_fp8_linear
 from musubi_tuner.modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
 from musubi_tuner.networks import lora
 
-try:
+lycoris_available = find_spec("lycoris") is not None
+if lycoris_available:
     from lycoris.kohya import create_network_from_weights
-except:
-    pass
 
 from musubi_tuner.utils.model_utils import str_to_dtype
 from musubi_tuner.utils.safetensors_utils import mem_eff_save_file
-from musubi_tuner.dataset.image_video_dataset import load_video, glob_images, resize_image_to_bucket
+from musubi_tuner.dataset.image_video_dataset import load_video, resize_image_to_bucket
 
 import logging
 
@@ -295,7 +293,7 @@ def encode_input_prompt(prompt: Union[str, list[str]], args, device, fp8_llm=Fal
     text_encoder_2.eval()
 
     # encode prompt
-    logger.info(f"Encoding prompt with text encoder 1")
+    logger.info("Encoding prompt with text encoder 1")
     text_encoder.to(device=device)
     if fp8_llm:
         with accelerator.autocast():
@@ -306,7 +304,7 @@ def encode_input_prompt(prompt: Union[str, list[str]], args, device, fp8_llm=Fal
     gc.collect()  # transformers==4.54.1 needs this
     clean_memory_on_device(device)
 
-    logger.info(f"Encoding prompt with text encoder 2")
+    logger.info("Encoding prompt with text encoder 2")
     text_encoder_2.to(device=device)
     prompt_embeds_2, prompt_mask_2 = encode_prompt(prompt, device, num_videos, text_encoder_2)
 
@@ -473,7 +471,7 @@ def parse_args():
     )
     parser.add_argument("--no_metadata", action="store_true", help="do not save metadata")
     parser.add_argument("--latent_path", type=str, nargs="*", default=None, help="path to latent for decode. no inference")
-    parser.add_argument("--lycoris", action="store_true", help="use lycoris for inference")
+    parser.add_argument("--lycoris", action="store_true", help=f"use lycoris for inference{'' if lycoris_available else ' (not available)'}")
     parser.add_argument("--fp8_fast", action="store_true", help="Enable fast FP8 arthimetic(RTX 4XXX+)")
     parser.add_argument("--compile", action="store_true", help="Enable torch.compile")
     parser.add_argument(
@@ -494,6 +492,9 @@ def parse_args():
 
     if args.fp8_fast and not args.fp8:
         raise ValueError("--fp8_fast requires --fp8")
+
+    if args.lycoris and not lycoris_available:
+        raise ValueError("install lycoris: https://github.com/KohakuBlueleaf/LyCORIS")
 
     return args
 
@@ -587,7 +588,7 @@ def main():
             video = torch.from_numpy(video).permute(3, 0, 1, 2).unsqueeze(0).float()  # 1, C, F, H, W
             video = video / 255.0
 
-            logger.info(f"Encoding video to latents")
+            logger.info("Encoding video to latents")
             video_latents = encode_to_latents(args, video, device)
             video_latents = video_latents.to(device=device, dtype=dit_dtype)
 
@@ -604,7 +605,7 @@ def main():
             image = torch.from_numpy(image).permute(2, 0, 1).unsqueeze(0).unsqueeze(2).float()  # 1, C, 1, H, W
             image = image / 255.0
 
-            logger.info(f"Encoding image to latents")
+            logger.info("Encoding image to latents")
             image_latents = encode_to_latents(args, image, device)  # 1, C, 1, H, W
             image_latents = image_latents.to(device=device, dtype=dit_dtype)
 
@@ -733,7 +734,7 @@ def main():
             transformer.enable_img_in_txt_in_offloading()
 
         # load scheduler
-        logger.info(f"Loading scheduler")
+        logger.info("Loading scheduler")
         scheduler = FlowMatchDiscreteScheduler(shift=args.flow_shift, reverse=True, solver="euler")
 
         # Prepare timesteps

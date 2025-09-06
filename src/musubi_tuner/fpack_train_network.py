@@ -8,12 +8,10 @@ from PIL import Image
 
 import numpy as np
 import torch
-import torchvision.transforms.functional as TF
-from tqdm import tqdm
-from accelerate import Accelerator, init_empty_weights
+from accelerate import Accelerator
 
 from musubi_tuner.dataset import image_video_dataset
-from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_FRAMEPACK, ARCHITECTURE_FRAMEPACK_FULL, load_video
+from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_FRAMEPACK, ARCHITECTURE_FRAMEPACK_FULL
 from musubi_tuner.fpack_generate_video import decode_latent
 from musubi_tuner.frame_pack import hunyuan
 from musubi_tuner.frame_pack.clip_vision import hf_clip_vision_encode
@@ -30,8 +28,6 @@ import logging
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-from musubi_tuner.utils import model_utils
-from musubi_tuner.utils.safetensors_utils import load_safetensors, MemoryEfficientSafeOpen
 
 
 class FramePackNetworkTrainer(NetworkTrainer):
@@ -206,7 +202,7 @@ class FramePackNetworkTrainer(NetworkTrainer):
             return hunyuan.vae_encode(image, vae).to("cpu"), alpha
 
         # VAE encoding
-        logger.info(f"Encoding image to latent space")
+        logger.info("Encoding image to latent space")
         vae.to(device)
 
         start_latent, _ = (
@@ -363,13 +359,13 @@ class FramePackNetworkTrainer(NetworkTrainer):
                 return mask_image
 
             if control_latents is None or len(control_latents) == 0:
-                logger.info(f"No control images provided for one frame inference. Use zero latents for control images.")
+                logger.info("No control images provided for one frame inference. Use zero latents for control images.")
                 control_latents = [torch.zeros(1, 16, 1, height // 8, width // 8, dtype=torch.float32)]
 
             if "no_post" not in one_frame_inference:
                 # add zero latents as clean latents post
                 control_latents.append(torch.zeros((1, 16, 1, height // 8, width // 8), dtype=torch.float32))
-                logger.info(f"Add zero latents as clean latents post for one frame inference.")
+                logger.info("Add zero latents as clean latents post for one frame inference.")
 
             # kisekaeichi and 1f-mc: both are using control images, but indices are different
             clean_latents = torch.cat(control_latents, dim=2)  # (1, 16, num_control_images, H//8, W//8)
@@ -402,7 +398,7 @@ class FramePackNetworkTrainer(NetworkTrainer):
             if "no_2x" in one_frame_inference:
                 clean_latents_2x = None
                 clean_latent_2x_indices = None
-                logger.info(f"No clean_latents_2x")
+                logger.info("No clean_latents_2x")
             else:
                 clean_latents_2x = torch.zeros((1, 16, 2, height // 8, width // 8), dtype=torch.float32)
                 index = 1 + latent_window_size + 1
@@ -411,7 +407,7 @@ class FramePackNetworkTrainer(NetworkTrainer):
             if "no_4x" in one_frame_inference:
                 clean_latents_4x = None
                 clean_latent_4x_indices = None
-                logger.info(f"No clean_latents_4x")
+                logger.info("No clean_latents_4x")
             else:
                 clean_latents_4x = torch.zeros((1, 16, 16, height // 8, width // 8), dtype=torch.float32)
                 index = 1 + latent_window_size + 1 + 2

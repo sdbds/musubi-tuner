@@ -475,31 +475,31 @@ class NetworkTrainer:
                 optimizer_kwargs["relative_step"] = True  # default
             if not optimizer_kwargs["relative_step"] and optimizer_kwargs.get("warmup_init", False):
                 logger.info(
-                    f"set relative_step to True because warmup_init is True / warmup_initがTrueのためrelative_stepをTrueにします"
+                    "set relative_step to True because warmup_init is True / warmup_initがTrueのためrelative_stepをTrueにします"
                 )
                 optimizer_kwargs["relative_step"] = True
             logger.info(f"use Adafactor optimizer | {optimizer_kwargs}")
 
             if optimizer_kwargs["relative_step"]:
-                logger.info(f"relative_step is true / relative_stepがtrueです")
+                logger.info("relative_step is true / relative_stepがtrueです")
                 if lr != 0.0:
-                    logger.warning(f"learning rate is used as initial_lr / 指定したlearning rateはinitial_lrとして使用されます")
+                    logger.warning("learning rate is used as initial_lr / 指定したlearning rateはinitial_lrとして使用されます")
                 args.learning_rate = None
 
                 if args.lr_scheduler != "adafactor":
-                    logger.info(f"use adafactor_scheduler / スケジューラにadafactor_schedulerを使用します")
+                    logger.info("use adafactor_scheduler / スケジューラにadafactor_schedulerを使用します")
                 args.lr_scheduler = f"adafactor:{lr}"  # ちょっと微妙だけど
 
                 lr = None
             else:
                 if args.max_grad_norm != 0.0:
                     logger.warning(
-                        f"because max_grad_norm is set, clip_grad_norm is enabled. consider set to 0 / max_grad_normが設定されているためclip_grad_normが有効になります。0に設定して無効にしたほうがいいかもしれません"
+                        "because max_grad_norm is set, clip_grad_norm is enabled. consider set to 0 / max_grad_normが設定されているためclip_grad_normが有効になります。0に設定して無効にしたほうがいいかもしれません"
                     )
                 if args.lr_scheduler != "constant_with_warmup":
-                    logger.warning(f"constant_with_warmup will be good / スケジューラはconstant_with_warmupが良いかもしれません")
+                    logger.warning("constant_with_warmup will be good / スケジューラはconstant_with_warmupが良いかもしれません")
                 if optimizer_kwargs.get("clip_threshold", 1.0) != 1.0:
-                    logger.warning(f"clip_threshold=1.0 will be good / clip_thresholdは1.0が良いかもしれません")
+                    logger.warning("clip_threshold=1.0 will be good / clip_thresholdは1.0が良いかもしれません")
 
             optimizer_class = transformers.optimization.Adafactor
             optimizer = optimizer_class(trainable_params, lr=lr, **optimizer_kwargs)
@@ -541,7 +541,7 @@ class NetworkTrainer:
     def is_schedulefree_optimizer(self, optimizer: torch.optim.Optimizer, args: argparse.Namespace) -> bool:
         return args.optimizer_type.lower().endswith("schedulefree".lower())  # or args.optimizer_schedulefree_wrapper
 
-    def get_dummy_scheduler(optimizer: torch.optim.Optimizer) -> Any:
+    def get_dummy_scheduler(self, optimizer: torch.optim.Optimizer) -> Any:
         # dummy scheduler for schedulefree optimizer. supports only empty step(), get_last_lr() and optimizers.
         # this scheduler is used for logging only.
         # this isn't be wrapped by accelerator because of this class is not a subclass of torch.optim.lr_scheduler._LRScheduler
@@ -608,7 +608,7 @@ class NetworkTrainer:
         if name.startswith("adafactor"):
             assert (
                 type(optimizer) == transformers.optimization.Adafactor
-            ), f"adafactor scheduler must be used with Adafactor optimizer / adafactor schedulerはAdafactorオプティマイザと同時に使ってください"
+            ), "adafactor scheduler must be used with Adafactor optimizer / adafactor schedulerはAdafactorオプティマイザと同時に使ってください"
             initial_lr = float(name.split(":")[1])
             # logger.info(f"adafactor scheduler init lr {initial_lr}")
             return wrap_check_needless_num_warmup_steps(transformers.optimization.AdafactorSchedule(optimizer, initial_lr))
@@ -1435,7 +1435,7 @@ class NetworkTrainer:
             image = torch.from_numpy(image).permute(2, 0, 1).unsqueeze(0).unsqueeze(2).float()  # 1, C, 1, H, W
             image = image / 255.0
 
-            logger.info(f"Encoding image to latents")
+            logger.info("Encoding image to latents")
             image_latents = encode_to_latents(args, image, device)  # 1, C, 1, H, W
             image_latents = image_latents.to(device=device, dtype=dit_dtype)
 
@@ -1711,7 +1711,7 @@ class NetworkTrainer:
             attn_mode = "flash3"
         else:
             raise ValueError(
-                f"either --sdpa, --flash-attn, --flash3, --sage-attn or --xformers must be specified / --sdpa, --flash-attn, --flash3, --sage-attn, --xformersのいずれかを指定してください"
+                "either --sdpa, --flash-attn, --flash3, --sage-attn or --xformers must be specified / --sdpa, --flash-attn, --flash3, --sage-attn, --xformersのいずれかを指定してください"
             )
         transformer = self.load_transformer(
             accelerator, args, args.dit, attn_mode, args.split_attn, loading_device, dit_weight_dtype
@@ -1938,7 +1938,7 @@ class NetworkTrainer:
 
         # TODO refactor metadata creation and move to util
         metadata = {
-            "ss_" "ss_session_id": session_id,  # random integer indicating which group of epochs the model came from
+            "ss_session_id": session_id,  # random integer indicating which group of epochs the model came from
             "ss_training_started_at": training_started_at,  # unix timestamp
             "ss_output_name": args.output_name,
             "ss_learning_rate": args.learning_rate,
@@ -2105,6 +2105,8 @@ class NetworkTrainer:
         logger.info(f"DiT dtype: {transformer.dtype}, device: {transformer.device}")
 
         clean_memory_on_device(accelerator.device)
+
+        optimizer_train_fn()  # Set training mode
 
         for epoch in range(epoch_to_start, num_train_epochs):
             accelerator.print(f"\nepoch {epoch+1}/{num_train_epochs}")

@@ -1,32 +1,22 @@
 import argparse
-from datetime import datetime
-import gc
-import json
+from importlib.util import find_spec
 import random
 import os
-import re
 import time
-import math
 import copy
-from typing import Tuple, Optional, List, Union, Any, Dict
+from typing import Tuple, Optional, List, Any, Dict
 
-from einops import rearrange, repeat
+from einops import rearrange
 import torch
 from safetensors.torch import load_file, save_file
 from safetensors import safe_open
-from PIL import Image
-import numpy as np
 from tqdm import tqdm
 
 from musubi_tuner.flux import flux_utils
 from musubi_tuner.flux.flux_utils import load_flow_model
 from musubi_tuner.flux import flux_models
-from musubi_tuner.dataset import image_video_dataset
 
-try:
-    from lycoris.kohya import create_network_from_weights
-except:
-    pass
+lycoris_available = find_spec("lycoris") is not None
 
 from musubi_tuner.networks import lora_flux
 from musubi_tuner.utils.device_utils import clean_memory_on_device
@@ -127,7 +117,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--no_metadata", action="store_true", help="do not save metadata")
     parser.add_argument("--latent_path", type=str, nargs="*", default=None, help="path to latent for decode. no inference")
-    parser.add_argument("--lycoris", action="store_true", help="use lycoris for inference")
+    parser.add_argument("--lycoris", action="store_true", help=f"use lycoris for inference{'' if lycoris_available else ' (not available)'}")
     # parser.add_argument("--compile", action="store_true", help="Enable torch.compile")
     # parser.add_argument(
     #     "--compile_args",
@@ -150,6 +140,9 @@ def parse_args() -> argparse.Namespace:
     if args.latent_path is None or len(args.latent_path) == 0:
         if args.prompt is None and not args.from_file and not args.interactive:
             raise ValueError("Either --prompt, --from_file or --interactive must be specified")
+
+    if args.lycoris and not lycoris_available:
+        raise ValueError("install lycoris: https://github.com/KohakuBlueleaf/LyCORIS")
 
     return args
 
@@ -345,7 +338,7 @@ def optimize_model(model: flux_models.Flux, args: argparse.Namespace, device: to
 
 
 def decode_latent(ae: flux_models.AutoEncoder, latent: torch.Tensor, device: torch.device) -> torch.Tensor:
-    logger.info(f"Decoding image...")
+    logger.info("Decoding image...")
     if latent.ndim == 3:
         latent = latent.unsqueeze(0)  # add batch dimension
 
@@ -363,13 +356,12 @@ def prepare_image_inputs(args: argparse.Namespace, device: torch.device, ae: flu
     """Prepare image-related inputs for Kontext: AE encoding."""
     height, width = check_inputs(args)
 
-    from musubi_tuner.utils.image_utils import preprocess_image
 
     if args.control_image_path is not None:
         control_image_tensor, _, _ = flux_utils.preprocess_control_image(args.control_image_path, not args.no_resize_control)
 
         # AE encoding
-        logger.info(f"Encoding control image to latent space with AE")
+        logger.info("Encoding control image to latent space with AE")
         ae_original_device = ae.device
         ae.to(device)
 
@@ -414,7 +406,7 @@ def prepare_text_inputs(
     text_encoder1_original_device = text_encoder1.device if text_encoder1 else None
     text_encoder2_original_device = text_encoder2.device if text_encoder2 else None
 
-    logger.info(f"Encoding prompt with Text Encoders")
+    logger.info("Encoding prompt with Text Encoders")
 
     # Ensure text_encoder1 and text_encoder2 are not None before proceeding
     if not text_encoder1 or not text_encoder2 or not tokenizer1 or not tokenizer2:

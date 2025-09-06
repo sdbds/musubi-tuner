@@ -1,5 +1,5 @@
 import os
-from typing import Any, List, Tuple, Optional, Union, Dict
+from typing import List, Tuple, Optional, Union, Dict
 import accelerate
 from einops import rearrange
 
@@ -630,7 +630,7 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
         for block in self.double_blocks + self.single_blocks:
             block.enable_gradient_checkpointing()
 
-        print(f"HYVideoDiffusionTransformer: Gradient checkpointing enabled.")
+        print("HYVideoDiffusionTransformer: Gradient checkpointing enabled.")
 
     def disable_gradient_checkpointing(self):
         self.gradient_checkpointing = False
@@ -640,7 +640,7 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
         for block in self.double_blocks + self.single_blocks:
             block.disable_gradient_checkpointing()
 
-        print(f"HYVideoDiffusionTransformer: Gradient checkpointing disabled.")
+        print("HYVideoDiffusionTransformer: Gradient checkpointing disabled.")
 
     def enable_img_in_txt_in_offloading(self):
         self._enable_img_in_txt_in_offloading = True
@@ -672,14 +672,14 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
             self.offloader_double.set_forward_only(True)
             self.offloader_single.set_forward_only(True)
             self.prepare_block_swap_before_forward()
-            print(f"HYVideoDiffusionTransformer: Block swap set to forward only.")
+            print("HYVideoDiffusionTransformer: Block swap set to forward only.")
 
     def switch_block_swap_for_training(self):
         if self.blocks_to_swap:
             self.offloader_double.set_forward_only(False)
             self.offloader_single.set_forward_only(False)
             self.prepare_block_swap_before_forward()
-            print(f"HYVideoDiffusionTransformer: Block swap set to forward and backward.")
+            print("HYVideoDiffusionTransformer: Block swap set to forward and backward.")
 
     def move_to_device_except_swap_blocks(self, device: torch.device):
         # assume model is on cpu. do not move blocks to device to reduce temporary memory usage

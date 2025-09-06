@@ -1,23 +1,18 @@
 import argparse
-from datetime import datetime
 import gc
-import json
+from importlib.util import find_spec
 import random
 import os
 import re
 import time
-import math
 import copy
-from typing import Tuple, Optional, List, Union, Any, Dict
+from typing import Tuple, Optional, List, Any, Dict
 
 import torch
 from safetensors.torch import load_file, save_file
 from safetensors import safe_open
 from PIL import Image
-import cv2
 import numpy as np
-import torchvision.transforms.functional as TF
-from transformers import LlamaModel
 from tqdm import tqdm
 
 from musubi_tuner.networks import lora_framepack
@@ -25,23 +20,18 @@ from musubi_tuner.hunyuan_model.autoencoder_kl_causal_3d import AutoencoderKLCau
 from musubi_tuner.frame_pack import hunyuan
 from musubi_tuner.frame_pack.hunyuan_video_packed import load_packed_model
 from musubi_tuner.frame_pack.hunyuan_video_packed_inference import HunyuanVideoTransformer3DModelPackedInference
-from musubi_tuner.frame_pack.utils import crop_or_pad_yield_mask, resize_and_center_crop, soft_append_bcthw
-from musubi_tuner.frame_pack.bucket_tools import find_nearest_bucket
+from musubi_tuner.frame_pack.utils import crop_or_pad_yield_mask, soft_append_bcthw
 from musubi_tuner.frame_pack.clip_vision import hf_clip_vision_encode
 from musubi_tuner.frame_pack.k_diffusion_hunyuan import sample_hunyuan
 from musubi_tuner.dataset import image_video_dataset
 from musubi_tuner.utils.lora_utils import filter_lora_state_dict
 
-try:
-    from lycoris.kohya import create_network_from_weights
-except:
-    pass
+lycoris_available = find_spec("lycoris") is not None
 
 from musubi_tuner.utils.device_utils import clean_memory_on_device
 from musubi_tuner.hv_generate_video import get_time_flag, save_images_grid, save_videos_grid, synchronize_device
 from musubi_tuner.wan_generate_video import merge_lora_weights
 from musubi_tuner.frame_pack.framepack_utils import load_vae, load_text_encoder1, load_text_encoder2, load_image_encoders
-from musubi_tuner.dataset.image_video_dataset import load_video
 
 import logging
 
@@ -255,7 +245,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--no_metadata", action="store_true", help="do not save metadata")
     parser.add_argument("--latent_path", type=str, nargs="*", default=None, help="path to latent for decode. no inference")
-    parser.add_argument("--lycoris", action="store_true", help="use lycoris for inference")
+    parser.add_argument("--lycoris", action="store_true", help=f"use lycoris for inference{'' if lycoris_available else ' (not available)'}")
     # parser.add_argument("--compile", action="store_true", help="Enable torch.compile")
     # parser.add_argument(
     #     "--compile_args",
@@ -292,6 +282,9 @@ def parse_args() -> argparse.Namespace:
     if args.latent_path is None or len(args.latent_path) == 0:
         if args.prompt is None and not args.from_file and not args.interactive:
             raise ValueError("Either --prompt, --from_file or --interactive must be specified")
+
+    if args.lycoris and not lycoris_available:
+        raise ValueError("install lycoris: https://github.com/KohakuBlueleaf/LyCORIS")
 
     return args
 
@@ -559,7 +552,7 @@ def decode_latent(
     device: torch.device,
     one_frame_inference_mode: bool = False,
 ) -> torch.Tensor:
-    logger.info(f"Decoding video...")
+    logger.info("Decoding video...")
     if latent.ndim == 4:
         latent = latent.unsqueeze(0)  # add batch dimension
 
@@ -596,7 +589,7 @@ def decode_latent(
             clean_memory_on_device(device)
     else:
         # bulk decode
-        logger.info(f"Bulk decoding or one frame inference")
+        logger.info("Bulk decoding or one frame inference")
         if not one_frame_inference_mode:
             history_pixels = hunyuan.vae_decode(latent, vae).cpu()  # normal
         else:
@@ -692,7 +685,7 @@ def prepare_image_inputs(
     clean_memory_on_device(device)
 
     # VAE encoding
-    logger.info(f"Encoding image to latent space with VAE")
+    logger.info("Encoding image to latent space with VAE")
     vae_original_device = vae.device
     vae.to(device)
 
@@ -762,7 +755,7 @@ def prepare_text_inputs(
     text_encoder1_original_device = text_encoder1.device if text_encoder1 else None
     text_encoder2_original_device = text_encoder2.device if text_encoder2 else None
 
-    logger.info(f"Encoding prompt with Text Encoders")
+    logger.info("Encoding prompt with Text Encoders")
     llama_vecs = {}
     llama_attention_masks = {}
     clip_l_poolers = {}
@@ -961,11 +954,11 @@ def convert_lora_for_framepack(lora_sd: dict[str, torch.Tensor]) -> dict[str, to
                 break
 
         if lora_suffix == "lora_A" and prefix is not None:
-            logging.info(f"Diffusion-pipe (?) LoRA detected, converting to the default LoRA format")
+            logging.info("Diffusion-pipe (?) LoRA detected, converting to the default LoRA format")
             lora_sd = convert_lora_from_diffusion_pipe_or_something(lora_sd, "lora_unet_")
 
         else:
-            logging.info(f"LoRA file format not recognized. Using it as-is.")
+            logging.info("LoRA file format not recognized. Using it as-is.")
 
     # Check LoRA is for FramePack or for HunyuanVideo
     is_hunyuan = False
@@ -1130,11 +1123,11 @@ def postprocess_magcache(args: argparse.Namespace, model: HunyuanVideoTransforme
 
     # print mag ratios
     norm_ratio, norm_std, cos_dis = model.get_calibration_data()
-    logger.info(f"MagCache calibration data:")
+    logger.info("MagCache calibration data:")
     logger.info(f"  - norm_ratio: {norm_ratio}")
     logger.info(f"  - norm_std: {norm_std}")
     logger.info(f"  - cos_dis: {cos_dis}")
-    logger.info(f"Copy and paste following values to --magcache_mag_ratios argument to use them:")
+    logger.info("Copy and paste following values to --magcache_mag_ratios argument to use them:")
     print(",".join([f"{ratio:.5f}" for ratio in [1] + norm_ratio]))
 
 
@@ -1273,7 +1266,7 @@ def generate(
                     print(
                         f"User defined latent paddings length {len(user_latent_paddings)} does not match total sections {total_latent_sections}."
                     )
-                    print(f"Use default paddings instead for unspecified sections.")
+                    print("Use default paddings instead for unspecified sections.")
                     latent_paddings[: len(user_latent_paddings)] = user_latent_paddings
                 elif len(user_latent_paddings) > total_latent_sections:
                     print(
@@ -1508,13 +1501,13 @@ def generate_with_one_frame_inference(
         return mask_image
 
     if control_latents is None or len(control_latents) == 0:
-        logger.info(f"No control images provided for one frame inference. Use zero latents for control images.")
+        logger.info("No control images provided for one frame inference. Use zero latents for control images.")
         control_latents = [torch.zeros(1, 16, 1, height // 8, width // 8, dtype=torch.float32)]
 
     if "no_post" not in one_frame_inference:
         # add zero latents as clean latents post
         control_latents.append(torch.zeros((1, 16, 1, height // 8, width // 8), dtype=torch.float32))
-        logger.info(f"Add zero latents as clean latents post for one frame inference.")
+        logger.info("Add zero latents as clean latents post for one frame inference.")
 
     # kisekaeichi and 1f-mc: both are using control images, but indices are different
     clean_latents = torch.cat(control_latents, dim=2)  # (1, 16, num_control_images, H//8, W//8)
@@ -1556,7 +1549,7 @@ def generate_with_one_frame_inference(
     if "no_2x" in one_frame_inference:
         clean_latents_2x = None
         clean_latent_2x_indices = None
-        logger.info(f"No clean_latents_2x")
+        logger.info("No clean_latents_2x")
     else:
         clean_latents_2x = torch.zeros((1, 16, 2, height // 8, width // 8), dtype=torch.float32)
         index = 1 + latent_window_size + 1
@@ -1565,7 +1558,7 @@ def generate_with_one_frame_inference(
     if "no_4x" in one_frame_inference:
         clean_latents_4x = None
         clean_latent_4x_indices = None
-        logger.info(f"No clean_latents_4x")
+        logger.info("No clean_latents_4x")
     else:
         clean_latents_4x = torch.zeros((1, 16, 16, height // 8, width // 8), dtype=torch.float32)
         index = 1 + latent_window_size + 1 + 2

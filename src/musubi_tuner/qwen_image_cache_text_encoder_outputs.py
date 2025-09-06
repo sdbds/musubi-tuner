@@ -1,10 +1,7 @@
 import argparse
-import os
-from typing import Optional, Union
+from typing import Optional
 
-import numpy as np
 import torch
-from tqdm import tqdm
 import accelerate
 from transformers import Qwen2_5_VLForConditionalGeneration, Qwen2Tokenizer, Qwen2VLProcessor
 
@@ -17,7 +14,6 @@ import musubi_tuner.cache_text_encoder_outputs as cache_text_encoder_outputs
 import logging
 
 from musubi_tuner.qwen_image import qwen_image_utils
-from musubi_tuner.utils.model_utils import str_to_dtype
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)

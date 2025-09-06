@@ -1,10 +1,8 @@
 import argparse
 import gc
 from typing import Optional
-from PIL import Image
 
 
-from einops import rearrange
 import numpy as np
 import torch
 from tqdm import tqdm
@@ -21,7 +19,6 @@ from musubi_tuner.hv_train_network import (
 )
 import logging
 
-from musubi_tuner.utils import image_utils
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -65,7 +62,7 @@ class QwenImageNetworkTrainer(NetworkTrainer):
         vl_processor = qwen_image_utils.load_vl_processor() if is_edit else None
 
         # Encode with VLM
-        logger.info(f"Encoding with VLM")
+        logger.info("Encoding with VLM")
 
         sample_prompts_te_outputs = {}  # prompt -> embed or (prompt, control_image_path) -> embed
         with torch.amp.autocast(device_type=device.type, dtype=vl_dtype), torch.no_grad():
@@ -74,7 +71,7 @@ class QwenImageNetworkTrainer(NetworkTrainer):
                     # Load control image
                     assert (
                         "control_image_path" in prompt_dict and len(prompt_dict["control_image_path"]) > 0
-                    ), f"control_image_path not found in sample prompt"
+                    ), "control_image_path not found in sample prompt"
                     control_image_path = prompt_dict["control_image_path"][0]  # only use the first control image
                     control_image_tensor, control_image_np, _ = qwen_image_utils.preprocess_control_image(control_image_path, True)
 
@@ -170,7 +167,7 @@ class QwenImageNetworkTrainer(NetworkTrainer):
 
         if is_edit:
             # 4.1 Prepare control latents
-            logger.info(f"Preparing control latents from control image")
+            logger.info("Preparing control latents from control image")
             control_image_tensor = sample_parameter.get("control_image_tensor")
             vae.to(device)
             vae.eval()
@@ -265,7 +262,7 @@ class QwenImageNetworkTrainer(NetworkTrainer):
             pixels = vae.decode_to_pixels(latents.to(device))  # decode to pixels, 0-1
         del latents
 
-        logger.info(f"Decoding complete")
+        logger.info("Decoding complete")
         pixels = pixels.to(torch.float32).cpu()
 
         vae.to("cpu")
@@ -293,7 +290,14 @@ class QwenImageNetworkTrainer(NetworkTrainer):
         dit_weight_dtype: Optional[torch.dtype],
     ):
         model = qwen_image_model.load_qwen_image_model(
-            accelerator.device, dit_path, attn_mode, split_attn, loading_device, dit_weight_dtype, args.fp8_scaled
+            accelerator.device,
+            dit_path,
+            attn_mode,
+            split_attn,
+            loading_device,
+            dit_weight_dtype,
+            args.fp8_scaled,
+            num_layers=args.num_layers,
         )
         return model
 
@@ -405,6 +409,7 @@ def qwen_image_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argumen
     parser.add_argument("--fp8_scaled", action="store_true", help="use scaled fp8 for DiT / DiTにスケーリングされたfp8を使う")
     parser.add_argument("--text_encoder", type=str, default=None, help="text encoder (Qwen2.5-VL) checkpoint path")
     parser.add_argument("--fp8_vl", action="store_true", help="use fp8 for Text Encoder model")
+    parser.add_argument("--num_layers", type=int, default=None, help="Number of layers in the DiT model, default is None (60)")
     parser.add_argument("--edit", action="store_true", help="training for Qwen-Image-Edit")
     return parser
 

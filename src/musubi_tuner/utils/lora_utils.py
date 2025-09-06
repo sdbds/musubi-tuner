@@ -11,8 +11,8 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 
-from musubi_tuner.modules.fp8_optimization_utils import load_safetensors_with_fp8_optimization, optimize_state_dict_with_fp8
-from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen, load_safetensors
+from musubi_tuner.modules.fp8_optimization_utils import load_safetensors_with_fp8_optimization
+from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen
 
 
 def filter_lora_state_dict(
@@ -38,7 +38,7 @@ def filter_lora_state_dict(
         remaining_keys.sort()
         logger.info(f"Remaining LoRA modules after filtering: {remaining_keys}")
         if len(weights_sd) == 0:
-            logger.warning(f"No keys left after filtering.")
+            logger.warning("No keys left after filtering.")
 
     return weights_sd
 

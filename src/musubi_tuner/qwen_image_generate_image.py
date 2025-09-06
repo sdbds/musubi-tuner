@@ -1,12 +1,9 @@
 import argparse
-from datetime import datetime
 import gc
-import json
+from importlib.util import find_spec
 import random
 import os
-import re
 import time
-import math
 import copy
 from typing import Tuple, Optional, List, Any, Dict
 
@@ -15,19 +12,14 @@ import torch
 from safetensors.torch import load_file, save_file
 from safetensors import safe_open
 from tqdm import tqdm
-from PIL import Image
 
 from musubi_tuner.qwen_image import qwen_image_model, qwen_image_utils
 from musubi_tuner.qwen_image.qwen_image_autoencoder_kl import AutoencoderKLQwenImage
 from musubi_tuner.qwen_image.qwen_image_utils import VAE_SCALE_FACTOR
-from musubi_tuner.utils import image_utils
 from musubi_tuner.utils.lora_utils import filter_lora_state_dict
 
 
-try:
-    from lycoris.kohya import create_network_from_weights
-except:
-    pass
+lycoris_available = find_spec("lycoris") is not None
 
 from musubi_tuner.networks import lora_qwen_image
 from musubi_tuner.utils.device_utils import clean_memory_on_device
@@ -57,6 +49,7 @@ def parse_args() -> argparse.Namespace:
     # )
 
     parser.add_argument("--dit", type=str, default=None, help="DiT directory or path")
+    parser.add_argument("--num_layers", type=int, default=None, help="Number of layers in the DiT model, default is None (60)")
     parser.add_argument("--edit", action="store_true", help="Enable Qwen-Image-Edit")
     parser.add_argument("--vae", type=str, default=None, help="VAE directory or path")
     parser.add_argument("--vae_enable_tiling", action="store_true", help="Enable tiling for VAE decoding. Default is False.")
@@ -134,7 +127,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--no_metadata", action="store_true", help="do not save metadata")
     parser.add_argument("--latent_path", type=str, nargs="*", default=None, help="path to latent for decode. no inference")
-    parser.add_argument("--lycoris", action="store_true", help="use lycoris for inference")
+    parser.add_argument("--lycoris", action="store_true", help=f"use lycoris for inference{'' if lycoris_available else ' (not available)'}")
 
     # New arguments for batch and interactive modes
     parser.add_argument("--from_file", type=str, default=None, help="Read prompts from a file")
@@ -149,6 +142,9 @@ def parse_args() -> argparse.Namespace:
     if args.latent_path is None or len(args.latent_path) == 0:
         if args.prompt is None and not args.from_file and not args.interactive:
             raise ValueError("Either --prompt, --from_file or --interactive must be specified")
+
+    if args.lycoris and not lycoris_available:
+        raise ValueError("install lycoris: https://github.com/KohakuBlueleaf/LyCORIS")
 
     return args
 
@@ -280,6 +276,8 @@ def load_dit_model(
     loading_weight_dtype = dit_weight_dtype
     if args.fp8_scaled and not args.lycoris:
         loading_weight_dtype = None  # we will load weights as-is and then optimize to fp8
+    elif args.lycoris:
+        loading_weight_dtype = torch.bfloat16  # lycoris requires bfloat16 or float16, because it merges weights
 
     model = qwen_image_model.load_qwen_image_model(
         device,
@@ -291,6 +289,7 @@ def load_dit_model(
         args.fp8_scaled and not args.lycoris,
         lora_weights_list=lora_weights_list,
         lora_multipliers=args.lora_multiplier,
+        num_layers=args.num_layers,
     )
 
     # merge LoRA weights
@@ -314,7 +313,19 @@ def load_dit_model(
 
             # if no blocks to swap, we can move the weights to GPU after optimization on GPU (omit redundant CPU->GPU copy)
             move_to_device = args.blocks_to_swap == 0  # if blocks_to_swap > 0, we will keep the model on CPU
-            state_dict = model.fp8_optimization(state_dict, device, move_to_device, use_scaled_mm=args.fp8_fast)
+            #state_dict = model.fp8_optimization(state_dict, device, move_to_device, use_scaled_mm=args.fp8_fast)
+
+            from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
+
+            # inplace optimization
+            state_dict = optimize_state_dict_with_fp8(
+                state_dict,
+                device,
+                qwen_image_model.FP8_OPTIMIZATION_TARGET_KEYS,
+                qwen_image_model.FP8_OPTIMIZATION_EXCLUDE_KEYS,
+                move_to_device=move_to_device,
+            )
+            apply_fp8_monkey_patch(model, state_dict, use_scaled_mm=False)  # args.scaled_mm)
 
             info = model.load_state_dict(state_dict, strict=True, assign=True)
             logger.info(f"Loaded FP8 optimized weights: {info}")
@@ -383,7 +394,7 @@ def prepare_image_inputs(
         )
 
         # VAE encoding
-        logger.info(f"Encoding control image to latent space with VAE")
+        logger.info("Encoding control image to latent space with VAE")
         vae_original_device = vae.device
         vae.to(device)
 
