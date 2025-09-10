@@ -21,13 +21,18 @@ from musubi_tuner.frame_pack.hunyuan_video_packed import HunyuanVideoTransformer
 from musubi_tuner.frame_pack.k_diffusion_hunyuan import sample_hunyuan
 from musubi_tuner.frame_pack.utils import crop_or_pad_yield_mask
 from musubi_tuner.dataset.image_video_dataset import resize_image_to_bucket
-from musubi_tuner.hv_train_network import NetworkTrainer, load_prompts, clean_memory_on_device, setup_parser_common, read_config_from_file
+from musubi_tuner.hv_train_network import (
+    NetworkTrainer,
+    load_prompts,
+    clean_memory_on_device,
+    setup_parser_common,
+    read_config_from_file,
+)
 
 import logging
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
-
 
 
 class FramePackNetworkTrainer(NetworkTrainer):
@@ -178,7 +183,7 @@ class FramePackNetworkTrainer(NetworkTrainer):
         latent_f = (frame_count - 1) // 4 + 1
         total_latent_sections = math.floor((latent_f - 1) / latent_window_size)
         if total_latent_sections < 1 and not one_frame_mode:
-            logger.warning(f"Not enough frames for FramePack: {latent_f}, minimum: {latent_window_size*4+1}")
+            logger.warning(f"Not enough frames for FramePack: {latent_f}, minimum: {latent_window_size * 4 + 1}")
             return None
 
         latent_f = total_latent_sections * latent_window_size + 1
@@ -378,7 +383,7 @@ class FramePackNetworkTrainer(NetworkTrainer):
                 control_alpha = control_alphas[i]
                 if control_alpha is not None:
                     latent_mask = get_latent_mask(control_alpha)
-                    logger.info(f"Apply mask for clean latents 1x for {i+1}: shape: {latent_mask.shape}")
+                    logger.info(f"Apply mask for clean latents 1x for {i + 1}: shape: {latent_mask.shape}")
                     clean_latents[:, :, i : i + 1, :, :] = clean_latents[:, :, i : i + 1, :, :] * latent_mask
 
             for one_frame_param in one_frame_inference:
@@ -599,9 +604,9 @@ def main():
     args = parser.parse_args()
     args = read_config_from_file(args, parser)
 
-    assert (
-        args.vae_dtype is None or args.vae_dtype == "float16"
-    ), "VAE dtype must be float16 / VAEのdtypeはfloat16でなければなりません"
+    assert args.vae_dtype is None or args.vae_dtype == "float16", (
+        "VAE dtype must be float16 / VAEのdtypeはfloat16でなければなりません"
+    )
     args.vae_dtype = "float16"  # fixed
     args.dit_dtype = "bfloat16"  # fixed
     args.sample_solver = "unipc"  # for sample generation, fixed to unipc

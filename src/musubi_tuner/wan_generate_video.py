@@ -217,7 +217,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--no_metadata", action="store_true", help="do not save metadata")
     parser.add_argument("--latent_path", type=str, nargs="*", default=None, help="path to latent for decode. no inference")
-    parser.add_argument("--lycoris", action="store_true", help=f"use lycoris for inference{'' if lycoris_available else ' (not available)'}")
+    parser.add_argument(
+        "--lycoris", action="store_true", help=f"use lycoris for inference{'' if lycoris_available else ' (not available)'}"
+    )
     parser.add_argument("--compile", action="store_true", help="Enable torch.compile")
     parser.add_argument(
         "--compile_args",
@@ -931,7 +933,6 @@ def prepare_one_frame_inference(
     height: int,
     width: int,
 ) -> Tuple[int, torch.Tensor, List[int]]:
-
     target_index, _, f_indices, one_frame_inference_index = parse_one_frame_inference_args(args.one_frame_inference)
 
     # prepare image
@@ -1141,7 +1142,10 @@ def prepare_i2v_inputs(
         msk[:, 0] = 1
         if has_end_image:
             # this process is confirmed by official code for FLF2V
-            msk[:, -1] = 1
+            if config.flf2v:
+                msk[-1, -1] = 1
+            else:
+                msk[:, -1] = 1
 
         # encode image to latent space
         with accelerator.autocast(), torch.no_grad():
@@ -1893,7 +1897,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
     all_prompt_args = []
 
     for i, prompt_data in enumerate(prompts_data):
-        logger.info(f"Processing prompt {i+1}/{len(prompts_data)}: {prompt_data['prompt'][:50]}...")
+        logger.info(f"Processing prompt {i + 1}/{len(prompts_data)}: {prompt_data['prompt'][:50]}...")
 
         # Apply overrides for this prompt
         prompt_args = apply_overrides(args, prompt_data)
@@ -1932,7 +1936,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
         vae.to_device(device)
 
         for i, (latent, prompt_args) in enumerate(zip(all_latents, all_prompt_args)):
-            logger.info(f"Decoding output {i+1}/{len(all_latents)}")
+            logger.info(f"Decoding output {i + 1}/{len(all_latents)}")
 
             # Decode latent
             video = decode_latent(latent.unsqueeze(0), prompt_args, cfg)
@@ -2189,9 +2193,9 @@ def main():
     # Parse arguments
     args = parse_args()
 
-    assert not (
-        args.offload_inactive_dit and args.lazy_loading
-    ), "--offload_inactive_dit and --lazy_loading cannot be used together"
+    assert not (args.offload_inactive_dit and args.lazy_loading), (
+        "--offload_inactive_dit and --lazy_loading cannot be used together"
+    )
 
     # Check if latents are provided
     latents_mode = args.latent_path is not None and len(args.latent_path) > 0

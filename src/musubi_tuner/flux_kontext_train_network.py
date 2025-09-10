@@ -23,7 +23,6 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 
-
 class FluxKontextNetworkTrainer(NetworkTrainer):
     def __init__(self):
         super().__init__()

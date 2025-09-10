@@ -39,6 +39,7 @@ from musubi_tuner.hunyuan_model.models import load_transformer, get_rotary_pos_e
 import musubi_tuner.hunyuan_model.text_encoder as text_encoder_module
 from musubi_tuner.hunyuan_model.vae import load_vae, VAE_VER
 import musubi_tuner.hunyuan_model.vae as vae_module
+from musubi_tuner.modules.lr_schedulers import RexLR
 from musubi_tuner.modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
 import musubi_tuner.networks.lora as lora_module
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
@@ -606,12 +607,24 @@ class NetworkTrainer:
             return lr_scheduler
 
         if name.startswith("adafactor"):
-            assert (
-                type(optimizer) == transformers.optimization.Adafactor
-            ), "adafactor scheduler must be used with Adafactor optimizer / adafactor schedulerはAdafactorオプティマイザと同時に使ってください"
+            assert type(optimizer) == transformers.optimization.Adafactor, (
+                "adafactor scheduler must be used with Adafactor optimizer / adafactor schedulerはAdafactorオプティマイザと同時に使ってください"
+            )
             initial_lr = float(name.split(":")[1])
             # logger.info(f"adafactor scheduler init lr {initial_lr}")
             return wrap_check_needless_num_warmup_steps(transformers.optimization.AdafactorSchedule(optimizer, initial_lr))
+
+        if name.lower() == "rex":
+            return RexLR(
+                optimizer,
+                max_lr=args.learning_rate,
+                min_lr=(  # Will start and end with min_lr, use non-zero min_lr by default
+                    args.learning_rate * min_lr_ratio if min_lr_ratio is not None else args.learning_rate * 0.01
+                ),
+                num_steps=num_training_steps,
+                num_warmup_steps=num_warmup_steps,
+                **lr_scheduler_kwargs,
+            )
 
         if name == DiffusersSchedulerType.PIECEWISE_CONSTANT.value:
             name = DiffusersSchedulerType(name)
@@ -1058,14 +1071,14 @@ class NetworkTrainer:
             max_count = max(sampled_timesteps)
             print(f"Sampled timesteps: max count={max_count}")
             for i, t in enumerate(sampled_timesteps):
-                line = f"{(i)*N_TIMESTEPS_PER_LINE:4d}-{(i+1)*N_TIMESTEPS_PER_LINE-1:4d}: "
+                line = f"{(i) * N_TIMESTEPS_PER_LINE:4d}-{(i + 1) * N_TIMESTEPS_PER_LINE - 1:4d}: "
                 line += "#" * int(t / max_count * CONSOLE_WIDTH)
                 print(line)
 
             max_weighting = max(sampled_weighting)
             print(f"Sampled loss weighting: max weighting={max_weighting}")
             for i, w in enumerate(sampled_weighting):
-                line = f"{i*N_TIMESTEPS_PER_LINE:4d}-{(i+1)*N_TIMESTEPS_PER_LINE-1:4d}: {w:8.2f} "
+                line = f"{i * N_TIMESTEPS_PER_LINE:4d}-{(i + 1) * N_TIMESTEPS_PER_LINE - 1:4d}: {w:8.2f} "
                 line += "#" * int(w / max_weighting * CONSOLE_WIDTH)
                 print(line)
 
@@ -1459,7 +1472,7 @@ class NetworkTrainer:
         # Wrap the inner loop with tqdm to track progress over timesteps
         prompt_idx = sample_parameter.get("enum", 0)
         with torch.no_grad():
-            for i, t in enumerate(tqdm(timesteps, desc=f"Sampling timesteps for prompt {prompt_idx+1}")):
+            for i, t in enumerate(tqdm(timesteps, desc=f"Sampling timesteps for prompt {prompt_idx + 1}")):
                 latents_input = scheduler.scale_model_input(latents, t)
 
                 if do_classifier_free_guidance:
@@ -1797,7 +1810,7 @@ class NetworkTrainer:
             accelerator.print(f"load network weights from {args.network_weights}: {info}")
 
         if args.gradient_checkpointing:
-            transformer.enable_gradient_checkpointing()
+            transformer.enable_gradient_checkpointing(args.gradient_checkpointing_cpu_offload)
             network.enable_gradient_checkpointing()  # may have no effect
 
         # prepare optimizer, data loader etc.
@@ -1843,16 +1856,16 @@ class NetworkTrainer:
         network_dtype = torch.float32
         args.full_fp16 = args.full_bf16 = False  # temporary disabled because stochastic rounding is not supported yet
         if args.full_fp16:
-            assert (
-                args.mixed_precision == "fp16"
-            ), "full_fp16 requires mixed precision='fp16' / full_fp16を使う場合はmixed_precision='fp16'を指定してください。"
+            assert args.mixed_precision == "fp16", (
+                "full_fp16 requires mixed precision='fp16' / full_fp16を使う場合はmixed_precision='fp16'を指定してください。"
+            )
             accelerator.print("enable full fp16 training.")
             network_dtype = weight_dtype
             network.to(network_dtype)
         elif args.full_bf16:
-            assert (
-                args.mixed_precision == "bf16"
-            ), "full_bf16 requires mixed precision='bf16' / full_bf16を使う場合はmixed_precision='bf16'を指定してください。"
+            assert args.mixed_precision == "bf16", (
+                "full_bf16 requires mixed precision='bf16' / full_bf16を使う場合はmixed_precision='bf16'を指定してください。"
+            )
             accelerator.print("enable full bf16 training.")
             network_dtype = weight_dtype
             network.to(network_dtype)
@@ -1946,6 +1959,7 @@ class NetworkTrainer:
             "ss_num_batches_per_epoch": len(train_dataloader),
             "ss_num_epochs": num_train_epochs,
             "ss_gradient_checkpointing": args.gradient_checkpointing,
+            "ss_gradient_checkpointing_cpu_offload": args.gradient_checkpointing_cpu_offload,
             "ss_gradient_accumulation_steps": args.gradient_accumulation_steps,
             "ss_max_train_steps": args.max_train_steps,
             "ss_lr_warmup_steps": args.lr_warmup_steps,
@@ -2109,7 +2123,7 @@ class NetworkTrainer:
         optimizer_train_fn()  # Set training mode
 
         for epoch in range(epoch_to_start, num_train_epochs):
-            accelerator.print(f"\nepoch {epoch+1}/{num_train_epochs}")
+            accelerator.print(f"\nepoch {epoch + 1}/{num_train_epochs}")
             current_epoch.value = epoch + 1
 
             metadata["ss_epoch"] = str(epoch + 1)
@@ -2357,6 +2371,11 @@ def setup_parser_common() -> argparse.ArgumentParser:
         "--gradient_checkpointing", action="store_true", help="enable gradient checkpointing / gradient checkpointingを有効にする"
     )
     parser.add_argument(
+        "--gradient_checkpointing_cpu_offload",
+        action="store_true",
+        help="enable CPU offloading of activation for gradient checkpointing / gradient checkpointing時に活性化のCPUオフロードを有効にする",
+    )
+    parser.add_argument(
         "--gradient_accumulation_steps",
         type=int,
         default=1,
@@ -2478,7 +2497,7 @@ def setup_parser_common() -> argparse.ArgumentParser:
         "--lr_scheduler",
         type=str,
         default="constant",
-        help="scheduler to use for learning rate / 学習率のスケジューラ: linear, cosine, cosine_with_restarts, polynomial, constant (default), constant_with_warmup, adafactor",
+        help="scheduler to use for learning rate / 学習率のスケジューラ: linear, cosine, cosine_with_restarts, polynomial, constant (default), constant_with_warmup, adafactor, rex",
     )
     parser.add_argument(
         "--lr_warmup_steps",
@@ -2517,8 +2536,8 @@ def setup_parser_common() -> argparse.ArgumentParser:
         "--lr_scheduler_min_lr_ratio",
         type=float,
         default=None,
-        help="The minimum learning rate as a ratio of the initial learning rate for cosine with min lr scheduler and warmup decay scheduler"
-        + " / 初期学習率の比率としての最小学習率を指定する、cosine with min lr と warmup decay スケジューラ で有効",
+        help="The minimum learning rate as a ratio of the initial learning rate for cosine with min lr scheduler, warmup decay scheduler and rex scheduler"
+        + " / 初期学習率の比率としての最小学習率を指定する、cosine with min lr スケジューラ、warmup decay スケジューラ、rex スケジューラ で有効",
     )
     parser.add_argument("--lr_scheduler_type", type=str, default="", help="custom scheduler module / 使用するスケジューラ")
     parser.add_argument(
@@ -2601,8 +2620,7 @@ def setup_parser_common() -> argparse.ArgumentParser:
         type=str,
         default="none",
         choices=["logit_normal", "mode", "cosmap", "sigma_sqrt", "none"],
-        help="weighting scheme for timestep distribution. Default is none"
-        " / タイムステップ分布の重み付けスキーム、デフォルトはnone",
+        help="weighting scheme for timestep distribution. Default is none / タイムステップ分布の重み付けスキーム、デフォルトはnone",
     )
     parser.add_argument(
         "--logit_mean",

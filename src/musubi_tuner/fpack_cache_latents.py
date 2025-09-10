@@ -65,7 +65,7 @@ def encode_and_save_batch(
     if total_latent_sections < 1:
         min_frames_needed = latent_window_size * 4 + 1
         raise ValueError(
-            f"Not enough frames for FramePack: {batch[0].frame_count} frames ({latent_f} latent frames), minimum required: {min_frames_needed} frames ({latent_window_size+1} latent frames)"
+            f"Not enough frames for FramePack: {batch[0].frame_count} frames ({latent_f} latent frames), minimum required: {min_frames_needed} frames ({latent_window_size + 1} latent frames)"
         )
 
     # actual latent frame count (aligned to section boundaries)

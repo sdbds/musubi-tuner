@@ -245,7 +245,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--no_metadata", action="store_true", help="do not save metadata")
     parser.add_argument("--latent_path", type=str, nargs="*", default=None, help="path to latent for decode. no inference")
-    parser.add_argument("--lycoris", action="store_true", help=f"use lycoris for inference{'' if lycoris_available else ' (not available)'}")
+    parser.add_argument(
+        "--lycoris", action="store_true", help=f"use lycoris for inference{'' if lycoris_available else ' (not available)'}"
+    )
     # parser.add_argument("--compile", action="store_true", help="Enable torch.compile")
     # parser.add_argument(
     #     "--compile_args",
@@ -1861,7 +1863,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
     temp_shared_models_img = {"feature_extractor": feature_extractor_batch, "image_encoder": image_encoder_batch}
 
     for i, prompt_args_item in enumerate(all_prompt_args_list):
-        logger.info(f"Image preprocessing for prompt {i+1}/{len(all_prompt_args_list)}: {prompt_args_item.prompt}")
+        logger.info(f"Image preprocessing for prompt {i + 1}/{len(all_prompt_args_list)}: {prompt_args_item.prompt}")
         # prepare_image_inputs will move vae/image_encoder to device temporarily
         image_data = prepare_image_inputs(prompt_args_item, device, vae_for_batch, temp_shared_models_img)
         all_precomputed_image_data.append(image_data)
@@ -1893,7 +1895,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
     }
 
     for i, prompt_args_item in enumerate(all_prompt_args_list):
-        logger.info(f"Text preprocessing for prompt {i+1}/{len(all_prompt_args_list)}: {prompt_args_item.prompt}")
+        logger.info(f"Text preprocessing for prompt {i + 1}/{len(all_prompt_args_list)}: {prompt_args_item.prompt}")
         # prepare_text_inputs will move text_encoders to device temporarily
         text_data = prepare_text_inputs(prompt_args_item, device, temp_shared_models_txt)
         all_precomputed_text_data.append(text_data)
@@ -1925,7 +1927,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
             current_image_data = all_precomputed_image_data[i]
             current_text_data = all_precomputed_text_data[i]
 
-            logger.info(f"Generating latent for prompt {i+1}/{len(all_prompt_args_list)}: {prompt_args_item.prompt}")
+            logger.info(f"Generating latent for prompt {i + 1}/{len(all_prompt_args_list)}: {prompt_args_item.prompt}")
             try:
                 # generate is called with precomputed data, so it won't load VAE/Text/Image encoders.
                 # It will use the DiT model from shared_models_for_generate.
@@ -1967,11 +1969,11 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
 
         for i, latent in enumerate(all_latents):
             if latent is None:  # Skip failed generations
-                logger.warning(f"Skipping decoding for prompt {i+1} due to previous error.")
+                logger.warning(f"Skipping decoding for prompt {i + 1} due to previous error.")
                 continue
 
             current_args = all_prompt_args_list[i]
-            logger.info(f"Decoding output {i+1}/{len(all_latents)} for prompt: {current_args.prompt}")
+            logger.info(f"Decoding output {i + 1}/{len(all_latents)} for prompt: {current_args.prompt}")
 
             # if args.output_type is "both" or "latent_images", we already saved latent above.
             # so we skip saving latent here.

@@ -127,7 +127,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--no_metadata", action="store_true", help="do not save metadata")
     parser.add_argument("--latent_path", type=str, nargs="*", default=None, help="path to latent for decode. no inference")
-    parser.add_argument("--lycoris", action="store_true", help=f"use lycoris for inference{'' if lycoris_available else ' (not available)'}")
+    parser.add_argument(
+        "--lycoris", action="store_true", help=f"use lycoris for inference{'' if lycoris_available else ' (not available)'}"
+    )
 
     # New arguments for batch and interactive modes
     parser.add_argument("--from_file", type=str, default=None, help="Read prompts from a file")
@@ -313,7 +315,7 @@ def load_dit_model(
 
             # if no blocks to swap, we can move the weights to GPU after optimization on GPU (omit redundant CPU->GPU copy)
             move_to_device = args.blocks_to_swap == 0  # if blocks_to_swap > 0, we will keep the model on CPU
-            #state_dict = model.fp8_optimization(state_dict, device, move_to_device, use_scaled_mm=args.fp8_fast)
+            # state_dict = model.fp8_optimization(state_dict, device, move_to_device, use_scaled_mm=args.fp8_fast)
 
             from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
 
@@ -944,7 +946,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
         vae_for_batch.to(device)  # Move VAE to device for control image encoding
 
         for i, prompt_args_item in enumerate(all_prompt_args_list):
-            logger.info(f"Preprocessing control image for prompt {i+1}/{len(all_prompt_args_list)}: {prompt_args_item.prompt}")
+            logger.info(f"Preprocessing control image for prompt {i + 1}/{len(all_prompt_args_list)}: {prompt_args_item.prompt}")
             assert prompt_args_item.control_image_path is not None, "Qwen-Image-Edit requires control_image_path"
             control_data = prepare_image_inputs(args, device, vae_for_batch)
             all_precomputed_image_data.append(control_data)
@@ -953,7 +955,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
         clean_memory_on_device(device)  # Clean up VAE memory
 
     for i, prompt_args_item in enumerate(all_prompt_args_list):
-        logger.info(f"Text preprocessing for prompt {i+1}/{len(all_prompt_args_list)}: {prompt_args_item.prompt}")
+        logger.info(f"Text preprocessing for prompt {i + 1}/{len(all_prompt_args_list)}: {prompt_args_item.prompt}")
 
         # prepare_text_inputs will move text_encoders to device temporarily
         text_data = prepare_text_inputs(prompt_args_item, all_precomputed_image_data[i][1], device, temp_shared_models_txt)
@@ -993,7 +995,7 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
             current_text_data = all_precomputed_text_data[i]
             height, width = check_inputs(prompt_args_item)  # Get height/width for each prompt
 
-            logger.info(f"Generating latent for prompt {i+1}/{len(all_prompt_args_list)}: {prompt_args_item.prompt}")
+            logger.info(f"Generating latent for prompt {i + 1}/{len(all_prompt_args_list)}: {prompt_args_item.prompt}")
             try:
                 # generate is called with precomputed data, so it won't load VAE/Text/Image encoders.
                 # It will use the DiT model from shared_models_for_generate.
@@ -1031,11 +1033,11 @@ def process_batch_prompts(prompts_data: List[Dict], args: argparse.Namespace) ->
 
         for i, latent in enumerate(all_latents):
             if latent is None:  # Skip failed generations
-                logger.warning(f"Skipping decoding for prompt {i+1} due to previous error.")
+                logger.warning(f"Skipping decoding for prompt {i + 1} due to previous error.")
                 continue
 
             current_args = all_prompt_args_list[i]
-            logger.info(f"Decoding output {i+1}/{len(all_latents)} for prompt: {current_args.prompt}")
+            logger.info(f"Decoding output {i + 1}/{len(all_latents)} for prompt: {current_args.prompt}")
 
             # if args.output_type is "latent_images", we already saved latent above.
             # so we skip saving latent here.

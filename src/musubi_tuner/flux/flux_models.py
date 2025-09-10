@@ -20,6 +20,8 @@ from musubi_tuner.hunyuan_model.attention import attention as hunyuan_attention
 
 import logging
 
+from musubi_tuner.utils.model_utils import create_cpu_offloading_wrapper
+
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
@@ -667,12 +669,15 @@ class DoubleStreamBlock(nn.Module):
         )
 
         self.gradient_checkpointing = False
+        self.activation_cpu_offloading = False
 
-    def enable_gradient_checkpointing(self):
+    def enable_gradient_checkpointing(self, activation_cpu_offloading: bool = False):
         self.gradient_checkpointing = True
+        self.activation_cpu_offloading = activation_cpu_offloading
 
     def disable_gradient_checkpointing(self):
         self.gradient_checkpointing = False
+        self.activation_cpu_offloading = False
 
     def _forward(
         self, img: Tensor, txt: Tensor, vec: Tensor, pe: Tensor, control_lengths: Optional[list[int]] = None
@@ -716,7 +721,10 @@ class DoubleStreamBlock(nn.Module):
         self, img: Tensor, txt: Tensor, vec: Tensor, pe: Tensor, control_lengths: Optional[list[int]] = None
     ) -> tuple[Tensor, Tensor]:
         if self.training and self.gradient_checkpointing:
-            return checkpoint(self._forward, img, txt, vec, pe, control_lengths, use_reentrant=False)
+            forward_fn = self._forward
+            if self.activation_cpu_offloading:
+                forward_fn = create_cpu_offloading_wrapper(forward_fn, self.img_mlp[0].weight.device)
+            return checkpoint(forward_fn, img, txt, vec, pe, control_lengths, use_reentrant=False)
         else:
             return self._forward(img, txt, vec, pe, control_lengths)
 
@@ -759,12 +767,15 @@ class SingleStreamBlock(nn.Module):
         self.modulation = Modulation(hidden_size, double=False)
 
         self.gradient_checkpointing = False
+        self.activation_cpu_offloading = False
 
-    def enable_gradient_checkpointing(self):
+    def enable_gradient_checkpointing(self, activation_cpu_offloading: bool = False):
         self.gradient_checkpointing = True
+        self.activation_cpu_offloading = activation_cpu_offloading
 
     def disable_gradient_checkpointing(self):
         self.gradient_checkpointing = False
+        self.activation_cpu_offloading = False
 
     def _forward(self, x: Tensor, vec: Tensor, pe: Tensor, control_lengths: Optional[list[int]] = None) -> Tensor:
         mod, _ = self.modulation(vec)
@@ -783,7 +794,10 @@ class SingleStreamBlock(nn.Module):
 
     def forward(self, x: Tensor, vec: Tensor, pe: Tensor, control_lengths: Optional[list[int]] = None) -> Tensor:
         if self.training and self.gradient_checkpointing:
-            return checkpoint(self._forward, x, vec, pe, control_lengths, use_reentrant=False)
+            forward_fn = self._forward
+            if self.activation_cpu_offloading:
+                forward_fn = create_cpu_offloading_wrapper(forward_fn, self.linear1.weight.device)
+            return checkpoint(forward_fn, x, vec, pe, control_lengths, use_reentrant=False)
         else:
             return self._forward(x, vec, pe, control_lengths)
 
@@ -864,6 +878,7 @@ class Flux(nn.Module):
         self.final_layer = LastLayer(self.hidden_size, 1, self.out_channels)
 
         self.gradient_checkpointing = False
+        self.activation_cpu_offloading = False
         self.blocks_to_swap = None
 
         self.offloader_double = None
@@ -912,8 +927,9 @@ class Flux(nn.Module):
 
         return state_dict
 
-    def enable_gradient_checkpointing(self):
+    def enable_gradient_checkpointing(self, activation_cpu_offloading: bool = False):
         self.gradient_checkpointing = True
+        self.activation_cpu_offloading = activation_cpu_offloading
 
         self.time_in.enable_gradient_checkpointing()
         self.vector_in.enable_gradient_checkpointing()
@@ -921,9 +937,9 @@ class Flux(nn.Module):
             self.guidance_in.enable_gradient_checkpointing()
 
         for block in self.double_blocks + self.single_blocks:
-            block.enable_gradient_checkpointing()
+            block.enable_gradient_checkpointing(activation_cpu_offloading)
 
-        print(f"FLUX: Gradient checkpointing enabled.")
+        print(f"FLUX: Gradient checkpointing enabled. Activation CPU offloading: {activation_cpu_offloading}")
 
     def disable_gradient_checkpointing(self):
         self.gradient_checkpointing = False
@@ -1019,6 +1035,7 @@ class Flux(nn.Module):
         ids = torch.cat((txt_ids, img_ids), dim=1)
         pe = self.pe_embedder(ids)
 
+        input_device = img.device
         for block_idx, block in enumerate(self.double_blocks):
             if self.blocks_to_swap:
                 self.offloader_double.wait_for_block(block_idx)
@@ -1040,6 +1057,9 @@ class Flux(nn.Module):
                 self.offloader_single.submit_move_blocks_forward(self.single_blocks, block_idx)
 
         img = img[:, txt.shape[1] :, ...]
+
+        if img.device != input_device:
+            img = img.to(input_device)
 
         img = self.final_layer(img, vec)  # (N, T, patch_size ** 2 * out_channels)
 

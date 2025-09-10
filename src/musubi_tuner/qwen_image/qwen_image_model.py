@@ -33,6 +33,7 @@ from musubi_tuner.hunyuan_model.attention import attention as hunyuan_attention
 import logging
 
 from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
+from musubi_tuner.utils.model_utils import create_cpu_offloading_wrapper, to_cpu, to_device
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -1000,6 +1001,7 @@ class QwenImageTransformer2DModel(nn.Module):  # ModelMixin, ConfigMixin, PeftAd
         self.proj_out = nn.Linear(self.inner_dim, patch_size * patch_size * self.out_channels, bias=True)
 
         self.gradient_checkpointing = False
+        self.activation_cpu_offloading = False
 
         # offloading
         self.blocks_to_swap = None
@@ -1013,12 +1015,14 @@ class QwenImageTransformer2DModel(nn.Module):  # ModelMixin, ConfigMixin, PeftAd
     def device(self):
         return next(self.parameters()).device
 
-    def enable_gradient_checkpointing(self):
+    def enable_gradient_checkpointing(self, activation_cpu_offloading: bool = False):
         self.gradient_checkpointing = True
-        print("QwenModel: Gradient checkpointing enabled.")
+        self.activation_cpu_offloading = activation_cpu_offloading
+        print(f"QwenModel: Gradient checkpointing enabled. Activation CPU offloading: {activation_cpu_offloading}")
 
     def disable_gradient_checkpointing(self):
         self.gradient_checkpointing = False
+        self.activation_cpu_offloading = False
         print("QwenModel: Gradient checkpointing disabled.")
 
     def enable_block_swap(self, blocks_to_swap: int, device: torch.device, supports_backward: bool):
@@ -1066,6 +1070,8 @@ class QwenImageTransformer2DModel(nn.Module):  # ModelMixin, ConfigMixin, PeftAd
         self.offloader.prepare_block_devices_before_forward(self.transformer_blocks)
 
     def _gradient_checkpointing_func(self, block, *args):
+        if self.activation_cpu_offloading:
+            block = create_cpu_offloading_wrapper(block, self.img_in.weight.device)
         return torch.utils.checkpoint.checkpoint(block, *args, use_reentrant=False)
 
     def forward(
@@ -1140,6 +1146,7 @@ class QwenImageTransformer2DModel(nn.Module):  # ModelMixin, ConfigMixin, PeftAd
         # block expects tensor instead of list
         txt_seq_lens = torch.tensor(txt_seq_lens, device=hidden_states.device) if txt_seq_lens is not None else None
 
+        input_device = hidden_states.device
         for index_block, block in enumerate(self.transformer_blocks):
             if self.blocks_to_swap:
                 self.offloader.wait_for_block(index_block)
@@ -1168,6 +1175,9 @@ class QwenImageTransformer2DModel(nn.Module):  # ModelMixin, ConfigMixin, PeftAd
 
             if self.blocks_to_swap:
                 self.offloader.submit_move_blocks_forward(self.transformer_blocks, index_block)
+
+        if input_device != hidden_states.device:
+            hidden_states = hidden_states.to(input_device)
 
         # Use only the image part (hidden_states) from the dual-stream blocks
         hidden_states = self.norm_out(hidden_states, temb)
