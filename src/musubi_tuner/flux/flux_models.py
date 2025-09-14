@@ -14,7 +14,7 @@ from einops import rearrange
 from torch import Tensor, nn
 from torch.utils.checkpoint import checkpoint
 
-from musubi_tuner.modules.custom_offloading_utils import ModelOffloader, synchronize_device, clean_memory_on_device
+from musubi_tuner.modules.custom_offloading_utils import ModelOffloader
 from musubi_tuner.hunyuan_model.attention import attention as hunyuan_attention
 
 

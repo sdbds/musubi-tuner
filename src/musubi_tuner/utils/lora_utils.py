@@ -7,6 +7,8 @@ import logging
 
 from tqdm import tqdm
 
+from musubi_tuner.utils.device_utils import synchronize_device
+
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
@@ -228,17 +230,22 @@ def load_safetensors_with_fp8_optimization_and_hook(
         for model_file in model_files:
             with MemoryEfficientSafeOpen(model_file) as f:
                 for key in tqdm(f.keys(), desc=f"Loading {os.path.basename(model_file)}", leave=False):
-                    value = f.get_tensor(key)
-                    if weight_hook is not None:
-                        value = weight_hook(key, value)
-                    if move_to_device:
-                        if dit_weight_dtype is None:
-                            value = value.to(calc_device)
-                        else:
-                            value = value.to(calc_device, dtype=dit_weight_dtype)
-                    elif dit_weight_dtype is not None:
-                        value = value.to(dit_weight_dtype)
+                    if weight_hook is None and move_to_device:
+                        value = f.get_tensor(key, device=calc_device, dtype=dit_weight_dtype)
+                    else:
+                        value = f.get_tensor(key)
+                        if weight_hook is not None:
+                            value = weight_hook(key, value)
+                        if move_to_device:
+                            if dit_weight_dtype is None:
+                                value = value.to(calc_device, non_blocking=True)
+                            else:
+                                value = value.to(calc_device, dtype=dit_weight_dtype, non_blocking=True)
+                        elif dit_weight_dtype is not None:
+                            value = value.to(dit_weight_dtype)
 
                     state_dict[key] = value
+        if move_to_device:
+            synchronize_device(calc_device)
 
     return state_dict

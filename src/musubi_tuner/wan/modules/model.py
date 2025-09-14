@@ -11,7 +11,7 @@ import logging
 
 from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
 from musubi_tuner.utils.model_utils import create_cpu_offloading_wrapper
-from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen, load_safetensors
+from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
