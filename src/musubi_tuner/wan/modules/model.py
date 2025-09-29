@@ -631,6 +631,7 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
 
         self.time_embedding = nn.Sequential(nn.Linear(freq_dim, dim), nn.SiLU(), nn.Linear(dim, dim))
         self.time_projection = nn.Sequential(nn.SiLU(), nn.Linear(dim, dim * 6))
+        self.force_v2_1_time_embedding = False  # Override to use 2.1 style time embedding for 2.2 model
 
         # blocks
         cross_attn_type = "t2v_cross_attn" if model_type == "t2v" else "i2v_cross_attn"
@@ -684,6 +685,11 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
     @property
     def device(self):
         return self.patch_embedding.weight.device
+
+    def set_time_embedding_v2_1(self, force_v2_1_time_embedding: bool):
+        self.force_v2_1_time_embedding = force_v2_1_time_embedding
+        if force_v2_1_time_embedding:
+            logger.info("WanModel: Using 2.1 style time embedding for time_projection.")
 
     def fp8_optimization(
         self, state_dict: dict[str, torch.Tensor], device: torch.device, move_to_device: bool, use_scaled_mm: bool = False
@@ -830,9 +836,15 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
         # time embeddings
         # with amp.autocast(dtype=torch.float32):
         with torch.amp.autocast(device_type=device.type, dtype=torch.float32):
-            if self.model_version == "2.1":
+            if self.model_version == "2.1" or self.force_v2_1_time_embedding:  # For Wan2.1
                 e = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, t).float())
                 e0 = self.time_projection(e).unflatten(1, (6, self.dim))
+                # e0: torch.Size([1, 6, 5120]), e: torch.Size([1, 5120]), t: torch.Size([1])
+
+                if self.model_version != "2.1":  # Reshape to be compatible with 2.2 blocks
+                    e0 = e0.unsqueeze(1)
+                    e = e.unsqueeze(1)
+                    t = t.unsqueeze(1).expand(-1, seq_len)
             else:  # For Wan2.2
                 if t.dim() == 1:
                     # t = t.expand(t.size(0), seq_len) # this should be a bug in the original code
@@ -841,6 +853,8 @@ class WanModel(nn.Module):  # ModelMixin, ConfigMixin):
                 t = t.flatten()
                 e = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, t).unflatten(0, (bt, seq_len)).float())
                 e0 = self.time_projection(e).unflatten(2, (6, self.dim))
+                # e0: torch.Size([1, 14040, 6, 5120]), e: torch.Size([1, 14040, 5120]), t: torch.Size([14040])
+
         assert e.dtype == torch.float32 and e0.dtype == torch.float32
 
         # context

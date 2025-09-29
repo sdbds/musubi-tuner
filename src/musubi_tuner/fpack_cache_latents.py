@@ -379,6 +379,10 @@ def main():
 
     args = parser.parse_args()
 
+    if args.disable_cudnn_backend:
+        logger.info("Disabling cuDNN PyTorch backend.")
+        torch.backends.cudnn.enabled = False
+
     if args.vae_dtype is not None:
         raise ValueError("VAE dtype is not supported in FramePack")
     # if args.batch_size != 1:
@@ -406,7 +410,7 @@ def main():
     assert args.vae is not None, "vae checkpoint is required"
 
     logger.info(f"Loading VAE model from {args.vae}")
-    vae = load_vae(args.vae, args.vae_chunk_size, args.vae_spatial_tile_sample_min_size, device=device)
+    vae = load_vae(args.vae, args.vae_chunk_size, args.vae_spatial_tile_sample_min_size, args.vae_tiling, device=device)
     vae.to(device)
 
     logger.info(f"Loading image encoder from {args.image_encoder}")
