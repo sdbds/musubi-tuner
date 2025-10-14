@@ -21,7 +21,7 @@ ftfy==6.3.1
 easydict==1.13
 
 # FLUX.1 Kontext
-sentencepiece==0.2.0
+sentencepiece
 
 # optional dependencies
 ascii-magic==2.3.0
