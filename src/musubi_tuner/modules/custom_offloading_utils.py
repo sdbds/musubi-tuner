@@ -350,7 +350,16 @@ class ModelOffloader(Offloader):
         if not self.forward_only and block_idx >= self.blocks_to_swap:
             return
 
+        # if forward only, we do not swap blocks in forward pass for the middle blocks
+        if self.forward_only and (self.blocks_to_swap <= block_idx < self.num_blocks - self.blocks_to_swap):
+            return
+
         block_idx_to_cpu = block_idx
-        block_idx_to_cuda = self.num_blocks - self.blocks_to_swap + block_idx
-        block_idx_to_cuda = block_idx_to_cuda % self.num_blocks  # this works for forward-only offloading
+        if not self.forward_only or block_idx < self.blocks_to_swap:
+            # move the next block to cuda
+            block_idx_to_cuda = (self.num_blocks - self.blocks_to_swap + block_idx) % self.num_blocks
+        else:
+            # move the previous block to cuda
+            block_idx_to_cuda = block_idx - (self.num_blocks - self.blocks_to_swap)
+
         self._submit_move_blocks(blocks, block_idx_to_cpu, block_idx_to_cuda)
