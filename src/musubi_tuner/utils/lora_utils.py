@@ -55,6 +55,7 @@ def load_safetensors_with_lora_and_fp8(
     dit_weight_dtype: Optional[torch.dtype] = None,
     target_keys: Optional[List[str]] = None,
     exclude_keys: Optional[List[str]] = None,
+    fast_load: bool = False,
 ) -> dict[str, torch.Tensor]:
     """
     Merge LoRA weights into the state dict of a model with fp8 optimization if needed.
@@ -200,6 +201,7 @@ def load_safetensors_with_lora_and_fp8(
         target_keys,
         exclude_keys,
         weight_hook=weight_hook,
+        fast_load=fast_load,
     )
 
     for lora_weight_keys in list_of_lora_weight_keys:
@@ -221,6 +223,7 @@ def load_safetensors_with_fp8_optimization_and_hook(
     target_keys: Optional[List[str]] = None,
     exclude_keys: Optional[List[str]] = None,
     weight_hook: callable = None,
+    fast_load: bool = False,
 ) -> dict[str, torch.Tensor]:
     """
     Load state dict from safetensors files and merge LoRA weights into the state dict with fp8 optimization if needed.
@@ -238,8 +241,9 @@ def load_safetensors_with_fp8_optimization_and_hook(
             f"Loading state dict without FP8 optimization. Dtype of weight: {dit_weight_dtype}, hook enabled: {weight_hook is not None}"
         )
         state_dict = {}
+        disable_mmap = not fast_load  # fast_load=True means disable_mmap=False
         for model_file in model_files:
-            with MemoryEfficientSafeOpen(model_file) as f:
+            with MemoryEfficientSafeOpen(model_file, disable_mmap=disable_mmap) as f:
                 for key in tqdm(f.keys(), desc=f"Loading {os.path.basename(model_file)}", leave=False):
                     if weight_hook is None and move_to_device:
                         value = f.get_tensor(key, device=calc_device, dtype=dit_weight_dtype)

@@ -1258,6 +1258,7 @@ def load_qwen_image_model(
     lora_weights_list: Optional[Dict[str, torch.Tensor]] = None,
     lora_multipliers: Optional[List[float]] = None,
     num_layers: Optional[int] = 60,
+    fast_load: bool = False,
 ) -> QwenImageTransformer2DModel:
     """
     Load a WAN model from the specified checkpoint.
@@ -1285,6 +1286,8 @@ def load_qwen_image_model(
 
     # load model weights with dynamic fp8 optimization and LoRA merging if needed
     logger.info(f"Loading DiT model from {dit_path}, device={loading_device}")
+    if fast_load:
+        logger.info("Fast load enabled: Loading entire model to RAM without memory mapping. This will use more RAM but significantly speeds up model loading.")
 
     sd = load_safetensors_with_lora_and_fp8(
         model_files=dit_path,
@@ -1296,6 +1299,7 @@ def load_qwen_image_model(
         dit_weight_dtype=dit_weight_dtype,
         target_keys=FP8_OPTIMIZATION_TARGET_KEYS,
         exclude_keys=FP8_OPTIMIZATION_EXCLUDE_KEYS,
+        fast_load=fast_load,
     )
 
     # remove "model.diffusion_model." prefix: 1.3B model has this prefix

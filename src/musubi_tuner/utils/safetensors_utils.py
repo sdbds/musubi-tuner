@@ -89,15 +89,17 @@ class MemoryEfficientSafeOpen:
     by using memory mapping for large tensors and avoiding unnecessary copies.
     """
 
-    def __init__(self, filename):
+    def __init__(self, filename, disable_mmap=False):
         """Initialize the SafeTensor reader.
 
         Args:
             filename (str): Path to the safetensors file to read.
+            disable_mmap (bool): If True, disable memory mapping for large tensors to load entire file to RAM.
         """
         self.filename = filename
         self.file = open(filename, "rb")
         self.header, self.header_size = self._read_header()
+        self.disable_mmap = disable_mmap
 
     def __enter__(self):
         """Enter context manager."""
@@ -179,7 +181,8 @@ class MemoryEfficientSafeOpen:
         # Use memmap for large tensors to avoid intermediate copies.
         # If device is cpu, tensor is not copied to gpu, so using memmap locks the file, which is not desired.
         # So we only use memmap if device is not cpu.
-        if num_bytes > 10 * 1024 * 1024 and device is not None and device.type != "cpu":
+        # If disable_mmap is True, skip memory mapping to load entire model to RAM (fast_load mode)
+        if not self.disable_mmap and num_bytes > 10 * 1024 * 1024 and device is not None and device.type != "cpu":
             # Create memory map for zero-copy reading
             mm = np.memmap(self.filename, mode="c", dtype=np.uint8, offset=tensor_offset, shape=(num_bytes,))
             byte_tensor = torch.from_numpy(mm)  # zero copy

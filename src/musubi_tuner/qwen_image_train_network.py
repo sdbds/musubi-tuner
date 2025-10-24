@@ -329,6 +329,7 @@ class QwenImageNetworkTrainer(NetworkTrainer):
             dit_weight_dtype,
             args.fp8_scaled,
             num_layers=args.num_layers,
+            fast_load=args.fast_load,
         )
         return model
 
