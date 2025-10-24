@@ -1,4 +1,5 @@
 import os
+import logging
 from typing import List, Tuple, Optional, Union, Dict
 import accelerate
 from einops import rearrange
@@ -6,6 +7,8 @@ from einops import rearrange
 import torch
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
+
+logger = logging.getLogger(__name__)
 
 from musubi_tuner.hunyuan_model.activation_layers import get_activation_layer
 from musubi_tuner.hunyuan_model.norm_layers import get_norm_layer
@@ -1018,6 +1021,8 @@ def load_transformer(dit_path, attn_mode, split_attn, device, dtype, in_channels
         device = torch.device(device) if device is not None else None
         # fast_load: disable_mmap=False speeds up loading by loading entire model to RAM without memory mapping
         disable_mmap = not fast_load
+        if fast_load:
+            logger.info("Fast load enabled: Loading entire model to RAM without memory mapping. This will use more RAM but significantly speeds up model loading.")
         state_dict = load_safetensors(dit_path, device=device, disable_mmap=disable_mmap, dtype=dtype)
         transformer.load_state_dict(state_dict, strict=True, assign=True)
     else:
