@@ -63,13 +63,14 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
         if "-00001-of-00" in dit_path:
             logger.info("Pruned model detection is disabled because the weights are split into multiple files.")
             model = qwen_image_model.load_qwen_image_model(
-                accelerator.device, dit_path, attn_mode, split_attn, loading_device, dit_weight_dtype, args.fp8_scaled
+                accelerator.device, dit_path, attn_mode, split_attn, loading_device, dit_weight_dtype, args.fp8_scaled, fast_load=args.fast_load
             )
             return model
 
         # Pruned model with sparse index support
         block_indices = set()
-        with MemoryEfficientSafeOpen(dit_path) as f:
+        disable_mmap = not args.fast_load  # fast_load=True means disable_mmap=False
+        with MemoryEfficientSafeOpen(dit_path, disable_mmap=disable_mmap) as f:
             for key in f.keys():
                 if key.startswith("transformer_blocks."):
                     block_indices.add(int(key.split(".")[1]))
@@ -87,12 +88,16 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
 
         # load weights from disk
         logger.info(f"Loading weights from {dit_path}")
+        if args.fast_load:
+            logger.info("Fast load enabled: Loading entire model to RAM without memory mapping. This will use more RAM but significantly speeds up model loading.")
         if block_index_map is None:
-            state_dict = load_safetensors(dit_path, device=loading_device, disable_mmap=True, dtype=dit_weight_dtype)
+            disable_mmap = not args.fast_load  # fast_load=True means disable_mmap=False
+            state_dict = load_safetensors(dit_path, device=loading_device, disable_mmap=disable_mmap, dtype=dit_weight_dtype)
         else:
             loading_device = torch.device(loading_device) if loading_device is not None else None
             state_dict = {}
-            with MemoryEfficientSafeOpen(dit_path) as f:
+            disable_mmap = not args.fast_load  # fast_load=True means disable_mmap=False
+            with MemoryEfficientSafeOpen(dit_path, disable_mmap=disable_mmap) as f:
                 for key in f.keys():
                     state_dict_key = key
                     if key.startswith("transformer_blocks."):
