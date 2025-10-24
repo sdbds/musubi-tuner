@@ -998,7 +998,7 @@ def load_state_dict(model, model_path):
     return model
 
 
-def load_transformer(dit_path, attn_mode, split_attn, device, dtype, in_channels=16) -> HYVideoDiffusionTransformer:
+def load_transformer(dit_path, attn_mode, split_attn, device, dtype, in_channels=16, fast_load=False) -> HYVideoDiffusionTransformer:
     # =========================== Build main model ===========================
     factor_kwargs = {"device": device, "dtype": dtype, "attn_mode": attn_mode, "split_attn": split_attn}
     latent_channels = 16
@@ -1016,7 +1016,9 @@ def load_transformer(dit_path, attn_mode, split_attn, device, dtype, in_channels
     if os.path.splitext(dit_path)[-1] == ".safetensors":
         # loading safetensors: may be already fp8
         device = torch.device(device) if device is not None else None
-        state_dict = load_safetensors(dit_path, device=device, disable_mmap=True, dtype=dtype)
+        # fast_load: disable_mmap=False speeds up loading by loading entire model to RAM without memory mapping
+        disable_mmap = not fast_load
+        state_dict = load_safetensors(dit_path, device=device, disable_mmap=disable_mmap, dtype=dtype)
         transformer.load_state_dict(state_dict, strict=True, assign=True)
     else:
         transformer = load_state_dict(transformer, dit_path)
