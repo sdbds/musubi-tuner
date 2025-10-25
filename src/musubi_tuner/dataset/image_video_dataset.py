@@ -853,7 +853,7 @@ class ImageDirectoryDatasource(ImageDatasource):
             self.control_paths = {}
 
             # sort image paths for matching control images properly: longer names first
-            image_paths_sorted = sorted(self.image_paths, key=lambda p: -len(os.path.basename(p)))
+            image_paths_sorted = sorted(self.image_paths, key=lambda p: len(os.path.basename(p)), reverse=True)
 
             # glob control images first
             all_control_image_paths = set(glob_images(self.control_directory))
