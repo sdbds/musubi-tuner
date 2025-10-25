@@ -866,8 +866,7 @@ class ImageDirectoryDatasource(ImageDatasource):
                 potential_paths = [p for p in all_control_image_paths if os.path.basename(p).startswith(image_basename_no_ext)]
 
                 # remove to avoid duplicate matching
-                for p in potential_paths:
-                    all_control_image_paths.remove(p)
+                all_control_image_paths.difference_update(potential_paths)
 
                 if potential_paths:
                     # sort by the digits (`_0000`) suffix, prefer the one without the suffix
