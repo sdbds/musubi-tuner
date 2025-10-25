@@ -22,8 +22,9 @@ from musubi_tuner.hv_train_network import (
     setup_parser_common,
     read_config_from_file,
 )
-import logging
+from musubi_tuner.utils.sai_model_spec import CUSTOM_ARCH_QWEN_IMAGE_EDIT_PLUS
 
+import logging
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -52,6 +53,9 @@ class QwenImageNetworkTrainer(NetworkTrainer):
         self._control_training = False
         self.default_guidance_scale = 1.0  # not used
         self.is_edit = args.edit or args.edit_plus
+
+        if args.metadata_arch is None and args.edit_plus:
+            args.metadata_arch = CUSTOM_ARCH_QWEN_IMAGE_EDIT_PLUS  # to notify Edit-Plus mode for sai_model_spec
 
     def process_sample_prompts(
         self,
