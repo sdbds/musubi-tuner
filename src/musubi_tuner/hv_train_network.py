@@ -2084,14 +2084,13 @@ class NetworkTrainer:
                 self.architecture,
                 time.time(),
                 title,
-                None,
+                args.metadata_reso,
                 args.metadata_author,
                 args.metadata_description,
                 args.metadata_license,
                 args.metadata_tags,
                 timesteps=md_timesteps,
-                custom_res=args.meta_res,
-                custom_arch=args.meta_arch,
+                custom_arch=args.metadata_arch,
             )
 
             metadata_to_save.update(sai_metadata)
@@ -2842,16 +2841,16 @@ def setup_parser_common() -> argparse.ArgumentParser:
         help="tags for model metadata, separated by comma / メタデータに書き込まれるモデルタグ、カンマ区切り",
     )
     parser.add_argument(
-        "--meta_res",
+        "--metadata_reso",
         type=str,
         default=None,
-        help="custom resolution metadata for Qwen-Image models (e.g., '1328x1328') / Qwen-Imageモデル用のカスタム解像度メタデータ（例：'1328x1328'）",
+        help="resolution for model metadata (e.g., `1024,1024`) / メタデータに書き込まれるモデル解像度（例: `1024,1024`）",
     )
     parser.add_argument(
-        "--meta_arch",
+        "--metadata_arch",
         type=str,
         default=None,
-        help="custom architecture metadata for Qwen-Image models (e.g., 'qwen-image-edit-plus') / Qwen-Imageモデル用のカスタムアーキテクチャメタデータ（例：'qwen-image-edit-plus'）",
+        help="architecture for model metadata / メタデータに書き込まれるモデルアーキテクチャ",
     )
 
     # huggingface settings

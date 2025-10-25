@@ -70,6 +70,8 @@ ARCH_FRAMEPACK = "framepack"
 ARCH_FLUX_KONTEXT = "Flux.1-dev"
 ARCH_QWEN_IMAGE = "Qwen-Image"
 ARCH_QWEN_IMAGE_EDIT = "Qwen-Image-Edit"
+ARCH_QWEN_IMAGE_EDIT_PLUS = "Qwen-Image-Edit-Plus"
+CUSTOM_ARCH_QWEN_IMAGE_EDIT_PLUS = "@@Qwen-Image-Edit-Plus@@"  # special custom architecture name for Qwen-Image-Edit-Plus
 
 ADAPTER_LORA = "lora"
 
@@ -118,7 +120,7 @@ def build_metadata(
     architecture: str,
     timestamp: float,
     title: Optional[str] = None,
-    reso: Optional[Union[int, Tuple[int, int]]] = None,
+    reso: Optional[Union[str, int, Tuple[int, int]]] = None,
     author: Optional[str] = None,
     description: Optional[str] = None,
     license: Optional[str] = None,
@@ -126,8 +128,6 @@ def build_metadata(
     merged_from: Optional[str] = None,
     timesteps: Optional[Tuple[int, int]] = None,
     is_lora: bool = True,
-    is_edit_plus: bool = False,
-    custom_res: Optional[str] = None,
     custom_arch: Optional[str] = None,
 ):
     metadata = {}
@@ -155,13 +155,21 @@ def build_metadata(
         arch = ARCH_QWEN_IMAGE
         impl = IMPL_QWEN_IMAGE
     elif architecture == ARCHITECTURE_QWEN_IMAGE_EDIT:
-        arch = ARCH_QWEN_IMAGE_EDIT
+        # We treat Qwen-Image-Edit and Qwen-Image-Edit-Plus the same for architecture and implementation
+        # So we must distinguish them by custom_arch if needed
         impl = IMPL_QWEN_IMAGE_EDIT
+        if custom_arch is None:
+            arch = ARCH_QWEN_IMAGE_EDIT
+        elif custom_arch == CUSTOM_ARCH_QWEN_IMAGE_EDIT_PLUS:
+            arch = ARCH_QWEN_IMAGE_EDIT_PLUS
+            custom_arch = None  # clear custom_arch to avoid override later
+        else:
+            arch = ARCH_QWEN_IMAGE_EDIT  # override with custom_arch later
     else:
         raise ValueError(f"Unknown architecture: {architecture}")
 
-    # Override with custom architecture if provided (only for Qwen-Image models)
-    if custom_arch is not None and architecture in (ARCHITECTURE_QWEN_IMAGE, ARCHITECTURE_QWEN_IMAGE_EDIT):
+    # Override with custom architecture if provided
+    if custom_arch is not None:
         arch = custom_arch
 
     if is_lora:
@@ -207,32 +215,25 @@ def build_metadata(
     date = datetime.datetime.fromtimestamp(int_ts).isoformat()
     metadata["modelspec.date"] = date
 
-    if custom_res is not None:
-        # Use custom resolution if provided (only for Qwen-Image models)
-        if architecture in (ARCHITECTURE_QWEN_IMAGE, ARCHITECTURE_QWEN_IMAGE_EDIT):
-            # Custom resolution should be in format like "1328x1328"
-            metadata["modelspec.resolution"] = custom_res
-        else:
-            # For non-Qwen models, still use the custom resolution
-            metadata["modelspec.resolution"] = custom_res
+    if reso is not None:
+        # comma separated to tuple
+        if isinstance(reso, str):
+            reso = tuple(map(int, reso.split(",")))
+        if len(reso) == 1:
+            reso = (reso[0], reso[0])
     else:
-        if reso is not None:
-            # comma separated to tuple
-            if isinstance(reso, str):
-                reso = tuple(map(int, reso.split(",")))
-            if len(reso) == 1:
-                reso = (reso[0], reso[0])
+        # resolution is defined in dataset, so use default here
+        # Use 1328x1328 for Qwen-Image models, 1024x1024 for Qwen-Image-Edit models, and 1280x720 for others (this is just a placeholder, actual resolution may vary)
+        if architecture == ARCHITECTURE_QWEN_IMAGE:
+            reso = (1328, 1328)
+        elif architecture == ARCHITECTURE_QWEN_IMAGE_EDIT:
+            reso = (1024, 1024)
         else:
-            # resolution is defined in dataset, so use default
-            # Use 1328x1328 for Qwen Image models, 1280x720 for others
-            if architecture in (ARCHITECTURE_QWEN_IMAGE, ARCHITECTURE_QWEN_IMAGE_EDIT):
-                reso = (1328, 1328)
-            else:
-                reso = (1280, 720)
-        if isinstance(reso, int):
-            reso = (reso, reso)
+            reso = (1280, 720)
+    if isinstance(reso, int):
+        reso = (reso, reso)
 
-        metadata["modelspec.resolution"] = f"{reso[0]}x{reso[1]}"
+    metadata["modelspec.resolution"] = f"{reso[0]}x{reso[1]}"
 
     # metadata["modelspec.prediction_type"] = PRED_TYPE_EPSILON
     del metadata["modelspec.prediction_type"]

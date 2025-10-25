@@ -478,7 +478,7 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
                 self.architecture,
                 time.time(),
                 title,
-                None,
+                args.metadata_reso,
                 args.metadata_author,
                 args.metadata_description,
                 args.metadata_license,
@@ -486,8 +486,7 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
                 timesteps=md_timesteps,
                 is_lora=False,
                 is_edit_plus=args.edit_plus,
-                custom_res=args.meta_res,
-                custom_arch=args.meta_arch,
+                custom_arch=args.metadata_arch,
             )
 
             metadata_to_save.update(sai_metadata)
