@@ -863,7 +863,12 @@ class ImageDirectoryDatasource(ImageDatasource):
                 image_basename_no_ext = os.path.splitext(image_basename)[0]
 
                 # find matching control images
-                potential_paths = [p for p in all_control_image_paths if os.path.basename(p).startswith(image_basename_no_ext)]
+                potential_paths = [
+                    p
+                    for p in all_control_image_paths
+                    if os.path.basename(p).startswith(image_basename_no_ext + ".")
+                    or os.path.basename(p).startswith(image_basename_no_ext + "_")
+                ]
 
                 # remove to avoid duplicate matching
                 all_control_image_paths.difference_update(potential_paths)
