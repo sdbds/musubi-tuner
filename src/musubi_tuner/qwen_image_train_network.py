@@ -54,8 +54,8 @@ class QwenImageNetworkTrainer(NetworkTrainer):
         self.default_guidance_scale = 1.0  # not used
         self.is_edit = args.edit or args.edit_plus
 
-        if args.custom_arch is None and args.edit_plus:
-            args.custom_arch = CUSTOM_ARCH_QWEN_IMAGE_EDIT_PLUS  # to notify Edit-Plus mode for sai_model_spec
+        if args.metadata_arch is None and args.edit_plus:
+            args.metadata_arch = CUSTOM_ARCH_QWEN_IMAGE_EDIT_PLUS  # to notify Edit-Plus mode for sai_model_spec
 
     def process_sample_prompts(
         self,
