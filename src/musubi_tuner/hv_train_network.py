@@ -1547,7 +1547,7 @@ class NetworkTrainer:
         loading_device: str,
         dit_weight_dtype: Optional[torch.dtype],
     ):
-        transformer = load_transformer(dit_path, attn_mode, split_attn, loading_device, dit_weight_dtype, args.dit_in_channels, args.fast_load)
+        transformer = load_transformer(dit_path, attn_mode, split_attn, loading_device, dit_weight_dtype, args.dit_in_channels, args.disable_numpy_memmap)
 
         if args.img_in_txt_in_offloading:
             logger.info("Enable offloading img_in and txt_in to CPU")
@@ -2590,9 +2590,9 @@ def setup_parser_common() -> argparse.ArgumentParser:
         help="offload img_in and txt_in to cpu / img_inとtxt_inをCPUにオフロードする",
     )
     parser.add_argument(
-        "--fast_load",
+        "--disable_numpy_memmap",
         action="store_true",
-        help="Load model to RAM without memory mapping for faster loading. Increases RAM usage but speeds up model loading. Useful for block swap or LoRA training.",
+        help="Disable numpy memory mapping for model loading. Loads entire model to RAM for faster loading. Increases RAM usage but speeds up model loading. Useful for block swap or LoRA training.",
     )
 
     # parser.add_argument("--flow_shift", type=float, default=7.0, help="Shift factor for flow matching schedulers")
