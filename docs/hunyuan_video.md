@@ -235,6 +235,8 @@ If you're running low on VRAM, use `--blocks_to_swap` to offload some blocks to 
 
 `--gradient_checkpointing_cpu_offload` can be used to offload activations to CPU when using gradient checkpointing. This can further reduce VRAM usage, but may slow down training. This option is especially useful when the latent resolution (or video length) is high and VRAM is limited. This option must be used together with `--gradient_checkpointing`. See [PR #537](https://github.com/kohya-ss/musubi-tuner/pull/537) for more details.
 
+`--disable_numpy_memmap` disables numpy memory mapping for model loading, loading the entire model to RAM for faster loading. Increases RAM usage but significantly speeds up model loading, especially useful for block swap or LoRA training.
+
 ### Attention
 
 Use `--sdpa` for PyTorch's scaled dot product attention. Use `--flash_attn` for [FlashAttention](https://github.com/Dao-AILab/flash-attention). Use `--xformers` for xformers, but specify `--split_attn` when using xformers. `--sage_attn` for SageAttention, but SageAttention is not yet supported for training, so it raises a ValueError.
@@ -289,6 +291,8 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/mus
 VRAMが足りない場合は、`--blocks_to_swap`を指定して、一部のブロックをCPUにオフロードしてください。最大36が指定できます。
 
 （block swapのアイデアは2kpr氏の実装に基づくものです。2kpr氏にあらためて感謝します。）
+
+`--disable_numpy_memmap`は、モデル読み込み時のnumpyメモリマッピングを無効化し、モデル全体をRAMに読み込んで読み込みを高速化します。RAM使用量は増加しますが、モデルの読み込みが大幅に高速化され、ブロックスワップやLoRA学習で特に有用です。
 
 **Attention**
 
