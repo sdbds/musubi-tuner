@@ -868,7 +868,7 @@ class ImageDirectoryDatasource(ImageDatasource):
                 # remove to avoid duplicate matching
                 for p in potential_paths:
                     all_control_image_paths.remove(p)
-                
+
                 if potential_paths:
                     # sort by the digits (`_0000`) suffix, prefer the one without the suffix
                     def sort_key(path):
