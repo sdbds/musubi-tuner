@@ -674,12 +674,12 @@ class Attention(nn.Module):
         hidden_states: torch.FloatTensor,  # Image stream
         encoder_hidden_states: torch.FloatTensor = None,  # Text stream
         encoder_hidden_states_mask: torch.FloatTensor = None,
-        attention_mask: Optional[torch.FloatTensor] = None,
+        attention_mask: Optional[torch.FloatTensor] = None,  # We ignore this and use encoder_hidden_states_mask instead
         image_rotary_emb: Optional[torch.Tensor] = None,
         txt_seq_lens: Optional[torch.Tensor] = None,
     ) -> torch.FloatTensor:
-        if encoder_hidden_states is None:
-            raise ValueError("QwenDoubleStreamAttnProcessor2_0 requires encoder_hidden_states (text stream)")
+        if encoder_hidden_states is None and txt_seq_lens is None:
+            raise ValueError("QwenDoubleStreamAttnProcessor2_0 requires encoder_hidden_states (text stream) or txt_seq_lens.")
 
         # Compute QKV for image stream (sample projections)
         img_query = self.to_q(hidden_states)
@@ -727,6 +727,23 @@ class Attention(nn.Module):
         del img_value, txt_value
 
         # Compute joint attention
+        if not self.split_attn:
+            # create attention mask for joint attention
+            if encoder_hidden_states_mask is not None:
+                # encoder_hidden_states_mask: [B, S_txt]
+                attention_mask = torch.cat(
+                    [
+                        torch.ones(
+                            (encoder_hidden_states_mask.shape[0], seq_img), device=encoder_hidden_states_mask.device, dtype=torch.bool
+                        ),
+                        encoder_hidden_states_mask.to(torch.bool)
+                    ]
+                    , dim=1
+                )  # [B, S_img + S_txt]
+                attention_mask = attention_mask[:, None, None, :]  # [B, 1, 1, S] for scaled_dot_product_attention
+            else:
+                attention_mask = None
+
         # joint_query: [B, S, H, D], joint_key: [B, S, H, D], joint_value: [B, S, H, D]
         total_len = seq_img + txt_seq_lens
         qkv = [joint_query, joint_key, joint_value]
