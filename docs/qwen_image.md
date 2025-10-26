@@ -305,7 +305,7 @@ Finetuningは専用のスクリプト`qwen_image_train.py`を使用します。�
 - `--fused_backward_pass`: Adafactor使用時に、backward pass中のVRAM使用量を削減します。
 - `--mem_eff_save`: チェックポイント保存時のメインメモリ（RAM）使用量を削減します。
 - `--blocks_to_swap`: モデルのブロックをVRAMとメインメモリ間でスワップし、VRAM使用量を削減します。VRAMが少ない場合に有効です。
-- `--disable_numpy_memmap`: モデル読み込み時のnumpyメモリマッピングを無効化し、モデル全体をRAMに読み込んで読み込みを高速化します。RAM使用量は増加しますが、モデルの読み込みが大幅に高速化され、ブロックスワップ学習で特に有用です。
+- `--disable_numpy_memmap`: モデル読み込み時のnumpyメモリマッピングを無効化し、標準のファイル読み込みで読み込みを行います。RAM使用量は増加しますが、場合によってはモデルの読み込みが高速化されます。
 
 `--full_bf16`はVRAM使用量を約20GB削減しますが、重みがbfloat16で保持されるため、モデルの精度に影響を与える可能性があります。オプティマイザの状態はfloat32で保持されます。また、効率的な学習のために、stochastic roundingをサポートするオプティマイザとの併用が推奨されます。このリポジトリでは、`adafactor`オプティマイザに`--fused_backward_pass`オプションの組み合わせでstochastic roundingをサポートしています。
 
