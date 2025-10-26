@@ -478,7 +478,7 @@ class WanNetworkTrainer(NetworkTrainer):
             loading_device,
             dit_weight_dtype,
             args.fp8_scaled,
-            args.disable_numpy_memmap,
+            disable_numpy_memmap=args.disable_numpy_memmap,
         )
         if args.force_v2_1_time_embedding:
             model.set_time_embedding_v2_1(True)
@@ -495,7 +495,7 @@ class WanNetworkTrainer(NetworkTrainer):
                 "cpu" if args.offload_inactive_dit else loading_device,
                 dit_weight_dtype,
                 args.fp8_scaled,
-                args.disable_numpy_memmap,
+                disable_numpy_memmap=args.disable_numpy_memmap,
             )
             if args.force_v2_1_time_embedding:
                 model_high_noise.set_time_embedding_v2_1(True)
