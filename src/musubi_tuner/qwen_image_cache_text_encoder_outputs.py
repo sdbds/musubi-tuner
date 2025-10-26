@@ -44,7 +44,9 @@ def encode_and_save_batch(
         for item in batch:
             # item.control_content: list of images (H, W, C), optional (but should be provided for Qwen-Image-Edit)
             if item.control_content is None or len(item.control_content) == 0:
+                # all item should have same number of control images
                 logger.warning(f"Item {item.item_key} has no control content for Qwen-Image-Edit, saving without control images.")
+                continue
 
             # item.control_content, list of np.ndarray, 0-255
             control_content = []
@@ -67,7 +69,7 @@ def encode_and_save_batch(
 
     for i, item in enumerate(batch):
         print(
-            f"Item {i}: {item.item_key}, prompt: {item.caption}, control images: {[im.shape for im in images[i]] if images is not None else None}"
+            f"Item {i}: {item.item_key}, prompt: {item.caption}, control images: {[im.shape for im in images[i] if im is not None] if images is not None else None}"
         )
 
     # encode prompt

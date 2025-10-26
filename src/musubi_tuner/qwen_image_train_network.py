@@ -366,16 +366,19 @@ class QwenImageNetworkTrainer(NetworkTrainer):
         img_seq_len = noisy_model_input.shape[1]
 
         # control
+        num_control_images = 0
         if is_edit:
-            num_control_images = 0
             while True:
                 key = f"latents_control_{num_control_images}"
                 if key in batch:
                     num_control_images += 1
                 else:
                     break
-            assert num_control_images > 0, "No control latents found in the batch for Qwen-Image-Edit"
-
+            if num_control_images == 0:
+                is_edit = False # no control images found, treat as text-to-image
+            # assert num_control_images > 0, "No control latents found in the batch for Qwen-Image-Edit"
+            
+        if is_edit:
             latents_control = []
             latents_control_shapes = []
             for i in range(num_control_images):
