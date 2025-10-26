@@ -64,6 +64,7 @@ If you find this project helpful, please consider supporting its development via
 GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
 - October 26, 2025
+    - Fixed a bug in Qwen-Image training where attention calculations were incorrect when the batch size was 2 or more and `--split_attn` was not specified. See [PR #688](https://github.com/kohya-ss/musubi-tuner/pull/688).
     - Added `--disable_numpy_memmap` option to Wan, FramePack, and Qwen-Image training and inference scripts. Thank you FurkanGozukara for [PR #681](https://github.com/kohya-ss/musubi-tuner/pull/681). Also see [PR #687](https://github.com/kohya-ss/musubi-tuner/pull/687).
         - When specified, this option disables numpy memory mapping during model loading. This may speed up model loading in some environments (e.g., RunPod), but increases RAM usage.
 

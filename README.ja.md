@@ -59,6 +59,7 @@
 GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
 - 2025/10/26
+    - Qwen-Imageの学習で、バッチサイズが2以上で、`--split_attn`が指定されていない場合に、Attentionの計算が正しく行われない不具合を修正しました。[PR #688](https://github.com/kohya-ss/musubi-tuner/pull/688)
     - Wan、FramePack、Qwen-Imageの学習・推論スクリプトに`--disable_numpy_memmap`オプションを追加しました。[PR #681](https://github.com/kohya-ss/musubi-tuner/pull/681) および [PR #687](https://github.com/kohya-ss/musubi-tuner/pull/687)。FurkanGozukara氏に感謝します。
         - このオプションを指定すると、モデルの読み込み時にnumpyのメモリマッピングを無効にします。一部の環境（RunPodなど）でモデル読み込みが高速化される可能性があります。ただし、RAM使用量が増加します。
 
