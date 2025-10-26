@@ -645,6 +645,7 @@ def load_dit_model(
         lora_weights_list=lora_weights_list,
         lora_multipliers=lora_multipliers,
         use_scaled_mm=args.fp8_fast,
+        disable_numpy_memmap=args.disable_numpy_memmap,
     )
     if args.force_v2_1_time_embedding:
         model.set_time_embedding_v2_1(True)

@@ -1,5 +1,4 @@
 import os
-import logging
 from typing import List, Tuple, Optional, Union, Dict
 import accelerate
 from einops import rearrange
@@ -7,8 +6,6 @@ from einops import rearrange
 import torch
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
-
-logger = logging.getLogger(__name__)
 
 from musubi_tuner.hunyuan_model.activation_layers import get_activation_layer
 from musubi_tuner.hunyuan_model.norm_layers import get_norm_layer
@@ -1001,9 +998,7 @@ def load_state_dict(model, model_path):
     return model
 
 
-def load_transformer(
-    dit_path, attn_mode, split_attn, device, dtype, in_channels=16, disable_numpy_memmap=False
-) -> HYVideoDiffusionTransformer:
+def load_transformer(dit_path, attn_mode, split_attn, device, dtype, in_channels=16) -> HYVideoDiffusionTransformer:
     # =========================== Build main model ===========================
     factor_kwargs = {"device": device, "dtype": dtype, "attn_mode": attn_mode, "split_attn": split_attn}
     latent_channels = 16
@@ -1021,13 +1016,7 @@ def load_transformer(
     if os.path.splitext(dit_path)[-1] == ".safetensors":
         # loading safetensors: may be already fp8
         device = torch.device(device) if device is not None else None
-        # disable_numpy_memmap: loads entire model to RAM without numpy memory mapping for faster loading
-        safetensors_disable_mmap = disable_numpy_memmap
-        if disable_numpy_memmap:
-            logger.info(
-                "Disabling numpy memory mapping: Loading entire model to RAM. This will use more RAM but significantly speeds up model loading."
-            )
-        state_dict = load_safetensors(dit_path, device=device, disable_mmap=safetensors_disable_mmap, dtype=dtype)
+        state_dict = load_safetensors(dit_path, device=device, disable_mmap=True, dtype=dtype)
         transformer.load_state_dict(state_dict, strict=True, assign=True)
     else:
         transformer = load_state_dict(transformer, dit_path)

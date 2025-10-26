@@ -94,10 +94,6 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
 
         # load weights from disk
         logger.info(f"Loading weights from {dit_path}")
-        if args.disable_numpy_memmap:
-            logger.info(
-                "Disabling numpy memory mapping: Loading entire model to RAM. This will use more RAM but significantly speeds up model loading."
-            )
         if block_index_map is None:
             state_dict = load_safetensors(
                 dit_path, device=loading_device, disable_mmap=args.disable_numpy_memmap, dtype=dit_weight_dtype

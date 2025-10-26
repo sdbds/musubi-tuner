@@ -471,6 +471,7 @@ def load_dit_model(args: argparse.Namespace, device: torch.device) -> HunyuanVid
         for_inference=True,
         lora_weights_list=lora_weights_list,
         lora_multipliers=args.lora_multiplier,
+        disable_numpy_memmap=args.disable_numpy_memmap,
     )
 
     # apply RoPE scaling factor

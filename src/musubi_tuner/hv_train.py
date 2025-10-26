@@ -800,13 +800,7 @@ class FineTuningTrainer:
                 "either --sdpa, --flash-attn, --sage-attn or --xformers must be specified / --sdpa, --flash-attn, --sage-attn, --xformersのいずれかを指定してください"
             )
         transformer = load_transformer(
-            args.dit,
-            attn_mode,
-            args.split_attn,
-            loading_device,
-            None,
-            in_channels=args.dit_in_channels,
-            disable_numpy_memmap=args.disable_numpy_memmap,
+            args.dit, attn_mode, args.split_attn, loading_device, None, in_channels=args.dit_in_channels
         )  # load as is
 
         if blocks_to_swap > 0:
@@ -1481,11 +1475,6 @@ def setup_parser() -> argparse.ArgumentParser:
         "--img_in_txt_in_offloading",
         action="store_true",
         help="offload img_in and txt_in to cpu / img_inとtxt_inをCPUにオフロードする",
-    )
-    parser.add_argument(
-        "--disable_numpy_memmap",
-        action="store_true",
-        help="Disable numpy memory mapping for model loading. Loads entire model to RAM for faster loading. Increases RAM usage but speeds up model loading. Useful for block swap or LoRA training.",
     )
 
     # parser.add_argument("--flow_shift", type=float, default=7.0, help="Shift factor for flow matching schedulers")
