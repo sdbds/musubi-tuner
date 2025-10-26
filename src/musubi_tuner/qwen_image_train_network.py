@@ -108,7 +108,7 @@ class QwenImageNetworkTrainer(NetworkTrainer):
 
                     prompt_dict["control_image_tensors"] = control_image_tensors
                 else:
-                    control_image_paths, control_image_tensors, control_image_nps = None, None, None
+                    control_image_paths, control_image_tensors = None, None
 
                 if "negative_prompt" not in prompt_dict:
                     prompt_dict["negative_prompt"] = " "
