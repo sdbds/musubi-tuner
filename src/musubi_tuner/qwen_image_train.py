@@ -63,7 +63,14 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
         if "-00001-of-00" in dit_path:
             logger.info("Pruned model detection is disabled because the weights are split into multiple files.")
             model = qwen_image_model.load_qwen_image_model(
-                accelerator.device, dit_path, attn_mode, split_attn, loading_device, dit_weight_dtype, args.fp8_scaled, disable_numpy_memmap=args.disable_numpy_memmap
+                accelerator.device,
+                dit_path,
+                attn_mode,
+                split_attn,
+                loading_device,
+                dit_weight_dtype,
+                args.fp8_scaled,
+                disable_numpy_memmap=args.disable_numpy_memmap,
             )
             return model
 
@@ -88,9 +95,13 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
         # load weights from disk
         logger.info(f"Loading weights from {dit_path}")
         if args.disable_numpy_memmap:
-            logger.info("Disabling numpy memory mapping: Loading entire model to RAM. This will use more RAM but significantly speeds up model loading.")
+            logger.info(
+                "Disabling numpy memory mapping: Loading entire model to RAM. This will use more RAM but significantly speeds up model loading."
+            )
         if block_index_map is None:
-            state_dict = load_safetensors(dit_path, device=loading_device, disable_mmap=args.disable_numpy_memmap, dtype=dit_weight_dtype)
+            state_dict = load_safetensors(
+                dit_path, device=loading_device, disable_mmap=args.disable_numpy_memmap, dtype=dit_weight_dtype
+            )
         else:
             loading_device = torch.device(loading_device) if loading_device is not None else None
             state_dict = {}

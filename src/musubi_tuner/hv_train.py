@@ -800,7 +800,13 @@ class FineTuningTrainer:
                 "either --sdpa, --flash-attn, --sage-attn or --xformers must be specified / --sdpa, --flash-attn, --sage-attn, --xformersのいずれかを指定してください"
             )
         transformer = load_transformer(
-            args.dit, attn_mode, args.split_attn, loading_device, None, in_channels=args.dit_in_channels, disable_numpy_memmap=args.disable_numpy_memmap
+            args.dit,
+            attn_mode,
+            args.split_attn,
+            loading_device,
+            None,
+            in_channels=args.dit_in_channels,
+            disable_numpy_memmap=args.disable_numpy_memmap,
         )  # load as is
 
         if blocks_to_swap > 0:

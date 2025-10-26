@@ -1001,7 +1001,9 @@ def load_state_dict(model, model_path):
     return model
 
 
-def load_transformer(dit_path, attn_mode, split_attn, device, dtype, in_channels=16, disable_numpy_memmap=False) -> HYVideoDiffusionTransformer:
+def load_transformer(
+    dit_path, attn_mode, split_attn, device, dtype, in_channels=16, disable_numpy_memmap=False
+) -> HYVideoDiffusionTransformer:
     # =========================== Build main model ===========================
     factor_kwargs = {"device": device, "dtype": dtype, "attn_mode": attn_mode, "split_attn": split_attn}
     latent_channels = 16
@@ -1022,7 +1024,9 @@ def load_transformer(dit_path, attn_mode, split_attn, device, dtype, in_channels
         # disable_numpy_memmap: loads entire model to RAM without numpy memory mapping for faster loading
         safetensors_disable_mmap = disable_numpy_memmap
         if disable_numpy_memmap:
-            logger.info("Disabling numpy memory mapping: Loading entire model to RAM. This will use more RAM but significantly speeds up model loading.")
+            logger.info(
+                "Disabling numpy memory mapping: Loading entire model to RAM. This will use more RAM but significantly speeds up model loading."
+            )
         state_dict = load_safetensors(dit_path, device=device, disable_mmap=safetensors_disable_mmap, dtype=dtype)
         transformer.load_state_dict(state_dict, strict=True, assign=True)
     else:

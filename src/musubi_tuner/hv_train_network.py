@@ -1547,7 +1547,9 @@ class NetworkTrainer:
         loading_device: str,
         dit_weight_dtype: Optional[torch.dtype],
     ):
-        transformer = load_transformer(dit_path, attn_mode, split_attn, loading_device, dit_weight_dtype, args.dit_in_channels, args.disable_numpy_memmap)
+        transformer = load_transformer(
+            dit_path, attn_mode, split_attn, loading_device, dit_weight_dtype, args.dit_in_channels, args.disable_numpy_memmap
+        )
 
         if args.img_in_txt_in_offloading:
             logger.info("Enable offloading img_in and txt_in to CPU")
