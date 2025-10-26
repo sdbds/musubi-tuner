@@ -1634,6 +1634,12 @@ class NetworkTrainer:
                 " / SageAttentionは現在学習をサポートしていないようです。`--sdpa`や`--xformers`などの他のオプションを使ってください"
             )
 
+        if args.disable_numpy_memmap:
+            logger.info(
+                "Disabling numpy memory mapping for model loading (for Wan, FramePack and Qwen-Image). This may lead to higher memory usage but can speed up loading in some cases."
+                " / モデル読み込み時のnumpyメモリマッピングを無効にします（Wan、FramePack、Qwen-Imageでのみ有効）。これによりメモリ使用量が増える可能性がありますが、場合によっては読み込みが高速化されることがあります"
+            )
+
         # check model specific arguments
         self.handle_model_specific_args(args)
 
@@ -2084,12 +2090,13 @@ class NetworkTrainer:
                 self.architecture,
                 time.time(),
                 title,
-                None,
+                args.metadata_reso,
                 args.metadata_author,
                 args.metadata_description,
                 args.metadata_license,
                 args.metadata_tags,
                 timesteps=md_timesteps,
+                custom_arch=args.metadata_arch,
             )
 
             metadata_to_save.update(sai_metadata)
@@ -2589,6 +2596,12 @@ def setup_parser_common() -> argparse.ArgumentParser:
         action="store_true",
         help="offload img_in and txt_in to cpu / img_inとtxt_inをCPUにオフロードする",
     )
+    parser.add_argument(
+        "--disable_numpy_memmap",
+        action="store_true",
+        help="Disable numpy memory mapping for model loading. Only for Wan, FramePack and Qwen-Image. Increases RAM usage but speeds up model loading in some cases."
+        " / モデル読み込み時のnumpyメモリマッピングを無効にします。Wan、FramePack、Qwen-Imageで有効です。RAM使用量が増えますが、場合によってはモデルの読み込みが高速化されます。",
+    )
 
     # parser.add_argument("--flow_shift", type=float, default=7.0, help="Shift factor for flow matching schedulers")
     parser.add_argument(
@@ -2838,6 +2851,18 @@ def setup_parser_common() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="tags for model metadata, separated by comma / メタデータに書き込まれるモデルタグ、カンマ区切り",
+    )
+    parser.add_argument(
+        "--metadata_reso",
+        type=str,
+        default=None,
+        help="resolution for model metadata (e.g., `1024,1024`) / メタデータに書き込まれるモデル解像度（例: `1024,1024`）",
+    )
+    parser.add_argument(
+        "--metadata_arch",
+        type=str,
+        default=None,
+        help="architecture for model metadata / メタデータに書き込まれるモデルアーキテクチャ",
     )
 
     # huggingface settings
