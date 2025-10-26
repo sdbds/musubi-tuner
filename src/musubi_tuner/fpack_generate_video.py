@@ -96,6 +96,9 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument("--dit", type=str, default=None, help="DiT directory or path")
+    parser.add_argument(
+        "--disable_numpy_memmap", action="store_true", help="Disable numpy memmap when loading safetensors. Default is False."
+    )
     parser.add_argument("--vae", type=str, default=None, help="VAE directory or path")
     parser.add_argument("--text_encoder1", type=str, required=True, help="Text Encoder 1 directory or path")
     parser.add_argument("--text_encoder2", type=str, required=True, help="Text Encoder 2 directory or path")
