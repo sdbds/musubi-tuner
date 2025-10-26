@@ -234,7 +234,13 @@ def load_safetensors_with_fp8_optimization_and_hook(
         )
         # dit_weight_dtype is not used because we use fp8 optimization
         state_dict = load_safetensors_with_fp8_optimization(
-            model_files, calc_device, target_keys, exclude_keys, move_to_device=move_to_device, weight_hook=weight_hook
+            model_files,
+            calc_device,
+            target_keys,
+            exclude_keys,
+            move_to_device=move_to_device,
+            weight_hook=weight_hook,
+            disable_numpy_memmap=disable_numpy_memmap,
         )
     else:
         logger.info(

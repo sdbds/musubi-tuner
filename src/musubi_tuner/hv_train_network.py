@@ -1547,7 +1547,7 @@ class NetworkTrainer:
         loading_device: str,
         dit_weight_dtype: Optional[torch.dtype],
     ):
-        transformer = load_transformer(dit_path, attn_mode, split_attn, loading_device, dit_weight_dtype, args.dit_in_channels, args.disable_numpy_memmap)
+        transformer = load_transformer(dit_path, attn_mode, split_attn, loading_device, dit_weight_dtype, args.dit_in_channels)
 
         if args.img_in_txt_in_offloading:
             logger.info("Enable offloading img_in and txt_in to CPU")
@@ -1632,6 +1632,12 @@ class NetworkTrainer:
             raise ValueError(
                 "SageAttention doesn't support training currently. Please use `--sdpa` or `--xformers` etc. instead."
                 " / SageAttentionは現在学習をサポートしていないようです。`--sdpa`や`--xformers`などの他のオプションを使ってください"
+            )
+
+        if args.disable_numpy_memmap:
+            logger.info(
+                "Disabling numpy memory mapping for model loading (for Wan, FramePack and Qwen-Image). This may lead to higher memory usage but can speed up loading in some cases."
+                " / モデル読み込み時のnumpyメモリマッピングを無効にします（Wan、FramePack、Qwen-Imageでのみ有効）。これによりメモリ使用量が増える可能性がありますが、場合によっては読み込みが高速化されることがあります"
             )
 
         # check model specific arguments
@@ -2593,7 +2599,8 @@ def setup_parser_common() -> argparse.ArgumentParser:
     parser.add_argument(
         "--disable_numpy_memmap",
         action="store_true",
-        help="Disable numpy memory mapping for model loading. Loads entire model to RAM for faster loading. Increases RAM usage but speeds up model loading. Useful for block swap or LoRA training.",
+        help="Disable numpy memory mapping for model loading. Only for Wan, FramePack and Qwen-Image. Increases RAM usage but speeds up model loading in some cases."
+        " / モデル読み込み時のnumpyメモリマッピングを無効にします。Wan、FramePack、Qwen-Imageで有効です。RAM使用量が増えますが、場合によってはモデルの読み込みが高速化されます。",
     )
 
     # parser.add_argument("--flow_shift", type=float, default=7.0, help="Shift factor for flow matching schedulers")

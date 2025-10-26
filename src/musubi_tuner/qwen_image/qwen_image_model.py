@@ -1275,6 +1275,7 @@ def load_qwen_image_model(
         lora_weights_list (Optional[Dict[str, torch.Tensor]]): LoRA weights to apply, if any.
         lora_multipliers (Optional[List[float]]): LoRA multipliers for the weights, if any.
         num_layers (int): Number of layers in the DiT model.
+        disable_numpy_memmap (bool): Whether to disable numpy memory mapping when loading weights.
     """
     # dit_weight_dtype is None for fp8_scaled
     assert (not fp8_scaled and dit_weight_dtype is not None) or (fp8_scaled and dit_weight_dtype is None)
@@ -1286,9 +1287,6 @@ def load_qwen_image_model(
 
     # load model weights with dynamic fp8 optimization and LoRA merging if needed
     logger.info(f"Loading DiT model from {dit_path}, device={loading_device}")
-    if disable_numpy_memmap:
-        logger.info("Disabling numpy memory mapping: Loading entire model to RAM. This will use more RAM but significantly speeds up model loading.")
-
     sd = load_safetensors_with_lora_and_fp8(
         model_files=dit_path,
         lora_weights_list=lora_weights_list,
