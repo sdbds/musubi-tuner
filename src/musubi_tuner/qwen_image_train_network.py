@@ -87,11 +87,16 @@ class QwenImageNetworkTrainer(NetworkTrainer):
 
         with torch.amp.autocast(device_type=device.type, dtype=vl_dtype), torch.no_grad():
             for prompt_dict in prompts:
+                is_edit = self.is_edit
                 if is_edit:
                     # Load control image
-                    assert "control_image_path" in prompt_dict and len(prompt_dict["control_image_path"]) > 0, (
-                        "control_image_path not found in sample prompt"
-                    )
+                    # assert "control_image_path" in prompt_dict and len(prompt_dict["control_image_path"]) > 0, (
+                    #     "control_image_path not found in sample prompt"
+                    # )
+                    if "control_image_path" not in prompt_dict or len(prompt_dict["control_image_path"]) == 0:
+                        is_edit = False
+
+                if is_edit:
                     control_image_paths = prompt_dict["control_image_path"]
                     control_image_tensors = []
                     for control_image_path in control_image_paths:
@@ -375,9 +380,9 @@ class QwenImageNetworkTrainer(NetworkTrainer):
                 else:
                     break
             if num_control_images == 0:
-                is_edit = False # no control images found, treat as text-to-image
+                is_edit = False  # no control images found, treat as text-to-image
             # assert num_control_images > 0, "No control latents found in the batch for Qwen-Image-Edit"
-            
+
         if is_edit:
             latents_control = []
             latents_control_shapes = []
