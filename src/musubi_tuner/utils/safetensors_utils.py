@@ -289,7 +289,11 @@ class MemoryEfficientSafeOpen:
 
 
 def load_safetensors(
-    path: str, device: Union[str, torch.device], disable_mmap: bool = False, dtype: Optional[torch.dtype] = None
+    path: str,
+    device: Union[str, torch.device],
+    disable_mmap: bool = False,
+    dtype: Optional[torch.dtype] = None,
+    disable_numpy_memmap: bool = False,
 ) -> dict[str, torch.Tensor]:
     if disable_mmap:
         # return safetensors.torch.load(open(path, "rb").read())
@@ -297,7 +301,7 @@ def load_safetensors(
         # logger.info(f"Loading without mmap (experimental)")
         state_dict = {}
         device = torch.device(device) if device is not None else None
-        with MemoryEfficientSafeOpen(path) as f:
+        with MemoryEfficientSafeOpen(path, disable_numpy_memmap=disable_numpy_memmap) as f:
             for key in f.keys():
                 state_dict[key] = f.get_tensor(key, device=device, dtype=dtype)
         synchronize_device(device)

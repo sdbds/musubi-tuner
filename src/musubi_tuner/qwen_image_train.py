@@ -76,7 +76,7 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
 
         # Pruned model with sparse index support
         block_indices = set()
-        with MemoryEfficientSafeOpen(dit_path, disable_numpy_memmap=args.disable_numpy_memmap) as f:
+        with MemoryEfficientSafeOpen(dit_path) as f:
             for key in f.keys():
                 if key.startswith("transformer_blocks."):
                     block_indices.add(int(key.split(".")[1]))
@@ -96,7 +96,13 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
         logger.info(f"Loading weights from {dit_path}")
         if block_index_map is None:
             # uses official safetensors loader
-            state_dict = load_safetensors(dit_path, device=loading_device, disable_mmap=True, dtype=dit_weight_dtype)
+            state_dict = load_safetensors(
+                dit_path,
+                device=loading_device,
+                disable_mmap=True,
+                dtype=dit_weight_dtype,
+                disable_numpy_memmap=args.disable_numpy_memmap,
+            )
         else:
             loading_device = torch.device(loading_device) if loading_device is not None else None
             state_dict = {}
