@@ -137,6 +137,10 @@ class QwenImageNetworkTrainer(NetworkTrainer):
         # prepare sample parameters
         sample_parameters = []
         for prompt_dict in prompts:
+            is_edit = self.is_edit
+            if is_edit:
+                if "control_image_path" not in prompt_dict or len(prompt_dict["control_image_path"]) == 0:
+                    is_edit = False
             prompt_dict_copy = prompt_dict.copy()
             control_image_paths = None if not is_edit else prompt_dict_copy["control_image_path"]
 
@@ -195,6 +199,10 @@ class QwenImageNetworkTrainer(NetworkTrainer):
         # latents is packed
         latents = qwen_image_utils.prepare_latents(1, num_channels_latents, height, width, torch.bfloat16, device, generator)
         img_shapes = [(1, height // qwen_image_utils.VAE_SCALE_FACTOR // 2, width // qwen_image_utils.VAE_SCALE_FACTOR // 2)]
+
+        if is_edit:
+            if "control_image_path" not in sample_parameter or len(sample_parameter["control_image_path"]) == 0:
+                is_edit = False
 
         if is_edit:
             # 4.1 Prepare control latents
