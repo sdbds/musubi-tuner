@@ -116,11 +116,20 @@ class Offloader:
     common offloading class
     """
 
-    def __init__(self, block_type: str, num_blocks: int, blocks_to_swap: int, device: torch.device, debug: bool = False):
+    def __init__(
+        self,
+        block_type: str,
+        num_blocks: int,
+        blocks_to_swap: int,
+        device: torch.device,
+        use_pinned_memory: bool = False,
+        debug: bool = False,
+    ):
         self.block_type = block_type
         self.num_blocks = num_blocks
         self.blocks_to_swap = blocks_to_swap
         self.device = device
+        self.use_pinned_memory = use_pinned_memory
         self.debug = debug
 
         self.thread_pool = ThreadPoolExecutor(max_workers=1)
@@ -157,52 +166,77 @@ class Offloader:
 
         torch.cuda.current_stream().synchronize()  # this prevents the illegal loss value
 
-        stream = torch.cuda.Stream()
-        with torch.cuda.stream(stream):
-            if self.staging_buffer_a is None:
-                # Create staging buffer as pinned memory (as shared GPU ram). We specify device for correct pinning on multi-GPU systems
-                self.staging_buffer_a = [
-                    torch.empty_like(cuda_data_view, device="cpu").pin_memory(device=device)
-                    for _, _, cuda_data_view, _ in weight_swap_jobs
-                ]
-                self.staging_buffer_b = [
-                    torch.empty_like(cuda_data_view, device="cpu").pin_memory(device=device)
-                    for _, _, cuda_data_view, _ in weight_swap_jobs
-                ]
+        if not self.use_pinned_memory:
+            # Minimize using pinned memory for lower shared GPU RAM usage
+            stream = torch.cuda.Stream()
+            with torch.cuda.stream(stream):
+                if self.staging_buffer_a is None:
+                    # Create staging buffer as pinned memory (as shared GPU ram). We specify device for correct pinning on multi-GPU systems
+                    self.staging_buffer_a = [
+                        torch.empty_like(cuda_data_view, device="cpu").pin_memory(device=device)
+                        for _, _, cuda_data_view, _ in weight_swap_jobs
+                    ]
+                    self.staging_buffer_b = [
+                        torch.empty_like(cuda_data_view, device="cpu").pin_memory(device=device)
+                        for _, _, cuda_data_view, _ in weight_swap_jobs
+                    ]
 
-            events = [torch.cuda.Event() for _ in weight_swap_jobs]  # Waiting events for staging buffer A to CPU non-blocking copy
+                events = [
+                    torch.cuda.Event() for _ in weight_swap_jobs
+                ]  # Waiting events for staging buffer A to CPU non-blocking copy
 
-            # Copy weights to staging buffers and record events
-            for event, sbuf_a, sbuf_b, (module_to_cpu, module_to_cuda, cuda_data_view, cpu_data_view) in zip(
-                events, self.staging_buffer_a, self.staging_buffer_b, weight_swap_jobs
-            ):
-                # CUDA to staging buffer A, non-blocking copy
-                sbuf_a.copy_(cuda_data_view.data, non_blocking=True)
-                event.record(stream)
+                # Copy weights to staging buffers and record events
+                for event, sbuf_a, sbuf_b, (module_to_cpu, module_to_cuda, cuda_data_view, cpu_data_view) in zip(
+                    events, self.staging_buffer_a, self.staging_buffer_b, weight_swap_jobs
+                ):
+                    # CUDA to staging buffer A, non-blocking copy
+                    sbuf_a.copy_(cuda_data_view.data, non_blocking=True)
+                    event.record(stream)
 
-                # CPU to staging buffer B, CPU to pinned CPU, synchronous copy. Can overlap with CUDA to staging buffer A
-                # Making this multithreaded does not help, and 'non_blocking=True' does not help either.
-                sbuf_b.copy_(module_to_cuda.weight.data)  # BOTTLENECK
+                    # CPU to staging buffer B, CPU to pinned CPU, synchronous copy. Can overlap with CUDA to staging buffer A
+                    # Making this multithreaded does not help, and 'non_blocking=True' does not help either.
+                    sbuf_b.copy_(module_to_cuda.weight.data)  # BOTTLENECK
 
-        with torch.cuda.stream(stream):
-            for event, sbuf_a, sbuf_b, (module_to_cpu, module_to_cuda, cuda_data_view, cpu_data_view) in zip(
-                events, self.staging_buffer_a, self.staging_buffer_b, weight_swap_jobs
-            ):
-                # Wait for staging buffer A to be ready, and CUDA data view can be reused
-                event.synchronize()
+            with torch.cuda.stream(stream):
+                for event, sbuf_a, sbuf_b, (module_to_cpu, module_to_cuda, cuda_data_view, cpu_data_view) in zip(
+                    events, self.staging_buffer_a, self.staging_buffer_b, weight_swap_jobs
+                ):
+                    # Wait for staging buffer A to be ready, and CUDA data view can be reused
+                    event.synchronize()
 
-                # Staging buffer B to CUDA, non-blocking copy.
-                cuda_data_view.copy_(sbuf_b, non_blocking=True)
+                    # Staging buffer B to CUDA, non-blocking copy.
+                    cuda_data_view.copy_(sbuf_b, non_blocking=True)
 
-                # Staging buffer A to CPU, synchronous copy. Can overlap with staging buffer B to CUDA
-                cpu_data_view.copy_(sbuf_a)  # BOTTLENECK
+                    # Staging buffer A to CPU, synchronous copy. Can overlap with staging buffer B to CUDA
+                    cpu_data_view.copy_(sbuf_a)  # BOTTLENECK
 
-                # Update references
-                module_to_cuda.weight.data = cuda_data_view
-                module_to_cpu.weight.data = cpu_data_view
+                    # Update references
+                    module_to_cuda.weight.data = cuda_data_view
+                    module_to_cpu.weight.data = cpu_data_view
 
-        stream.synchronize()  # Synchronize staging buffer B to CUDA
-        torch.cuda.current_stream().synchronize()  # This prevents the illegal loss value
+            stream.synchronize()  # Synchronize staging buffer B to CUDA
+            torch.cuda.current_stream().synchronize()  # This prevents the illegal loss value
+        else:
+            # Use pinned memory for faster transfer between CPU and GPU, but it requires more memory
+            stream = torch.cuda.Stream()
+            with torch.cuda.stream(stream):
+                events = [torch.cuda.Event() for _ in weight_swap_jobs]  # Waiting events for GPU to CPU non-blocking copy
+
+                # Copy weights to CPU
+                for event, (module_to_cpu, module_to_cuda, cuda_data_view, cpu_data_view) in zip(events, weight_swap_jobs):
+                    # CUDA to CPU, non-blocking copy
+                    module_to_cpu.weight.data = cuda_data_view.data.to("cpu", non_blocking=True)
+                    event.record(stream)
+
+                # CPU to CUDA, non-blocking copy
+                for event, (module_to_cpu, module_to_cuda, cuda_data_view, cpu_data_view) in zip(events, weight_swap_jobs):
+                    # Wait for CPU data to be ready
+                    event.synchronize()
+                    cuda_data_view.copy_(module_to_cuda.weight.data, non_blocking=True)
+                    module_to_cuda.weight.data = cuda_data_view
+
+            stream.synchronize()
+            torch.cuda.current_stream().synchronize()  # this prevents the illegal loss value
 
         # print(
         #     f"[{self.block_type}] Swapped weights in {time.perf_counter() - start_time:.2f}s. Count of modules swapped: {len(weight_swap_jobs)}"
@@ -267,9 +301,10 @@ class ModelOffloader(Offloader):
         blocks_to_swap: int,
         supports_backward: bool,
         device: torch.device,
+        use_pinned_memory: bool = False,
         debug: bool = False,
     ):
-        super().__init__(block_type, num_blocks, blocks_to_swap, device, debug)
+        super().__init__(block_type, num_blocks, blocks_to_swap, device, use_pinned_memory, debug)
 
         self.supports_backward = supports_backward
         self.forward_only = not supports_backward  # forward only offloading: can be changed to True for inference
