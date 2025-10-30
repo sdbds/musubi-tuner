@@ -1,15 +1,14 @@
 import argparse
+import logging
 import os
 import time
+
 import torch
-from safetensors.torch import save_file
 from safetensors import safe_open
+from safetensors.torch import save_file
 from tqdm import tqdm
 
 from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen
-
-import logging
-
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -103,7 +102,7 @@ def svd(
             if v_o.ndim != 2 or v_t.ndim != 2:
                 continue
 
-            mat = (v_t.to(calc_dtype) - v_o.to(calc_dtype))
+            mat = v_t.to(calc_dtype) - v_o.to(calc_dtype)
             if device:
                 mat = mat.to(device)
 
