@@ -1,4 +1,6 @@
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 import gc
 import time
 from typing import Optional
@@ -130,7 +132,15 @@ class Offloader:
         self.blocks_to_swap = blocks_to_swap
         self.device = device
         self.use_pinned_memory = use_pinned_memory
+
+        # check if debug is enabled from os environment variable
+        if not debug:
+            import os
+
+            debug = os.getenv("MUSUBI_TUNER_OFFLOADER_DEBUG", "0") == "1"
+
         self.debug = debug
+        self.debug_block_count = 0
 
         self.thread_pool = ThreadPoolExecutor(max_workers=1)
         self.futures = {}
@@ -144,7 +154,29 @@ class Offloader:
     def swap_weight_devices_cuda(self, device: torch.device, layer_to_cpu: nn.Module, layer_to_cuda: nn.Module):
         assert layer_to_cpu.__class__ == layer_to_cuda.__class__
 
-        # start_time = time.perf_counter()
+        debug_print = False
+        if self.debug:
+            debug_print = self.debug_block_count % 10 == 0
+            self.debug_block_count += 1
+
+        class Timer:
+            def __init__(self, enabled=False):
+                self.enabled = enabled
+                self.totals = defaultdict(float)
+                self.start_time = time.perf_counter()
+
+            @contextmanager
+            def section(self, name):
+                if not self.enabled:
+                    yield
+                    return
+                t0 = time.perf_counter()
+                try:
+                    yield
+                finally:
+                    self.totals[name] += time.perf_counter() - t0
+
+        T = Timer(enabled=debug_print)
 
         weight_swap_jobs = []
 
@@ -154,17 +186,21 @@ class Offloader:
         #     if hasattr(module_to_cpu, "weight") and module_to_cpu.weight is not None:
         #         weight_swap_jobs.append((module_to_cpu, module_to_cuda, module_to_cpu.weight.data, module_to_cuda.weight.data))
 
-        modules_to_cpu = {k: v for k, v in layer_to_cpu.named_modules()}
-        for module_to_cuda_name, module_to_cuda in layer_to_cuda.named_modules():
-            if hasattr(module_to_cuda, "weight") and module_to_cuda.weight is not None:
-                module_to_cpu = modules_to_cpu.get(module_to_cuda_name, None)
-                if module_to_cpu is not None and module_to_cpu.weight.shape == module_to_cuda.weight.shape:
-                    weight_swap_jobs.append((module_to_cpu, module_to_cuda, module_to_cpu.weight.data, module_to_cuda.weight.data))
-                else:
-                    if module_to_cuda.weight.data.device.type != device.type:
-                        module_to_cuda.weight.data = module_to_cuda.weight.data.to(device)
+        with T.section("find modules"):
+            modules_to_cpu = {k: v for k, v in layer_to_cpu.named_modules()}
+            for module_to_cuda_name, module_to_cuda in layer_to_cuda.named_modules():
+                if hasattr(module_to_cuda, "weight") and module_to_cuda.weight is not None:
+                    module_to_cpu = modules_to_cpu.get(module_to_cuda_name, None)
+                    if module_to_cpu is not None and module_to_cpu.weight.shape == module_to_cuda.weight.shape:
+                        weight_swap_jobs.append(
+                            (module_to_cpu, module_to_cuda, module_to_cpu.weight.data, module_to_cuda.weight.data)
+                        )
+                    else:
+                        if module_to_cuda.weight.data.device.type != device.type:
+                            module_to_cuda.weight.data = module_to_cuda.weight.data.to(device)
 
-        torch.cuda.current_stream().synchronize()  # this prevents the illegal loss value
+        with T.section("synchronize before swap"):
+            torch.cuda.current_stream().synchronize()  # this prevents the illegal loss value
 
         if not self.use_pinned_memory:
             # Minimize using pinned memory for lower shared GPU RAM usage
@@ -181,41 +217,46 @@ class Offloader:
                         for _, _, cuda_data_view, _ in weight_swap_jobs
                     ]
 
-                events = [
-                    torch.cuda.Event() for _ in weight_swap_jobs
-                ]  # Waiting events for staging buffer A to CPU non-blocking copy
+                # Waiting events for staging buffer A to CPU non-blocking copy
+                events = [torch.cuda.Event() for _ in weight_swap_jobs]
 
                 # Copy weights to staging buffers and record events
                 for event, sbuf_a, sbuf_b, (module_to_cpu, module_to_cuda, cuda_data_view, cpu_data_view) in zip(
                     events, self.staging_buffer_a, self.staging_buffer_b, weight_swap_jobs
                 ):
                     # CUDA to staging buffer A, non-blocking copy
-                    sbuf_a.copy_(cuda_data_view.data, non_blocking=True)
-                    event.record(stream)
+                    with T.section("cuda to staging A"):
+                        sbuf_a.copy_(cuda_data_view.data, non_blocking=True)
+                        event.record(stream)
 
                     # CPU to staging buffer B, CPU to pinned CPU, synchronous copy. Can overlap with CUDA to staging buffer A
                     # Making this multithreaded does not help, and 'non_blocking=True' does not help either.
-                    sbuf_b.copy_(module_to_cuda.weight.data)  # BOTTLENECK
+                    with T.section("cpu to staging B"):
+                        sbuf_b.copy_(module_to_cuda.weight.data)  # BOTTLENECK
 
             with torch.cuda.stream(stream):
                 for event, sbuf_a, sbuf_b, (module_to_cpu, module_to_cuda, cuda_data_view, cpu_data_view) in zip(
                     events, self.staging_buffer_a, self.staging_buffer_b, weight_swap_jobs
                 ):
                     # Wait for staging buffer A to be ready, and CUDA data view can be reused
-                    event.synchronize()
+                    with T.section("wait staging A"):
+                        event.synchronize()
 
                     # Staging buffer B to CUDA, non-blocking copy.
-                    cuda_data_view.copy_(sbuf_b, non_blocking=True)
+                    with T.section("staging B to CUDA"):
+                        cuda_data_view.copy_(sbuf_b, non_blocking=True)
 
                     # Staging buffer A to CPU, synchronous copy. Can overlap with staging buffer B to CUDA
-                    cpu_data_view.copy_(sbuf_a)  # BOTTLENECK
+                    with T.section("staging A to CPU"):
+                        cpu_data_view.copy_(sbuf_a)  # BOTTLENECK
 
                     # Update references
                     module_to_cuda.weight.data = cuda_data_view
                     module_to_cpu.weight.data = cpu_data_view
 
-            stream.synchronize()  # Synchronize staging buffer B to CUDA
-            torch.cuda.current_stream().synchronize()  # This prevents the illegal loss value
+            with T.section("synchronize"):
+                stream.synchronize()  # Synchronize staging buffer B to CUDA
+                torch.cuda.current_stream().synchronize()  # This prevents the illegal loss value
         else:
             # Use pinned memory for faster transfer between CPU and GPU, but it requires more memory
             stream = torch.cuda.Stream()
@@ -225,19 +266,34 @@ class Offloader:
                 # Copy weights to CPU
                 for event, (module_to_cpu, module_to_cuda, cuda_data_view, cpu_data_view) in zip(events, weight_swap_jobs):
                     # CUDA to CPU, non-blocking copy
-                    module_to_cpu.weight.data = cuda_data_view.data.to("cpu", non_blocking=True)
-                    event.record(stream)
+                    with T.section("cuda to cpu"):
+                        # event.record(stream)  # slower
+                        stream.record_event(event)  # faster
+                        module_to_cpu.weight.data = cuda_data_view.data.to("cpu", non_blocking=True).pin_memory(device=device)
 
-                # CPU to CUDA, non-blocking copy
+                # CPU to CUDA
                 for event, (module_to_cpu, module_to_cuda, cuda_data_view, cpu_data_view) in zip(events, weight_swap_jobs):
                     # Wait for CPU data to be ready
-                    event.synchronize()
-                    cuda_data_view.copy_(module_to_cuda.weight.data, non_blocking=True)
-                    module_to_cuda.weight.data = cuda_data_view
+                    with T.section("wait cpu"):
+                        # event.synchronize() # slower
+                        stream.wait_event(event)  # faster
 
-            stream.synchronize()
-            torch.cuda.current_stream().synchronize()  # this prevents the illegal loss value
+                    # CPU to CUDA, non-blocking copy
+                    with T.section("cpu to cuda"):
+                        cuda_data_view.copy_(module_to_cuda.weight.data, non_blocking=True)
+                        module_to_cuda.weight.data = cuda_data_view
 
+            with T.section("synchronize"):
+                stream.synchronize()
+                torch.cuda.current_stream().synchronize()  # this prevents the illegal loss value
+
+        if debug_print:
+            print(f"[{self.block_type}] Weight swap timing at {self.debug_block_count - 1}:")
+            for name, total in T.totals.items():
+                print(f"  {name}: {total * 1000:.2f}ms")
+            print(
+                f"Overall time: {(time.perf_counter() - T.start_time) * 1000:.2f}ms, total time in sections: {sum(T.totals.values()) * 1000:.2f}ms"
+            )
         # print(
         #     f"[{self.block_type}] Swapped weights in {time.perf_counter() - start_time:.2f}s. Count of modules swapped: {len(weight_swap_jobs)}"
         # )
@@ -260,7 +316,7 @@ class Offloader:
 
             if self.debug:
                 print(
-                    f"[{self.block_type}] Moved blocks {bidx_to_cpu} and {bidx_to_cuda} in {time.perf_counter() - start_time:.2f}s"
+                    f"[{self.block_type}] Moved blocks {bidx_to_cpu} to CPU and {bidx_to_cuda} to {'CUDA' if self.cuda_available else 'device'} in {time.perf_counter() - start_time:.2f}s"
                 )
             return bidx_to_cpu, bidx_to_cuda  # , event
 
