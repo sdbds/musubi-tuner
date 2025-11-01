@@ -217,54 +217,63 @@ class Offloader:
                         for _, _, cuda_data_view, _ in weight_swap_jobs
                     ]
 
-                # Waiting events for staging buffer A to CPU non-blocking copy
-                events = [torch.cuda.Event() for _ in weight_swap_jobs]
-
                 # Copy weights to staging buffers and record events
-                for event, sbuf_a, sbuf_b, (module_to_cpu, module_to_cuda, cuda_data_view, cpu_data_view) in zip(
-                    events, self.staging_buffer_a, self.staging_buffer_b, weight_swap_jobs
+                event_b = None
+                for sbuf_a, sbuf_b, (module_to_cpu, module_to_cuda, cuda_data_view, cpu_data_view) in zip(
+                    self.staging_buffer_a, self.staging_buffer_b, weight_swap_jobs
                 ):
                     # CUDA to staging buffer A, non-blocking copy
+                    event_a = torch.cuda.Event()
                     with T.section("cuda to staging A"):
                         sbuf_a.copy_(cuda_data_view.data, non_blocking=True)
-                        event.record(stream)
+                        event_a.record(stream)
+
+                    # Wait for staging buffer B to be ready
+                    if event_b is not None:
+                        with T.section("wait staging B"):
+                            event_b.synchronize()
 
                     # CPU to staging buffer B, CPU to pinned CPU, synchronous copy. Can overlap with CUDA to staging buffer A
-                    # Making this multithreaded does not help, and 'non_blocking=True' does not help either.
                     with T.section("cpu to staging B"):
+                        # Making this multithreaded does not help, and 'non_blocking=True' does not help either.
                         sbuf_b.copy_(module_to_cuda.weight.data)  # BOTTLENECK
 
-            with torch.cuda.stream(stream):
-                for event, sbuf_a, sbuf_b, (module_to_cpu, module_to_cuda, cuda_data_view, cpu_data_view) in zip(
-                    events, self.staging_buffer_a, self.staging_buffer_b, weight_swap_jobs
-                ):
                     # Wait for staging buffer A to be ready, and CUDA data view can be reused
                     with T.section("wait staging A"):
-                        event.synchronize()
+                        event_a.synchronize()
 
                     # Staging buffer B to CUDA, non-blocking copy.
+                    event_b = torch.cuda.Event()
                     with T.section("staging B to CUDA"):
                         cuda_data_view.copy_(sbuf_b, non_blocking=True)
+                        event_b.record(stream)
 
                     # Staging buffer A to CPU, synchronous copy. Can overlap with staging buffer B to CUDA
                     with T.section("staging A to CPU"):
                         cpu_data_view.copy_(sbuf_a)  # BOTTLENECK
 
-                    # Update references
-                    module_to_cuda.weight.data = cuda_data_view
-                    module_to_cpu.weight.data = cpu_data_view
+                with T.section("wait staging B"):
+                    event_b.synchronize()  # Ensure the last staging buffer B copy is done
 
             with T.section("synchronize"):
                 stream.synchronize()  # Synchronize staging buffer B to CUDA
                 torch.cuda.current_stream().synchronize()  # This prevents the illegal loss value
+
+            for sbuf_a, sbuf_b, (module_to_cpu, module_to_cuda, cuda_data_view, cpu_data_view) in zip(
+                self.staging_buffer_a, self.staging_buffer_b, weight_swap_jobs
+            ):
+                # Update references
+                module_to_cuda.weight.data = cuda_data_view
+                module_to_cpu.weight.data = cpu_data_view
+
         else:
             # Use pinned memory for faster transfer between CPU and GPU, but it requires more memory
             stream = torch.cuda.Stream()
             with torch.cuda.stream(stream):
-                events = [torch.cuda.Event() for _ in weight_swap_jobs]  # Waiting events for GPU to CPU non-blocking copy
+                events_a = [torch.cuda.Event() for _ in weight_swap_jobs]  # Waiting events for GPU to CPU non-blocking copy
 
                 # Copy weights to CPU
-                for event, (module_to_cpu, module_to_cuda, cuda_data_view, cpu_data_view) in zip(events, weight_swap_jobs):
+                for event, (module_to_cpu, module_to_cuda, cuda_data_view, cpu_data_view) in zip(events_a, weight_swap_jobs):
                     # CUDA to CPU, non-blocking copy
                     with T.section("cuda to cpu"):
                         # event.record(stream)  # slower
@@ -272,7 +281,7 @@ class Offloader:
                         module_to_cpu.weight.data = cuda_data_view.data.to("cpu", non_blocking=True).pin_memory(device=device)
 
                 # CPU to CUDA
-                for event, (module_to_cpu, module_to_cuda, cuda_data_view, cpu_data_view) in zip(events, weight_swap_jobs):
+                for event, (module_to_cpu, module_to_cuda, cuda_data_view, cpu_data_view) in zip(events_a, weight_swap_jobs):
                     # Wait for CPU data to be ready
                     with T.section("wait cpu"):
                         # event.synchronize() # slower
