@@ -1690,8 +1690,8 @@ class HunyuanVideoTransformer3DModelPacked(nn.Module):  # (PreTrainedModelMixin,
             self.num_single_blocks,
             single_blocks_to_swap,
             supports_backward,
-            use_pinned_memory,
             device,  # , debug=True
+            use_pinned_memory,
         )
         print(
             f"HunyuanVideoTransformer3DModelPacked: Block swap enabled. Swapping {num_blocks} blocks, "
