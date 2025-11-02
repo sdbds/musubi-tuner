@@ -682,8 +682,9 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
             self.num_double_blocks,
             double_blocks_to_swap,
             supports_backward,
+            device,
             use_pinned_memory,
-            device,  # , debug=True
+            # , debug=True
         )
         self.offloader_single = ModelOffloader(
             "single",
@@ -691,8 +692,9 @@ class HYVideoDiffusionTransformer(nn.Module):  # ModelMixin, ConfigMixin):
             self.num_single_blocks,
             single_blocks_to_swap,
             supports_backward,
+            device,
             use_pinned_memory,
-            device,  # , debug=True
+            # , debug=True
         )
         print(
             f"HYVideoDiffusionTransformer: Block swap enabled. Swapping {num_blocks} blocks, double blocks: {double_blocks_to_swap}, single blocks: {single_blocks_to_swap}."
