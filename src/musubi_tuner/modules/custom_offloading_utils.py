@@ -97,7 +97,6 @@ class Offloader:
         self.futures = {}
         self.cuda_available = device.type == "cuda"
         self.stream = torch.cuda.Stream(device=device) if self.cuda_available else None
-        self.stream_2 = torch.cuda.Stream(device=device) if self.cuda_available else None  # 2nd stream for pinned memory transfer
 
         # Staging buffers for cuda offloading without large pinned memory. These are pinned memory buffers to speed up the transfer between CPU and GPU
         # We create one staging buffer per transfer direction (A: GPU to CPU, B: CPU to GPU)
@@ -243,10 +242,10 @@ class Offloader:
 
             # CPU to CUDA
             for event, (module_to_cpu, module_to_cuda, cuda_data_view, cpu_data_view) in zip(events, weight_swap_jobs):
-                with torch.cuda.stream(self.stream_2):
+                with torch.cuda.stream(self.stream):
                     # Wait for cuda_data_view to be ready
                     with T.section("wait cpu"):
-                        self.stream_2.wait_event(event)
+                        self.stream.wait_event(event)
 
                     # CPU to CUDA, non-blocking copy
                     with T.section("cpu to cuda"):
@@ -263,16 +262,14 @@ class Offloader:
             # Reuse released pinned buffers
             if not released_pinned_buffer[0].is_pinned():
                 # In first time, we need to create pinned buffers because offloaded weights are not pinned yet
-                with torch.cuda.stream(self.stream_2):
+                with torch.cuda.stream(self.stream):
                     released_pinned_buffer = [
                         torch.empty_like(cuda_data_view, device="cpu").pin_memory(device=device)
                         for _, _, cuda_data_view, _ in weight_swap_jobs
                     ]
             self.pinned_buffer = released_pinned_buffer
 
-            # waiting/synchronize on main stream/thread causes illegal loss values, so we synchronize stream_2 here and return None
-            self.stream_2.synchronize()
-            sync_event = None
+            sync_event = self.stream.record_event()
 
         if debug_print:
             print(f"[{self.block_type}] Weight swap timing at {self.debug_block_count - 1}:")
