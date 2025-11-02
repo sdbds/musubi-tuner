@@ -294,7 +294,7 @@ VRAMが足りない場合は、`--blocks_to_swap`を指定して、一部のブ�
 
 `--use_pinned_memory_for_block_swap`を指定すると、block swapにピン留めメモリを使用します。CPUとGPU間でブロックをスワップする際のパフォーマンスが向上する可能性があります。ただし、Windows環境では共有VRAM使用量が増加する可能性があります。システム構成（利用可能なシステムRAMやVRAMなど）に応じて、このオプションを使用してください。
 
-`--gradient_checkpointing_cpu_offload`を指定すると、gradient checkpointing使用時にアクティベーションをCPUにオフロードします。これによりVRAM使用量をさらに削減できますが、学習が遅くなる可能性があります。latent解像度（または動画長）が高く、VRAMが限られている場合に特に有用です。このオプションは`--gradient_checkpointing`と併用する必要があります。詳細は[PR #537](https://github.com/Dao-AILab/flash-attention)を参照してください。
+`--gradient_checkpointing_cpu_offload`を指定すると、gradient checkpointing使用時にアクティベーションをCPUにオフロードします。これによりVRAM使用量をさらに削減できますが、学習が遅くなる可能性があります。latent解像度（または動画長）が高く、VRAMが限られている場合に特に有用です。このオプションは`--gradient_checkpointing`と併用する必要があります。詳細は[PR #537](https://github.com/Dao-AILab/flash-attention/pull/537)を参照してください。
 
 **Attention**
 
