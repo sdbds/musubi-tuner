@@ -370,6 +370,10 @@ class ModelOffloader(Offloader):
                     self.remove_handles.append(handle)
 
     def set_forward_only(self, forward_only: bool):
+        # switching must wait for all pending transfers
+        for block_idx in list(self.futures.keys()):
+            self._wait_blocks_move(block_idx)
+
         self.forward_only = forward_only
 
     def __del__(self):
