@@ -12,7 +12,7 @@ from diffusers.models.modeling_utils import ModelMixin
 
 from safetensors.torch import load_file
 
-from musubi_tuner.modules.custom_offloading_utils import ModelOffloader
+from musubi_tuner.modules.custom_offloading_utils import ModelOffloader, weighs_to_device
 from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
 
 from .lora_utils import create_lora_network
@@ -355,7 +355,9 @@ class LongCatVideoTransformer3DModel(
         apply_fp8_monkey_patch(self, state_dict, use_scaled_mm=use_scaled_mm)
         return state_dict
 
-    def enable_block_swap(self, blocks_to_swap: int, device: torch.device, supports_backward: bool):
+    def enable_block_swap(
+        self, blocks_to_swap: int, device: torch.device, supports_backward: bool, use_pinned_memory: bool = False
+    ):
         self.blocks_to_swap = blocks_to_swap
         block_list = list(self.blocks)
         num_blocks = len(block_list)
@@ -370,6 +372,7 @@ class LongCatVideoTransformer3DModel(
             blocks_to_swap,
             supports_backward,
             device,
+            use_pinned_memory,
         )
         self._block_swap_ready = False
 
@@ -391,7 +394,7 @@ class LongCatVideoTransformer3DModel(
                 def _block_wait_hook(_module, _inputs):
                     if self.offloader and self.blocks_to_swap:
                         self.offloader.wait_for_block(block_index)
-                        self.offloader.ensure_block_weights_on_device(_module)
+                        weighs_to_device(_module, self.offloader.device)
                 return _block_wait_hook
 
             handle = block.register_forward_pre_hook(_make_block_hook(idx))
