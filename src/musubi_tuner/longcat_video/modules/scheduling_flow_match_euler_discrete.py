@@ -1,3 +1,8 @@
+# This file includes code derived from:
+# https://github.com/meituan-longcat/LongCat-Video
+# Copyright (c) 2025 Meituan
+# Licensed under the MIT License
+
 # Copyright 2025 Stability AI, Katherine Crowson and The HuggingFace Team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");

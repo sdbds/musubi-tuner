@@ -1,3 +1,8 @@
+# This file includes code derived from:
+# https://github.com/meituan-longcat/LongCat-Video
+# Copyright (c) 2025 Meituan
+# Licensed under the MIT License
+
 import logging
 from typing import Any, Dict, List, Optional, Tuple, cast
 
@@ -16,9 +21,16 @@ from musubi_tuner.modules.custom_offloading_utils import ModelOffloader, weighs_
 from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
 
 from .lora_utils import create_lora_network
-from ..context_parallel import context_parallel_util
 from .attention import Attention, MultiHeadCrossAttention
-from .blocks import TimestepEmbedder, CaptionEmbedder, PatchEmbed3D, FeedForwardSwiGLU, FinalLayer_FP32, LayerNorm_FP32, modulate_fp32
+from .blocks import (
+    TimestepEmbedder,
+    CaptionEmbedder,
+    PatchEmbed3D,
+    FeedForwardSwiGLU,
+    FinalLayer_FP32,
+    LayerNorm_FP32,
+    modulate_fp32,
+)
 
 from torch.cuda.amp import autocast
 from torch.utils.hooks import RemovableHandle
@@ -38,25 +50,19 @@ class LongCatSingleStreamBlock(nn.Module):
         enable_flashattn3: bool = False,
         enable_flashattn2: bool = False,
         enable_xformers: bool = False,
-        enable_bsa: bool = False,
-        bsa_params: Optional[dict[str, Any]] = None,
-        cp_split_hw: Optional[List[int]] = None,
     ):
         super().__init__()
 
         self.hidden_size = hidden_size
 
         # scale and gate modulation
-        self.adaLN_modulation = nn.Sequential(
-            nn.SiLU(),
-            nn.Linear(adaln_tembed_dim, 6 * hidden_size, bias=True)
-        )
+        self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(adaln_tembed_dim, 6 * hidden_size, bias=True))
         for module in self.adaLN_modulation.modules():
             if isinstance(module, nn.Linear):
                 module._block_swap_pin_weights = True
 
         self.mod_norm_attn = LayerNorm_FP32(hidden_size, eps=1e-6, elementwise_affine=False)
-        self.mod_norm_ffn  = LayerNorm_FP32(hidden_size, eps=1e-6, elementwise_affine=False)
+        self.mod_norm_ffn = LayerNorm_FP32(hidden_size, eps=1e-6, elementwise_affine=False)
         self.pre_crs_attn_norm = LayerNorm_FP32(hidden_size, eps=1e-6, elementwise_affine=True)
 
         self.attn = Attention(
@@ -65,9 +71,6 @@ class LongCatSingleStreamBlock(nn.Module):
             enable_flashattn3=enable_flashattn3,
             enable_flashattn2=enable_flashattn2,
             enable_xformers=enable_xformers,
-            enable_bsa=enable_bsa,
-            bsa_params=bsa_params or {},
-            cp_split_hw=cp_split_hw
         )
         self.cross_attn = MultiHeadCrossAttention(
             dim=hidden_size,
@@ -81,47 +84,47 @@ class LongCatSingleStreamBlock(nn.Module):
 
     def enable_gradient_checkpointing(self, activation_cpu_offloading: bool = False) -> None:
         if activation_cpu_offloading:
-            logger.warning(
-                "LongCatSingleStreamBlock ignores activation CPU offloading; running without offload."
-            )
+            logger.warning("LongCatSingleStreamBlock ignores activation CPU offloading; running without offload.")
 
         self._gradient_checkpointing = True
 
     def forward(self, x, y, t, y_seqlen, latent_shape, num_cond_latents=None, return_kv=False, kv_cache=None, skip_crs_attn=False):
         """
-            x: [B, N, C]
-            y: [1, N_valid_tokens, C]
-            t: [B, T, C_t]
-            y_seqlen: [B]; type of a list
-            latent_shape: latent shape of a single item
+        x: [B, N, C]
+        y: [1, N_valid_tokens, C]
+        t: [B, T, C_t]
+        y_seqlen: [B]; type of a list
+        latent_shape: latent shape of a single item
         """
         x_dtype = x.dtype
 
         B, N, C = x.shape
-        T, _, _ = latent_shape # S != T*H*W in case of CP split on H*W.
+        T, _, _ = latent_shape  # S != T*H*W in case of CP split on H*W.
 
         # compute modulation params in fp32
         with autocast(dtype=torch.float32):
-            shift_msa, scale_msa, gate_msa, \
-            shift_mlp, scale_mlp, gate_mlp = \
-                self.adaLN_modulation(t).unsqueeze(2).chunk(6, dim=-1) # [B, T, 1, C]
+            shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
+                self.adaLN_modulation(t).unsqueeze(2).chunk(6, dim=-1)
+            )  # [B, T, 1, C]
 
         # self attn with modulation
         x_m = modulate_fp32(self.mod_norm_attn, x.view(B, T, -1, C), shift_msa, scale_msa).view(B, N, C)
 
         if kv_cache is not None:
             kv_cache = (kv_cache[0].to(x.device), kv_cache[1].to(x.device))
-            attn_outputs = self.attn.forward_with_kv_cache(x_m, shape=latent_shape, num_cond_latents=num_cond_latents, kv_cache=kv_cache)
+            attn_outputs = self.attn.forward_with_kv_cache(
+                x_m, shape=latent_shape, num_cond_latents=num_cond_latents, kv_cache=kv_cache
+            )
         else:
             attn_outputs = self.attn(x_m, shape=latent_shape, num_cond_latents=num_cond_latents, return_kv=return_kv)
-        
+
         if return_kv:
             x_s, kv_cache = attn_outputs
         else:
             x_s = attn_outputs
 
         with autocast(dtype=torch.float32):
-            x = x + (gate_msa * x_s.view(B, -1, N//T, C)).view(B, -1, C) # [B, N, C]
+            x = x + (gate_msa * x_s.view(B, -1, N // T, C)).view(B, -1, C)  # [B, N, C]
         x = x.to(x_dtype)
 
         # cross attn
@@ -131,10 +134,10 @@ class LongCatSingleStreamBlock(nn.Module):
             x = x + self.cross_attn(self.pre_crs_attn_norm(x), y, y_seqlen, num_cond_latents=num_cond_latents, shape=latent_shape)
 
         # ffn with modulation
-        x_m = modulate_fp32(self.mod_norm_ffn, x.view(B, -1, N//T, C), shift_mlp, scale_mlp).view(B, -1, C)
+        x_m = modulate_fp32(self.mod_norm_ffn, x.view(B, -1, N // T, C), shift_mlp, scale_mlp).view(B, -1, C)
         x_s = self.ffn(x_m)
         with autocast(dtype=torch.float32):
-            x = x + (gate_mlp * x_s.view(B, -1, N//T, C)).view(B, -1, C) # [B, N, C]
+            x = x + (gate_mlp * x_s.view(B, -1, N // T, C)).view(B, -1, C)  # [B, N, C]
         x = x.to(x_dtype)
 
         if return_kv:
@@ -143,16 +146,12 @@ class LongCatSingleStreamBlock(nn.Module):
             return x
 
 
-class LongCatVideoTransformer3DModel(
-    ModelMixin, ConfigMixin
-):
+class LongCatVideoTransformer3DModel(ModelMixin, ConfigMixin):
     _supports_gradient_checkpointing = True
 
     def enable_gradient_checkpointing(self, activation_cpu_offloading: bool = False) -> None:
         if activation_cpu_offloading:
-            logger.warning(
-                "LongCatVideoTransformer3DModel ignores activation CPU offloading; running without offload."
-            )
+            logger.warning("LongCatVideoTransformer3DModel ignores activation CPU offloading; running without offload.")
 
         self.gradient_checkpointing = True
 
@@ -206,9 +205,6 @@ class LongCatVideoTransformer3DModel(
         enable_flashattn3: bool = False,
         enable_flashattn2: bool = False,
         enable_xformers: bool = False,
-        enable_bsa: bool = False,
-        bsa_params: Optional[dict[str, Any]] = None,
-        cp_split_hw: Optional[List[int]] = None,
         text_tokens_zero_pad: bool = False,
     ) -> None:
         super().__init__()
@@ -216,8 +212,6 @@ class LongCatVideoTransformer3DModel(
         self.patch_size = patch_size
         self.in_channels = in_channels
         self.out_channels = out_channels
-        self.cp_split_hw = cp_split_hw
-
         self.x_embedder = PatchEmbed3D(patch_size, in_channels, hidden_size)
         self.t_embedder = TimestepEmbedder(t_embed_dim=adaln_tembed_dim, frequency_embedding_size=frequency_embedding_size)
         self.y_embedder = CaptionEmbedder(
@@ -235,9 +229,6 @@ class LongCatVideoTransformer3DModel(
                     enable_flashattn3=enable_flashattn3,
                     enable_flashattn2=enable_flashattn2,
                     enable_xformers=enable_xformers,
-                    enable_bsa=enable_bsa,
-                    bsa_params=bsa_params,
-                    cp_split_hw=cp_split_hw
                 )
                 for i in range(depth)
             ]
@@ -271,14 +262,14 @@ class LongCatVideoTransformer3DModel(
             network_dim=lora_network_dim,
             network_alpha=lora_network_alpha,
         )
-        
+
         lora_network.load_state_dict(lora_network_state_dict_loaded, strict=True)
-        
+
         self.lora_dict[lora_key] = lora_network
 
     def enable_loras(self, lora_key_list=[]):
         self.disable_all_loras()
-    
+
         module_loras: Dict[str, List[Any]] = {}  # {module_name: [lora1, lora2, ...]}
         model_device = next(self.parameters()).device
         model_dtype = next(self.parameters()).dtype
@@ -292,13 +283,13 @@ class LongCatVideoTransformer3DModel(
                         module_loras[module_name] = []
                     module_loras[module_name].append(lora)
                 self.active_loras.append(lora_key)
-    
+
         for module_name, loras in module_loras.items():
             module = self._get_module_by_name(module_name)
-            if not hasattr(module, 'org_forward'):
+            if not hasattr(module, "org_forward"):
                 module.org_forward = module.forward  # type: ignore[attr-defined]
             module.forward = self._create_multi_lora_forward(module, loras)  # type: ignore[assignment]
-    
+
     def _create_multi_lora_forward(self, module, loras):
         def multi_lora_forward(x, *args, **kwargs):
             weight_dtype = x.dtype
@@ -312,30 +303,30 @@ class LongCatVideoTransformer3DModel(
                     lx = lora.lora_up(lx)
                     lora_output = lx.to(weight_dtype) * lora.multiplier * lora.alpha_scale
                     total_lora_output += lora_output
-            
+
             return org_output + total_lora_output
-        
+
         return multi_lora_forward
-    
+
     def _get_module_by_name(self, module_name):
         try:
             module = self
-            for part in module_name.split('.'):
+            for part in module_name.split("."):
                 module = getattr(module, part)
             return module
         except AttributeError as e:
             raise ValueError(f"Cannot find module: {module_name}, error: {e}")
-    
+
     def disable_all_loras(self):
         for name, module in self.named_modules():
-            if hasattr(module, 'org_forward'):
+            if hasattr(module, "org_forward"):
                 module.forward = module.org_forward
-                delattr(module, 'org_forward')
-        
+                delattr(module, "org_forward")
+
         for lora_key, lora_network in self.lora_dict.items():
             for lora in lora_network.loras:
                 lora.to("cpu")
-        
+
         self.active_loras.clear()
 
     def fp8_optimization(
@@ -390,11 +381,13 @@ class LongCatVideoTransformer3DModel(
         self._block_swap_hook = self.register_forward_pre_hook(_ensure_block_swap_ready)
 
         for idx, block in enumerate(self.blocks):
+
             def _make_block_hook(block_index: int):
                 def _block_wait_hook(_module, _inputs):
                     if self.offloader and self.blocks_to_swap:
                         self.offloader.wait_for_block(block_index)
                         weighs_to_device(_module, self.offloader.device)
+
                 return _block_wait_hook
 
             handle = block.register_forward_pre_hook(_make_block_hook(idx))
@@ -434,38 +427,29 @@ class LongCatVideoTransformer3DModel(
                 self.offloader.prepare_block_devices_before_forward(cached_blocks)
                 self._block_swap_ready = True
 
-    def enable_bsa(self,):
-        for block in self.blocks:
-            block.attn.enable_bsa = True
-
-    def disable_bsa(self,):
-        for block in self.blocks:
-            block.attn.enable_bsa = False    
-
     def forward(
-        self, 
-        hidden_states, 
-        timestep, 
-        encoder_hidden_states, 
-        encoder_attention_mask=None, 
+        self,
+        hidden_states,
+        timestep,
+        encoder_hidden_states,
+        encoder_attention_mask=None,
         num_cond_latents=0,
-        return_kv=False, 
+        return_kv=False,
         kv_cache_dict={},
-        skip_crs_attn=False, 
-        offload_kv_cache=False
+        skip_crs_attn=False,
+        offload_kv_cache=False,
     ):
-
         B, _, T, H, W = hidden_states.shape
 
         N_t = T // self.patch_size[0]
         N_h = H // self.patch_size[1]
         N_w = W // self.patch_size[2]
 
-        assert self.patch_size[0]==1, "Currently, 3D x_embedder should not compress the temporal dimension."
+        assert self.patch_size[0] == 1, "Currently, 3D x_embedder should not compress the temporal dimension."
 
         # expand the shape of timestep from [B] to [B, T]
         if len(timestep.shape) == 1:
-            timestep = timestep.unsqueeze(1).expand(-1, N_t) # [B, T]
+            timestep = timestep.unsqueeze(1).expand(-1, N_t)  # [B, T]
 
         dtype = self.x_embedder.proj.weight.dtype
         hidden_states = hidden_states.to(dtype)
@@ -487,16 +471,15 @@ class LongCatVideoTransformer3DModel(
 
         if encoder_attention_mask is not None:
             encoder_attention_mask = encoder_attention_mask.squeeze(1).squeeze(1)
-            encoder_hidden_states = encoder_hidden_states.squeeze(1).masked_select(encoder_attention_mask.unsqueeze(-1) != 0).view(1, -1, hidden_states.shape[-1]) # [1, N_valid_tokens, C]
-            y_seqlens = encoder_attention_mask.sum(dim=1).tolist() # [B]
+            encoder_hidden_states = (
+                encoder_hidden_states.squeeze(1)
+                .masked_select(encoder_attention_mask.unsqueeze(-1) != 0)
+                .view(1, -1, hidden_states.shape[-1])
+            )  # [1, N_valid_tokens, C]
+            y_seqlens = encoder_attention_mask.sum(dim=1).tolist()  # [B]
         else:
             y_seqlens = [encoder_hidden_states.shape[2]] * encoder_hidden_states.shape[0]
             encoder_hidden_states = encoder_hidden_states.squeeze(1).view(1, -1, hidden_states.shape[-1])
-
-        if self.cp_split_hw and self.cp_split_hw[0] * self.cp_split_hw[1] > 1:
-            hidden_states = rearrange(hidden_states, "B (T H W) C -> B T H W C", T=N_t, H=N_h, W=N_w)
-            hidden_states = context_parallel_util.split_cp_2d(hidden_states, seq_dim_hw=(2, 3), split_hw=self.cp_split_hw)
-            hidden_states = rearrange(hidden_states, "B T H W C -> B (T H W) C")
 
         # blocks
         kv_cache_dict_ret = {}
@@ -506,13 +489,28 @@ class LongCatVideoTransformer3DModel(
                 self.offloader.wait_for_block(i)
             if torch.is_grad_enabled() and self.gradient_checkpointing:
                 block_outputs = self._gradient_checkpointing_func(
-                    block, hidden_states, encoder_hidden_states, t, y_seqlens,
-                    (N_t, N_h, N_w), num_cond_latents, return_kv, kv_cache_dict.get(i, None), skip_crs_attn
+                    block,
+                    hidden_states,
+                    encoder_hidden_states,
+                    t,
+                    y_seqlens,
+                    (N_t, N_h, N_w),
+                    num_cond_latents,
+                    return_kv,
+                    kv_cache_dict.get(i, None),
+                    skip_crs_attn,
                 )
             else:
                 block_outputs = block(
-                    hidden_states, encoder_hidden_states, t, y_seqlens,
-                    (N_t, N_h, N_w), num_cond_latents, return_kv, kv_cache_dict.get(i, None), skip_crs_attn
+                    hidden_states,
+                    encoder_hidden_states,
+                    t,
+                    y_seqlens,
+                    (N_t, N_h, N_w),
+                    num_cond_latents,
+                    return_kv,
+                    kv_cache_dict.get(i, None),
+                    skip_crs_attn,
                 )
 
             if return_kv:
@@ -533,9 +531,6 @@ class LongCatVideoTransformer3DModel(
 
         hidden_states = self.final_layer(hidden_states, t, (N_t, N_h, N_w))  # [B, N, C=T_p*H_p*W_p*C_out]
 
-        if self.cp_split_hw and self.cp_split_hw[0] * self.cp_split_hw[1] > 1:
-            hidden_states = context_parallel_util.gather_cp_2d(hidden_states, shape=(N_t, N_h, N_w), split_hw=self.cp_split_hw)
-
         hidden_states = self.unpatchify(hidden_states, N_t, N_h, N_w)  # [B, C_out, H, W]
         hidden_states = cast(torch.Tensor, hidden_states)
 
@@ -546,7 +541,6 @@ class LongCatVideoTransformer3DModel(
             return hidden_states, kv_cache_dict_ret
         else:
             return hidden_states
-    
 
     def unpatchify(self, x, N_t, N_h, N_w):
         """

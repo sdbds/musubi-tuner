@@ -1,15 +1,17 @@
+# This file includes code derived from:
+# https://github.com/meituan-longcat/LongCat-Video
+# Copyright (c) 2025 Meituan
+# Licensed under the MIT License
+
 # References:
 # https://github.com/facebookresearch/fairseq/blob/main/fairseq/modules/rotary_positional_embedding.py
 
 import numpy as np
-from functools import lru_cache
 
 import torch
 import torch.nn as nn
 
 from einops import rearrange, repeat
-
-from ..context_parallel import context_parallel_util
 
 
 def broadcat(tensors, dim=-1):
@@ -20,9 +22,7 @@ def broadcat(tensors, dim=-1):
     dim = (dim + shape_len) if dim < 0 else dim
     dims = list(zip(*map(lambda t: list(t.shape), tensors)))
     expandable_dims = [(i, val) for i, val in enumerate(dims) if i != dim]
-    assert all(
-        [*map(lambda t: len(set(t[1])) <= 2, expandable_dims)]
-    ), "invalid dimensions for broadcastable concatentation"
+    assert all([*map(lambda t: len(set(t[1])) <= 2, expandable_dims)]), "invalid dimensions for broadcastable concatentation"
     max_dims = list(map(lambda t: (t[0], max(t[1])), expandable_dims))
     expanded_dims = list(map(lambda t: (t[0], (t[1],) * num_tensors), max_dims))
     expanded_dims.insert(dim, (dim, dims[dim]))
@@ -39,11 +39,7 @@ def rotate_half(x):
 
 
 class RotaryPositionalEmbedding(nn.Module):
-
-    def __init__(self,
-                 head_dim,
-                 cp_split_hw=None
-                 ):
+    def __init__(self, head_dim, cp_split_hw=None):
         """Rotary positional embedding for 3D
         Reference : https://blog.eleuther.ai/rotary-embeddings/
         Paper: https://arxiv.org/pdf/2104.09864.pdf
@@ -53,20 +49,17 @@ class RotaryPositionalEmbedding(nn.Module):
         """
         super().__init__()
         self.head_dim = head_dim
-        assert self.head_dim % 8 == 0, 'Dim must be a multiply of 8 for 3D RoPE.'
-        self.cp_split_hw = cp_split_hw
+        assert self.head_dim % 8 == 0, "Dim must be a multiply of 8 for 3D RoPE."
         # We take the assumption that the longest side of grid will not larger than 512, i.e, 512 * 8 = 4098 input pixels
         self.base = 10000
         self.freqs_dict = {}
 
     def register_grid_size(self, grid_size):
         if grid_size not in self.freqs_dict:
-            self.freqs_dict.update({
-                grid_size: self.precompute_freqs_cis_3d(grid_size)
-            })
+            self.freqs_dict.update({grid_size: self.precompute_freqs_cis_3d(grid_size)})
 
     def precompute_freqs_cis_3d(self, grid_size):
-        num_frames, height, width = grid_size     
+        num_frames, height, width = grid_size
         dim_t = self.head_dim - 4 * (self.head_dim // 6)
         dim_h = 2 * (self.head_dim // 6)
         dim_w = 2 * (self.head_dim // 6)
@@ -88,12 +81,6 @@ class RotaryPositionalEmbedding(nn.Module):
         freqs = broadcat((freqs_t[:, None, None, :], freqs_h[None, :, None, :], freqs_w[None, None, :, :]), dim=-1)
         # (T H W D)
         freqs = rearrange(freqs, "T H W D -> (T H W) D")
-        if self.cp_split_hw and self.cp_split_hw[0] * self.cp_split_hw[1] > 1:
-            with torch.no_grad():
-                freqs = rearrange(freqs, "(T H W) D -> T H W D", T=num_frames, H=height, W=width)
-                freqs = context_parallel_util.split_cp_2d(freqs, seq_dim_hw=(1, 2), split_hw=self.cp_split_hw)
-                freqs = rearrange(freqs, "T H W D -> (T H W) D")
-
         return freqs
 
     def forward(self, q, k, grid_size):
@@ -113,7 +100,7 @@ class RotaryPositionalEmbedding(nn.Module):
         q_, k_ = q.float(), k.float()
         freqs_cis = freqs_cis.float().to(q.device)
         cos, sin = freqs_cis.cos(), freqs_cis.sin()
-        cos, sin = rearrange(cos, 'n d -> 1 1 n d'), rearrange(sin, 'n d -> 1 1 n d')
+        cos, sin = rearrange(cos, "n d -> 1 1 n d"), rearrange(sin, "n d -> 1 1 n d")
         q_ = (q_ * cos) + (rotate_half(q_) * sin)
         k_ = (k_ * cos) + (rotate_half(k_) * sin)
 

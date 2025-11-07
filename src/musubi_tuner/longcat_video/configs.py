@@ -1,5 +1,3 @@
-"""Canonical configuration(s) for the LongCat DiT architecture."""
-
 LONGCAT_LATENTS_MEAN = (
     -0.7571,
     -0.7089,
@@ -52,12 +50,5 @@ LONGCAT_BASE_CONFIG = {
     "enable_flashattn3": False,
     "enable_flashattn2": True,
     "enable_xformers": False,
-    "enable_bsa": False,
-    "bsa_params": {
-        "sparsity": 0.9375,
-        "chunk_3d_shape_q": (4, 4, 4),
-        "chunk_3d_shape_k": (4, 4, 4),
-    },
-    "cp_split_hw": None,
     "text_tokens_zero_pad": True,
 }

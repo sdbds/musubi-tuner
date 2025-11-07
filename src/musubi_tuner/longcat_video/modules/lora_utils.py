@@ -1,12 +1,14 @@
+# This file includes code derived from:
+# https://github.com/meituan-longcat/LongCat-Video
+# Copyright (c) 2025 Meituan
+# Licensed under the MIT License
+
 # References:
 # https://github.com/microsoft/LoRA/blob/main/loralib/layers.py
 # https://github.com/cloneofsimo/lora/blob/master/lora_diffusion/lora.py
 # https://github.com/bmaltais/kohya_ss
 
 import math
-import functools
-from collections import defaultdict
-
 from typing import Optional
 
 import torch
@@ -29,18 +31,10 @@ class LoRAModule(torch.nn.Module):
     replaces forward method of the original Linear, instead of replacing the original Linear module.
     """
 
-    def __init__(
-        self,
-        lora_name,
-        org_module: torch.nn.Module,
-        multiplier=1.0,
-        lora_dim=4,
-        alpha=1,
-        n_seperate=1
-    ):
+    def __init__(self, lora_name, org_module: torch.nn.Module, multiplier=1.0, lora_dim=4, alpha=1, n_seperate=1):
         super().__init__()
         self.lora_name = lora_name
-        
+
         assert org_module.__class__.__name__ == "Linear"
         in_dim = org_module.in_features
         out_dim = org_module.out_features
@@ -51,7 +45,9 @@ class LoRAModule(torch.nn.Module):
         self.lora_dim = lora_dim
         if n_seperate > 1:
             self.lora_down = torch.nn.Linear(in_dim, n_seperate * self.lora_dim, bias=False)
-            self.lora_up = LoRAUPParallel([torch.nn.Linear(self.lora_dim, out_dim // n_seperate, bias=False) for _ in range(n_seperate)])
+            self.lora_up = LoRAUPParallel(
+                [torch.nn.Linear(self.lora_dim, out_dim // n_seperate, bias=False) for _ in range(n_seperate)]
+            )
         else:
             self.lora_down = torch.nn.Linear(in_dim, self.lora_dim, bias=False)
             self.lora_up = torch.nn.Linear(self.lora_dim, out_dim, bias=False)
@@ -69,19 +65,18 @@ class LoRAModule(torch.nn.Module):
                 torch.nn.init.zeros_(block.weight)
         else:
             torch.nn.init.zeros_(self.lora_up.weight)
-            
+
         self.multiplier = multiplier
         self.use_lora = True
-    
+
     def set_use_lora(self, use_lora):
         self.use_lora = use_lora
 
 
 class LoRANetwork(torch.nn.Module):
-    
     LORA_PREFIX = "lora"
     LORA_HYPHEN = "___lorahyphen___"
-    
+
     def __init__(
         self,
         model,
@@ -111,7 +106,7 @@ class LoRANetwork(torch.nn.Module):
             # 查找模块
             try:
                 module = model
-                for part in module_name.split('.'):
+                for part in module_name.split("."):
                     module = getattr(module, part)
             except Exception as e:
                 print(f"Cannot find module: {module_name}, error: {e}")
@@ -129,16 +124,9 @@ class LoRANetwork(torch.nn.Module):
             dim = self.lora_dim
             alpha = self.alpha
 
-            lora = LoRAModule(
-                lora_name,
-                module,
-                self.multiplier,
-                dim,
-                alpha,
-                n_seperate=n_seperate
-            )
+            lora = LoRAModule(lora_name, module, self.multiplier, dim, alpha, n_seperate=n_seperate)
             loras.append(lora)
-            
+
         self.loras = loras
         for lora in self.loras:
             self.add_module(lora.lora_name, lora)
@@ -194,4 +182,3 @@ def create_lora_network(
         alpha=network_alpha,
     )
     return network
-

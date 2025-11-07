@@ -1,3 +1,8 @@
+# This file includes code derived from:
+# https://github.com/meituan-longcat/LongCat-Video
+# Copyright (c) 2025 Meituan
+# Licensed under the MIT License
+
 # References:
 # https://github.com/hpcaitech/Open-Sora
 # https://github.com/facebookresearch/DiT/blob/main/models.py

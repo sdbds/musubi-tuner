@@ -1,5 +1,4 @@
 import argparse
-import json
 import os
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -10,7 +9,6 @@ from PIL import Image
 from accelerate import Accelerator
 from transformers import AutoTokenizer, UMT5EncoderModel
 import logging
-import os
 from tqdm import tqdm
 
 from musubi_tuner.longcat_video.configs import (
@@ -25,7 +23,6 @@ logging.basicConfig(level=logging.INFO)
 from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_LONGCAT, ARCHITECTURE_LONGCAT_FULL
 from musubi_tuner.hv_train_network import (
     NetworkTrainer,
-    clean_memory_on_device,
     load_prompts,
     read_config_from_file,
     setup_parser_common,
@@ -132,8 +129,6 @@ def load_longcat_model(
     load_device = torch.device(load_device)
 
     base_config = dict(LONGCAT_BASE_CONFIG)
-    if LONGCAT_BASE_CONFIG.get("bsa_params") is not None:
-        base_config["bsa_params"] = dict(LONGCAT_BASE_CONFIG["bsa_params"])
     attn_mode_normalized = (attn_mode or "torch").lower()
     if attn_mode_normalized == "torch":
         base_config["enable_flashattn2"] = False
@@ -228,23 +223,8 @@ def load_longcat_model(
                 model.register_buffer(name, buffer.to(torch_dtype))
 
     model = model.to(device=target_device)
-    _ensure_cp_split_defaults(model)
 
     return model
-
-
-def _ensure_cp_split_defaults(transformer: LongCatVideoTransformer3DModel) -> None:
-    if getattr(transformer, "cp_split_hw", None) is None:
-        transformer.cp_split_hw = (1, 1)
-    for block in getattr(transformer, "blocks", []):
-        attn = getattr(block, "attn", None)
-        if attn is None:
-            continue
-        if getattr(attn, "cp_split_hw", None) is None:
-            attn.cp_split_hw = (1, 1)
-        rope = getattr(attn, "rope_3d", None)
-        if rope is not None and getattr(rope, "cp_split_hw", None) is None:
-            rope.cp_split_hw = (1, 1)
 
 
 class LongCatNetworkTrainer(NetworkTrainer):
@@ -295,7 +275,7 @@ class LongCatNetworkTrainer(NetworkTrainer):
         self._control_training = False
         self.default_guidance_scale = 4.0
         self._flow_target = getattr(args, "flow_target", "x1_minus_x0")
-        
+
         if args.control_video:
             raise ValueError("LongCat training does not support control video conditioning; omit --control_video options")
 
@@ -412,7 +392,6 @@ class LongCatNetworkTrainer(NetworkTrainer):
         image_path: Optional[str] = None,
         control_video_path: Optional[str] = None,
     ):
-
         scheduler = FlowMatchEulerDiscreteScheduler(
             shift=12.0,
             use_dynamic_shifting=False,
@@ -591,7 +570,9 @@ class LongCatNetworkTrainer(NetworkTrainer):
 
                     model_pred = -model_pred
                     model_pred = model_pred.to(latents.dtype)
-                    denoised = scheduler.step(model_pred[:, :, num_cond_latents:], t, latents[:, :, num_cond_latents:], return_dict=False)[0]
+                    denoised = scheduler.step(
+                        model_pred[:, :, num_cond_latents:], t, latents[:, :, num_cond_latents:], return_dict=False
+                    )[0]
                     latents[:, :, num_cond_latents:] = denoised
 
         latents_decode = self._denormalize_latents_tensor(latents.to(vae.dtype))
@@ -751,7 +732,6 @@ class LongCatNetworkTrainer(NetworkTrainer):
 
     # endregion -------------------------------------------------------------
 
-
     # region helpers --------------------------------------------------------
 
     def on_load_text_encoder(
@@ -869,8 +849,7 @@ class LongCatNetworkTrainer(NetworkTrainer):
                 timesteps_expanded = timesteps_input.clone()
                 if timesteps_expanded.shape[1] != total_latent_frames:
                     raise ValueError(
-                        f"Per-token timestep shape mismatch: expected {total_latent_frames}, "
-                        f"got {timesteps_expanded.shape[1]}"
+                        f"Per-token timestep shape mismatch: expected {total_latent_frames}, got {timesteps_expanded.shape[1]}"
                     )
             timesteps_expanded = timesteps_expanded.clone()
             timesteps_expanded[:, :num_cond_latents] = 0
