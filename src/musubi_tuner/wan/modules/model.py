@@ -420,7 +420,7 @@ class WanAttentionBlock(nn.Module):
             # y = self.self_attn((self.norm1(x).float() * (1 + e[1]) + e[0]).to(org_dtype), seq_lens, grid_sizes, freqs)
             y = self.self_attn(torch.addcmul(e[0], self.norm1(x).float(), (1 + e[1])).to(org_dtype), seq_lens, grid_sizes, freqs)
             # x = (x + y.to(torch.float32) * e[2]).to(org_dtype)
-            x = torch.addcmul(x.to(org_dtype), y.to(torch.float32), e[2]).to(org_dtype)
+            x = torch.addcmul(x, y.to(torch.float32), e[2]).to(org_dtype)
             del y
 
             # cross-attention & ffn
