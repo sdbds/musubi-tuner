@@ -429,7 +429,7 @@ class WanAttentionBlock(nn.Module):
             # y = self.ffn((self.norm2(x).float() * (1 + e[4]) + e[3]).to(org_dtype))
             y = self.ffn(torch.addcmul(e[3], self.norm2(x).float(), (1 + e[4])).to(org_dtype))
             # x = (x + y.to(torch.float32) * e[5]).to(org_dtype)
-            x = torch.addcmul(x.to(torch.float32), y.to(torch.float32), e[5]).to(org_dtype)
+            x = torch.addcmul(x, y.to(torch.float32), e[5]).to(org_dtype)
             del y
         else:  # For Wan2.2
             e = self.modulation.to(torch.float32) + e
@@ -453,7 +453,7 @@ class WanAttentionBlock(nn.Module):
             # y = self.ffn((self.norm2(x).float() * (1 + e[4].squeeze(2)) + e[3].squeeze(2)).to(org_dtype))
             y = self.ffn(torch.addcmul(e[3].squeeze(2), self.norm2(x).float(), (1 + e[4].squeeze(2))).to(org_dtype))
             # x = (x + y.to(torch.float32) * e[5].squeeze(2)).to(org_dtype)
-            x = torch.addcmul(x.to(torch.float32), y.to(torch.float32), e[5].squeeze(2)).to(org_dtype)
+            x = torch.addcmul(x, y.to(torch.float32), e[5].squeeze(2)).to(org_dtype)
             del y
 
         return x
@@ -495,11 +495,11 @@ class Head(nn.Module):
         if self.model_version == "2.1":
             e = (self.modulation.to(torch.float32) + e.unsqueeze(1)).chunk(2, dim=1)
             # x = self.head(self.norm(x) * (1 + e[1]) + e[0])
-            x = self.head(torch.addcmul(e[0], self.norm(x).to(torch.float32), (1 + e[1])))
+            x = self.head(torch.addcmul(e[0], self.norm(x), (1 + e[1])))
         else:  # For Wan2.2
             e = (self.modulation.unsqueeze(0).to(torch.float32) + e.unsqueeze(2)).chunk(2, dim=2)
             # x = self.head(self.norm(x) * (1 + e[1].squeeze(2)) + e[0].squeeze(2))
-            x = self.head(torch.addcmul(e[0].squeeze(2), self.norm(x).to(torch.float32), (1 + e[1].squeeze(2))))
+            x = self.head(torch.addcmul(e[0].squeeze(2), self.norm(x), (1 + e[1].squeeze(2))))
 
         return x
 
