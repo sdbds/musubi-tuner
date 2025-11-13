@@ -1555,6 +1555,28 @@ class NetworkTrainer:
 
         return transformer
 
+    def compile_transformer(self, args, transformer):
+        transformer: HYVideoDiffusionTransformer = transformer
+        if self.blocks_to_swap > 0:
+            logger.info("Disable linear from torch.compile for swap blocks...")
+            for block in transformer.double_blocks + transformer.single_blocks:
+                model_utils.disable_linear_from_compile(block)
+
+        logger.info("Compiling DiT model with torch.compile...")
+        if args.compile_cache_size_limit is not None:
+            torch._dynamo.config.cache_size_limit = args.compile_cache_size_limit
+        for blocks in [transformer.double_blocks, transformer.single_blocks]:
+            for i, block in enumerate(blocks):
+                block = torch.compile(
+                    block,
+                    backend=args.compile_backend,
+                    mode=args.compile_mode,
+                    dynamic=args.compile_dynamic,
+                    fullgraph=args.compile_fullgraph,
+                )
+                blocks[i] = block
+        return transformer
+
     def scale_shift_latents(self, latents):
         latents = latents * vae_module.SCALING_FACTOR
         return latents
@@ -1617,9 +1639,6 @@ class NetworkTrainer:
         target = noise - latents
 
         return model_pred, target
-
-    def compile_transformer(self, args: argparse.Namespace, transformer):
-        return transformer
 
     # endregion model specific
 

@@ -517,6 +517,27 @@ class WanNetworkTrainer(NetworkTrainer):
 
         return model
 
+    def compile_transformer(self, args, transformer):
+        transformer: WanModel = transformer
+        if self.blocks_to_swap > 0:
+            logger.info("Disable linear from torch.compile for swap blocks...")
+            for block in transformer.blocks:
+                model_utils.disable_linear_from_compile(block)
+
+        logger.info("Compiling DiT model with torch.compile...")
+        if args.compile_cache_size_limit is not None:
+            torch._dynamo.config.cache_size_limit = args.compile_cache_size_limit
+        for i, block in enumerate(transformer.blocks):
+            block = torch.compile(
+                block,
+                backend=args.compile_backend,
+                mode=args.compile_mode,
+                dynamic=args.compile_dynamic,
+                fullgraph=args.compile_fullgraph,
+            )
+            transformer.blocks[i] = block
+        return transformer
+
     def scale_shift_latents(self, latents):
         return latents
 
