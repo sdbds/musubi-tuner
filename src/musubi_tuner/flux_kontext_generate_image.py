@@ -15,12 +15,13 @@ from tqdm import tqdm
 from musubi_tuner.flux import flux_utils
 from musubi_tuner.flux.flux_utils import load_flow_model
 from musubi_tuner.flux import flux_models
+from musubi_tuner.utils import model_utils
 
 lycoris_available = find_spec("lycoris") is not None
 
 from musubi_tuner.networks import lora_flux
 from musubi_tuner.utils.device_utils import clean_memory_on_device
-from musubi_tuner.hv_generate_video import get_time_flag, save_images_grid, synchronize_device
+from musubi_tuner.hv_generate_video import get_time_flag, save_images_grid, setup_parser_compile, synchronize_device
 from musubi_tuner.wan_generate_video import merge_lora_weights
 
 import logging
@@ -125,14 +126,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--lycoris", action="store_true", help=f"use lycoris for inference{'' if lycoris_available else ' (not available)'}"
     )
-    # parser.add_argument("--compile", action="store_true", help="Enable torch.compile")
-    # parser.add_argument(
-    #     "--compile_args",
-    #     nargs=4,
-    #     metavar=("BACKEND", "MODE", "DYNAMIC", "FULLGRAPH"),
-    #     default=["inductor", "max-autotune-no-cudagraphs", "False", "False"],
-    #     help="Torch.compile settings",
-    # )
+    setup_parser_compile(parser)
 
     # New arguments for batch and interactive modes
     parser.add_argument("--from_file", type=str, default=None, help="Read prompts from a file")
@@ -338,6 +332,26 @@ def optimize_model(model: flux_models.Flux, args: argparse.Namespace, device: to
     else:
         # make sure the model is on the right device
         model.to(device)
+
+    if args.compile:
+        if args.blocks_to_swap > 0:
+            logger.info("Disable linear from torch.compile for swap blocks...")
+            for block in model.double_blocks + model.single_blocks:
+                model_utils.disable_linear_from_compile(block)
+
+        logger.info("Compiling DiT model with torch.compile...")
+        if args.compile_cache_size_limit is not None:
+            torch._dynamo.config.cache_size_limit = args.compile_cache_size_limit
+        for blocks in [model.double_blocks, model.single_blocks]:
+            for i, block in enumerate(blocks):
+                block = torch.compile(
+                    block,
+                    backend=args.compile_backend,
+                    mode=args.compile_mode,
+                    dynamic=args.compile_dynamic,
+                    fullgraph=args.compile_fullgraph,
+                )
+                blocks[i] = block
 
     model.eval().requires_grad_(False)
     clean_memory_on_device(device)
