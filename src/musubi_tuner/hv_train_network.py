@@ -2392,6 +2392,12 @@ def setup_parser_common() -> argparse.ArgumentParser:
         action="store_true",
         help="Enable fullgraph mode in torch.compile / torch.compileでフルグラフモードを有効にする",
     )
+    parser.add_argument(
+        "--compile_cache_size_limit",
+        type=int,
+        default=None,
+        help="Set torch._dynamo.config.cache_size_limit (default: PyTorch default, typically 8-32) / torch._dynamo.config.cache_size_limitを設定（デフォルト: PyTorchのデフォルト、通常8-32）",
+    )
 
     # training settings
     parser.add_argument("--max_train_steps", type=int, default=1600, help="training steps / 学習ステップ数")
