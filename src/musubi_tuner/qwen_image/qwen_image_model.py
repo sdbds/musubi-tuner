@@ -551,6 +551,7 @@ class FeedForward(nn.Module):
         return hidden_states
 
 # torch.inductor does not support code generation for complex
+# This breaks fullgraph=True
 @torch.compiler.disable
 def apply_rotary_emb_qwen(
     x: torch.Tensor,

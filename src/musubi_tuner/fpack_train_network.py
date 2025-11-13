@@ -31,6 +31,8 @@ from musubi_tuner.hv_train_network import (
 
 import logging
 
+from musubi_tuner.utils import model_utils
+
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
@@ -505,6 +507,28 @@ class FramePackNetworkTrainer(NetworkTrainer):
             device, dit_path, attn_mode, loading_device, args.fp8_scaled, split_attn, disable_numpy_memmap=args.disable_numpy_memmap
         )
         return model
+
+    def compile_transformer(self, args, transformer):
+        transformer: HunyuanVideoTransformer3DModelPacked = transformer
+        if self.blocks_to_swap > 0:
+            logger.info("Disable linear from torch.compile for swap blocks...")
+            for block in transformer.transformer_blocks + transformer.single_transformer_blocks:
+                model_utils.disable_linear_from_compile(block)
+
+        logger.info("Compiling DiT model with torch.compile...")
+        if args.compile_cache_size_limit is not None:
+            torch._dynamo.config.cache_size_limit = args.compile_cache_size_limit
+        for blocks in [transformer.transformer_blocks, transformer.single_transformer_blocks]:
+            for i, block in enumerate(blocks):
+                block = torch.compile(
+                    block,
+                    backend=args.compile_backend,
+                    mode=args.compile_mode,
+                    dynamic=args.compile_dynamic,
+                    fullgraph=args.compile_fullgraph,
+                )
+                blocks[i] = block
+        return transformer
 
     def scale_shift_latents(self, latents):
         # FramePack VAE includes scaling

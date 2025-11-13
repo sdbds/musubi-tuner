@@ -1555,6 +1555,28 @@ class NetworkTrainer:
 
         return transformer
 
+    def compile_transformer(self, args, transformer):
+        transformer: HYVideoDiffusionTransformer = transformer
+        if self.blocks_to_swap > 0:
+            logger.info("Disable linear from torch.compile for swap blocks...")
+            for block in transformer.double_blocks + transformer.single_blocks:
+                model_utils.disable_linear_from_compile(block)
+
+        logger.info("Compiling DiT model with torch.compile...")
+        if args.compile_cache_size_limit is not None:
+            torch._dynamo.config.cache_size_limit = args.compile_cache_size_limit
+        for blocks in [transformer.double_blocks, transformer.single_blocks]:
+            for i, block in enumerate(blocks):
+                block = torch.compile(
+                    block,
+                    backend=args.compile_backend,
+                    mode=args.compile_mode,
+                    dynamic=args.compile_dynamic,
+                    fullgraph=args.compile_fullgraph,
+                )
+                blocks[i] = block
+        return transformer
+
     def scale_shift_latents(self, latents):
         latents = latents * vae_module.SCALING_FACTOR
         return latents
@@ -1617,9 +1639,6 @@ class NetworkTrainer:
         target = noise - latents
 
         return model_pred, target
-
-    def compile_transformer(self, args: argparse.Namespace, transformer):
-        return transformer
 
     # endregion model specific
 
@@ -1749,9 +1768,6 @@ class NetworkTrainer:
                 blocks_to_swap, accelerator.device, supports_backward=True, use_pinned_memory=args.use_pinned_memory_for_block_swap
             )
             transformer.move_to_device_except_swap_blocks(accelerator.device)
-
-        if args.compile:
-            transformer = self.compile_transformer(args, transformer)
 
         # load network model for differential training
         sys.path.append(os.path.dirname(__file__))
@@ -1896,6 +1912,9 @@ class NetworkTrainer:
             accelerator.unwrap_model(transformer).prepare_block_swap_before_forward()
         else:
             transformer = accelerator.prepare(transformer)
+
+        if args.compile:
+            transformer = self.compile_transformer(args, transformer)
 
         network, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(network, optimizer, train_dataloader, lr_scheduler)
         training_model = network
@@ -2148,6 +2167,8 @@ class NetworkTrainer:
             accelerator.unwrap_model(network).on_epoch_start(transformer)
 
             for step, batch in enumerate(train_dataloader):
+                # torch.compiler.cudagraph_mark_step_begin() # for cudagraphs
+
                 latents = batch["latents"]
 
                 with accelerator.accumulate(training_model):
@@ -2389,6 +2410,12 @@ def setup_parser_common() -> argparse.ArgumentParser:
         "--compile_fullgraph",
         action="store_true",
         help="Enable fullgraph mode in torch.compile / torch.compileでフルグラフモードを有効にする",
+    )
+    parser.add_argument(
+        "--compile_cache_size_limit",
+        type=int,
+        default=None,
+        help="Set torch._dynamo.config.cache_size_limit (default: PyTorch default, typically 8-32) / torch._dynamo.config.cache_size_limitを設定（デフォルト: PyTorchのデフォルト、通常8-32）",
     )
 
     # training settings

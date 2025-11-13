@@ -358,7 +358,8 @@ class QwenImageNetworkTrainer(NetworkTrainer):
                 model_utils.disable_linear_from_compile(block)
 
         logger.info("Compiling DiT model with torch.compile...")
-        torch._dynamo.config.cache_size_limit = 32
+        if args.compile_cache_size_limit is not None:
+            torch._dynamo.config.cache_size_limit = args.compile_cache_size_limit
         for i, block in enumerate(transformer.transformer_blocks):
             block = torch.compile(
                 block,
