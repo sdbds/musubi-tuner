@@ -266,14 +266,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--lycoris", action="store_true", help=f"use lycoris for inference{'' if lycoris_available else ' (not available)'}"
     )
-    # parser.add_argument("--compile", action="store_true", help="Enable torch.compile")
-    # parser.add_argument(
-    #     "--compile_args",
-    #     nargs=4,
-    #     metavar=("BACKEND", "MODE", "DYNAMIC", "FULLGRAPH"),
-    #     default=["inductor", "max-autotune-no-cudagraphs", "False", "False"],
-    #     help="Torch.compile settings",
-    # )
+    parser.add_argument("--compile", action="store_true", help="Enable torch.compile")
+    parser.add_argument(
+        "--compile_args",
+        nargs=4,
+        metavar=("BACKEND", "MODE", "DYNAMIC", "FULLGRAPH"),
+        default=["inductor", "max-autotune-no-cudagraphs", "False", "False"],
+        help="Torch.compile settings",
+    )
 
     # MagCache
     parser.add_argument(
@@ -538,20 +538,21 @@ def load_dit_model(args: argparse.Namespace, device: torch.device) -> HunyuanVid
         if target_device is not None and target_dtype is not None:
             model.to(target_device, target_dtype)  # move and cast  at the same time. this reduces redundant copy operations
 
-    # if args.compile:
-    #     compile_backend, compile_mode, compile_dynamic, compile_fullgraph = args.compile_args
-    #     logger.info(
-    #         f"Torch Compiling[Backend: {compile_backend}; Mode: {compile_mode}; Dynamic: {compile_dynamic}; Fullgraph: {compile_fullgraph}]"
-    #     )
-    #     torch._dynamo.config.cache_size_limit = 32
-    #     for i in range(len(model.blocks)):
-    #         model.blocks[i] = torch.compile(
-    #             model.blocks[i],
-    #             backend=compile_backend,
-    #             mode=compile_mode,
-    #             dynamic=compile_dynamic.lower() in "true",
-    #             fullgraph=compile_fullgraph.lower() in "true",
-    #         )
+    if args.compile:
+        compile_backend, compile_mode, compile_dynamic, compile_fullgraph = args.compile_args
+        logger.info(
+            f"Torch Compiling[Backend: {compile_backend}; Mode: {compile_mode}; Dynamic: {compile_dynamic}; Fullgraph: {compile_fullgraph}]"
+        )
+        torch._dynamo.config.cache_size_limit = 32
+        for blocks in [model.transformer_blocks, model.single_transformer_blocks]:
+            for i in range(len(blocks)):
+                blocks[i] = torch.compile(
+                    blocks[i],
+                    backend=compile_backend,
+                    mode=compile_mode,
+                    dynamic=compile_dynamic.lower() in "true",
+                    fullgraph=compile_fullgraph.lower() in "true",
+                )
 
     if args.blocks_to_swap > 0:
         logger.info(f"Enable swap {args.blocks_to_swap} blocks to CPU from device: {device}")

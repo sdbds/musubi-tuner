@@ -22,6 +22,7 @@ from musubi_tuner.hv_train_network import (
     setup_parser_common,
     read_config_from_file,
 )
+from musubi_tuner.utils import model_utils
 from musubi_tuner.utils.sai_model_spec import CUSTOM_ARCH_QWEN_IMAGE_EDIT_PLUS
 
 import logging
@@ -349,6 +350,25 @@ class QwenImageNetworkTrainer(NetworkTrainer):
             disable_numpy_memmap=args.disable_numpy_memmap,
         )
         return model
+
+    def compile_transformer(self, args, transformer):
+        if self.blocks_to_swap > 0:
+            logger.info("Disable linear from torch.compile for swap blocks...")
+            for block in transformer.transformer_blocks:
+                model_utils.disable_linear_from_compile(block)
+
+        logger.info("Compiling DiT model with torch.compile...")
+        torch._dynamo.config.cache_size_limit = 32
+        for i, block in enumerate(transformer.transformer_blocks):
+            block = torch.compile(
+                block,
+                backend=args.compile_backend,
+                mode=args.compile_mode,
+                dynamic=args.compile_dynamic,
+                fullgraph=args.compile_fullgraph,
+            )
+            transformer.transformer_blocks[i] = block
+        return transformer
 
     def scale_shift_latents(self, latents):
         return latents

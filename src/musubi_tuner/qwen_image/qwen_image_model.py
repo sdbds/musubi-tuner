@@ -550,7 +550,8 @@ class FeedForward(nn.Module):
             hidden_states = module(hidden_states)
         return hidden_states
 
-
+# torch.inductor does not support code generation for complex
+@torch.compiler.disable
 def apply_rotary_emb_qwen(
     x: torch.Tensor,
     freqs_cis: Union[torch.Tensor, Tuple[torch.Tensor]],
@@ -910,9 +911,9 @@ class QwenImageTransformerBlock(nn.Module):
         del attn_output
 
         # Apply attention gates and add residual (like in Megatron)
-        hidden_states = hidden_states + img_gate1 * img_attn_output
+        hidden_states = torch.addcmul(hidden_states, img_gate1, img_attn_output)
         del img_gate1, img_attn_output
-        encoder_hidden_states = encoder_hidden_states + txt_gate1 * txt_attn_output
+        encoder_hidden_states = torch.addcmul(encoder_hidden_states, txt_gate1, txt_attn_output)
         del txt_gate1, txt_attn_output
 
         # Process image stream - norm2 + MLP
@@ -921,7 +922,7 @@ class QwenImageTransformerBlock(nn.Module):
         del img_normed2, img_mod2
         img_mlp_output = self.img_mlp(img_modulated2)
         del img_modulated2
-        hidden_states = hidden_states + img_gate2 * img_mlp_output
+        hidden_states = torch.addcmul(hidden_states, img_gate2, img_mlp_output)
         del img_gate2, img_mlp_output
 
         # Process text stream - norm2 + MLP
@@ -930,7 +931,7 @@ class QwenImageTransformerBlock(nn.Module):
         del txt_normed2, txt_mod2
         txt_mlp_output = self.txt_mlp(txt_modulated2)
         del txt_modulated2
-        encoder_hidden_states = encoder_hidden_states + txt_gate2 * txt_mlp_output
+        encoder_hidden_states = torch.addcmul(encoder_hidden_states, txt_gate2, txt_mlp_output)
         del txt_gate2, txt_mlp_output
 
         # Clip to prevent overflow for fp16

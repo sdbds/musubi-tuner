@@ -1618,6 +1618,9 @@ class NetworkTrainer:
 
         return model_pred, target
 
+    def compile_transformer(self, args: argparse.Namespace, transformer):
+        return transformer
+
     # endregion model specific
 
     def train(self, args):
@@ -1746,6 +1749,9 @@ class NetworkTrainer:
                 blocks_to_swap, accelerator.device, supports_backward=True, use_pinned_memory=args.use_pinned_memory_for_block_swap
             )
             transformer.move_to_device_except_swap_blocks(accelerator.device)
+
+        if args.compile:
+            transformer = self.compile_transformer(args, transformer)
 
         # load network model for differential training
         sys.path.append(os.path.dirname(__file__))
@@ -2323,7 +2329,7 @@ def setup_parser_common() -> argparse.ArgumentParser:
         help="config file for dataset / データセットの設定ファイル",
     )
 
-    # training settings
+    # model settings
     parser.add_argument(
         "--sdpa",
         action="store_true",
@@ -2356,7 +2362,36 @@ def setup_parser_common() -> argparse.ArgumentParser:
         help="use split attention for attention calculation (split batch size=1, affects memory usage and speed)"
         " / attentionを分割して計算する（バッチサイズ=1に分割、メモリ使用量と速度に影響）",
     )
+    parser.add_argument(
+        "--compile",
+        action="store_true",
+        help="Enable torch.compile (requires Triton) / torch.compileを有効にする（Tritonが必要）",
+    )
+    parser.add_argument(
+        "--compile_backend",
+        type=str,
+        default="inductor",
+        help="torch.compile backend (default: inductor) / torch.compileのバックエンド（デフォルト: inductor）",
+    )
+    parser.add_argument(
+        "--compile_mode",
+        type=str,
+        default="default",  # 学習用のデフォルト
+        choices=["default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs"],
+        help="torch.compile mode (default: default) / torch.compileのモード（デフォルト: default）",
+    )
+    parser.add_argument(
+        "--compile_dynamic",
+        action="store_true",
+        help="Enable dynamic shapes in torch.compile / torch.compileで動的形状を有効にする",
+    )
+    parser.add_argument(
+        "--compile_fullgraph",
+        action="store_true",
+        help="Enable fullgraph mode in torch.compile / torch.compileでフルグラフモードを有効にする",
+    )
 
+    # training settings
     parser.add_argument("--max_train_steps", type=int, default=1600, help="training steps / 学習ステップ数")
     parser.add_argument(
         "--max_train_epochs",
