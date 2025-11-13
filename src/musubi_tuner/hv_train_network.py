@@ -1750,9 +1750,6 @@ class NetworkTrainer:
             )
             transformer.move_to_device_except_swap_blocks(accelerator.device)
 
-        if args.compile:
-            transformer = self.compile_transformer(args, transformer)
-
         # load network model for differential training
         sys.path.append(os.path.dirname(__file__))
         accelerator.print("import network module:", args.network_module)
@@ -1896,6 +1893,9 @@ class NetworkTrainer:
             accelerator.unwrap_model(transformer).prepare_block_swap_before_forward()
         else:
             transformer = accelerator.prepare(transformer)
+
+        if args.compile:
+            transformer = self.compile_transformer(args, transformer)
 
         network, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(network, optimizer, train_dataloader, lr_scheduler)
         training_model = network
