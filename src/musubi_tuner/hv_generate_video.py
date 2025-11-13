@@ -765,10 +765,10 @@ def main():
                 for i, block in enumerate(blocks):
                     block = torch.compile(
                         block,
-                        backend=args.compile_backend,
-                        mode=args.compile_mode,
-                        dynamic=args.compile_dynamic,
-                        fullgraph=args.compile_fullgraph,
+                        backend=compile_backend,
+                        mode=compile_mode,
+                        dynamic=compile_dynamic,
+                        fullgraph=compile_fullgraph,
                     )
                     blocks[i] = block
 
