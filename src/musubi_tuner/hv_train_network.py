@@ -2148,6 +2148,8 @@ class NetworkTrainer:
             accelerator.unwrap_model(network).on_epoch_start(transformer)
 
             for step, batch in enumerate(train_dataloader):
+                # torch.compiler.cudagraph_mark_step_begin() # for cudagraphs
+
                 latents = batch["latents"]
 
                 with accelerator.accumulate(training_model):
