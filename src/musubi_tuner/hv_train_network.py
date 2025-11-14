@@ -1643,6 +1643,15 @@ class NetworkTrainer:
     # endregion model specific
 
     def train(self, args):
+        if torch.cuda.is_available():
+            if args.cuda_allow_tf32:
+                torch.backends.cuda.matmul.allow_tf32 = True
+                torch.backends.cudnn.allow_tf32 = True
+                logger.info("Enabled TF32 on CUDA / CUDAでTF32を有効化しました")
+            if args.cuda_cudnn_benchmark:
+                torch.backends.cudnn.benchmark = True
+                logger.info("Enabled cuDNN benchmark / cuDNNベンチマークを有効化しました")
+
         # check required arguments
         if args.dataset_config is None:
             raise ValueError("dataset_config is required / dataset_configが必要です")
@@ -2417,6 +2426,16 @@ def setup_parser_common() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Set torch._dynamo.config.cache_size_limit (default: PyTorch default, typically 8-32) / torch._dynamo.config.cache_size_limitを設定（デフォルト: PyTorchのデフォルト、通常8-32）",
+    )
+    parser.add_argument(
+        "--cuda_allow_tf32",
+        action="store_true",
+        help="Allow TF32 on Ampere or higher GPUs / Ampere以降のGPUでTF32を許可する",
+    )
+    parser.add_argument(
+        "--cuda_cudnn_benchmark",
+        action="store_true",
+        help="Enable cudnn benchmark for possibly faster training / cudnnのベンチマークを有効にして学習の高速化を図る",
     )
 
     # training settings

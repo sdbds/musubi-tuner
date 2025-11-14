@@ -125,6 +125,15 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
     # endregion model specific
 
     def train(self, args):
+        if torch.cuda.is_available():
+            if args.cuda_allow_tf32:
+                torch.backends.cuda.matmul.allow_tf32 = True
+                torch.backends.cudnn.allow_tf32 = True
+                logger.info("Enabled TF32 on CUDA / CUDAでTF32を有効化しました")
+            if args.cuda_cudnn_benchmark:
+                torch.backends.cudnn.benchmark = True
+                logger.info("Enabled cuDNN benchmark / cuDNNベンチマークを有効化しました")
+
         # check required arguments
         if args.dataset_config is None:
             raise ValueError("dataset_config is required / dataset_configが必要です")
