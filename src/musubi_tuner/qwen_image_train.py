@@ -312,6 +312,10 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
         else:
             transformer = accelerator.prepare(transformer)
 
+        if args.compile:
+            transformer = self.compile_transformer(args, transformer)
+            transformer.__dict__["_orig_mod"] = transformer  # for annoying accelerator checks
+
         optimizer, train_dataloader, lr_scheduler = accelerator.prepare(optimizer, train_dataloader, lr_scheduler)
         training_model = transformer
 
