@@ -1095,11 +1095,8 @@ class NetworkTrainer:
 
         distributed_state = PartialState()  # for multi gpu distributed inference. this is a singleton, so it's safe to use it here
 
-        # Use the unwrapped model when possible; fall back to the original model if unwrap_model fails (e.g., with torch.compile)
-        try:
-            transformer = accelerator.unwrap_model(transformer)
-        except AttributeError:
-            pass
+        # Use the unwrapped model
+        transformer = accelerator.unwrap_model(transformer)
         transformer.switch_block_swap_for_inference()
 
         # Create a directory to save the samples
