@@ -96,7 +96,7 @@ To use them, you need to opt-in by creating your own configuration file in the p
 
 **Quick Setup:**
 
-1.  Create a `CLAUDE.md` and/or `GEMINI.md` file in the project root.
+1.  Create a `CLAUDE.md`, `GEMINI.md`, and/or `AGENTS.md` file in the project root.
 2.  Add the following line to your `CLAUDE.md` to import the repository's recommended prompt (currently they are the almost same):
 
     ```markdown
@@ -109,9 +109,11 @@ To use them, you need to opt-in by creating your own configuration file in the p
     @./.ai/gemini.prompt.md
     ```
 
-3.  You can now add your own personal instructions below the import line (e.g., `Always respond in Japanese.`).
+    You may be also import the prompt depending on the agent you are using with the custom prompt file such as `AGENTS.md`.
 
-This approach ensures that you have full control over the instructions given to your agent while benefiting from the shared project context. Your `CLAUDE.md` and `GEMINI.md` are already listed in `.gitignore`, so it won't be committed to the repository.
+3.  You can now add your own personal instructions below the import line (e.g., `Always include a short summary of the change before diving into details.`).
+
+This approach ensures that you have full control over the instructions given to your agent while benefiting from the shared project context. Your `CLAUDE.md`, `GEMINI.md` and `AGENTS.md` (as well as Claude's `.mcp.json`) are already listed in `.gitignore`, so they won't be committed to the repository.
 
 ## Overview
 
