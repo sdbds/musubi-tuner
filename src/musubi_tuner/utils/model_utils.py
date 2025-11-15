@@ -210,3 +210,14 @@ def create_cpu_offloading_wrapper(func: Callable, device: torch.device) -> Calla
         return custom_forward
 
     return wrapper(func)
+
+
+def disable_linear_from_compile(module: torch.nn.Module):
+    """Monkey-patch to disable torch.compile for all Linear layers (if the class name ends with 'Linear') in the given module."""
+    for sub_module in module.modules():
+        # if isinstance(sub_module, torch.nn.Linear):
+        if sub_module.__class__.__name__.endswith("Linear"):
+            if not hasattr(sub_module, "_forward_before_disable_compile"):
+                sub_module._forward_before_disable_compile = sub_module.forward
+                sub_module._eager_forward = torch._dynamo.disable()(sub_module.forward)
+            sub_module.forward = sub_module._eager_forward  # override forward to disable compile
