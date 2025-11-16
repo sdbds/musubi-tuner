@@ -307,21 +307,6 @@ def optimize_model(model: flux_models.Flux, args: argparse.Namespace, device: to
         if target_device is not None and target_dtype is not None:
             model.to(target_device, target_dtype)  # move and cast  at the same time. this reduces redundant copy operations
 
-    # if args.compile:
-    #     compile_backend, compile_mode, compile_dynamic, compile_fullgraph = args.compile_args
-    #     logger.info(
-    #         f"Torch Compiling[Backend: {compile_backend}; Mode: {compile_mode}; Dynamic: {compile_dynamic}; Fullgraph: {compile_fullgraph}]"
-    #     )
-    #     torch._dynamo.config.cache_size_limit = 32
-    #     for i in range(len(model.blocks)):
-    #         model.blocks[i] = torch.compile(
-    #             model.blocks[i],
-    #             backend=compile_backend,
-    #             mode=compile_mode,
-    #             dynamic=compile_dynamic.lower() in "true",
-    #             fullgraph=compile_fullgraph.lower() in "true",
-    #         )
-
     if args.blocks_to_swap > 0:
         logger.info(f"Enable swap {args.blocks_to_swap} blocks to CPU from device: {device}")
         model.enable_block_swap(
@@ -334,24 +319,9 @@ def optimize_model(model: flux_models.Flux, args: argparse.Namespace, device: to
         model.to(device)
 
     if args.compile:
-        if args.blocks_to_swap > 0:
-            logger.info("Disable linear from torch.compile for swap blocks...")
-            for block in model.double_blocks + model.single_blocks:
-                model_utils.disable_linear_from_compile(block)
-
-        logger.info("Compiling DiT model with torch.compile...")
-        if args.compile_cache_size_limit is not None:
-            torch._dynamo.config.cache_size_limit = args.compile_cache_size_limit
-        for blocks in [model.double_blocks, model.single_blocks]:
-            for i, block in enumerate(blocks):
-                block = torch.compile(
-                    block,
-                    backend=args.compile_backend,
-                    mode=args.compile_mode,
-                    dynamic=args.compile_dynamic,
-                    fullgraph=args.compile_fullgraph,
-                )
-                blocks[i] = block
+        model = model_utils.compile_transformer(
+            args, model, [model.double_blocks, model.single_blocks], disable_linear=args.blocks_to_swap > 0
+        )
 
     model.eval().requires_grad_(False)
     clean_memory_on_device(device)
