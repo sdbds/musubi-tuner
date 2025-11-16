@@ -1,9 +1,13 @@
+import argparse
 import hashlib
 from io import BytesIO
 from typing import Any, Callable, Optional
-
+import logging
 import safetensors.torch
 import torch
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
 
 def model_hash(filename):
@@ -221,3 +225,39 @@ def disable_linear_from_compile(module: torch.nn.Module):
                 sub_module._forward_before_disable_compile = sub_module.forward
                 sub_module._eager_forward = torch._dynamo.disable()(sub_module.forward)
             sub_module.forward = sub_module._eager_forward  # override forward to disable compile
+
+
+def compile_transformer(
+    args: argparse.Namespace,
+    transformer: torch.nn.Module,
+    target_blocks: list[torch.nn.ModuleList | list[torch.nn.Module]],
+    disable_linear: bool,
+) -> torch.nn.Module:
+    if disable_linear:
+        logger.info("Disable linear from torch.compile for swap blocks...")
+        for blocks in target_blocks:
+            for block in blocks:
+                disable_linear_from_compile(block)
+
+    compile_dynamic = None
+    if args.compile_dynamic is not None:
+        compile_dynamic = {"true": True, "false": False, "auto": None}[args.compile_dynamic.lower()]
+
+    logger.info(
+        f"Compiling DiT model with torch.compile: backend={args.compile_backend}, mode={args.compile_mode}, dynamic={compile_dynamic}, fullgraph={args.compile_fullgraph}"
+    )
+
+    if args.compile_cache_size_limit is not None:
+        torch._dynamo.config.cache_size_limit = args.compile_cache_size_limit
+
+    for blocks in target_blocks:
+        for i, block in enumerate(blocks):
+            block = torch.compile(
+                block,
+                backend=args.compile_backend,
+                mode=args.compile_mode,
+                dynamic=compile_dynamic,
+                fullgraph=args.compile_fullgraph,
+            )
+            blocks[i] = block
+    return transformer

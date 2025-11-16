@@ -398,8 +398,11 @@ def setup_parser_compile(parser: argparse.ArgumentParser):
     )
     parser.add_argument(
         "--compile_dynamic",
-        action="store_true",
-        help="Enable dynamic shapes in torch.compile / torch.compileで動的形状を有効にする",
+        type=str,
+        default=None,
+        choices=["true", "false", "auto"],
+        help="Dynamic shapes mode for torch.compile (default: None, same as auto)"
+        " / torch.compileの動的形状モード（デフォルト: None、autoと同じ動作）",
     )
     parser.add_argument(
         "--compile_fullgraph",
@@ -740,37 +743,15 @@ def main():
             transformer.enable_img_in_txt_in_offloading()
 
         if args.compile:
-            if blocks_to_swap > 0:
-                logger.info("Disable linear from torch.compile for swap blocks...")
-                for block in transformer.double_blocks + transformer.single_blocks:
-                    model_utils.disable_linear_from_compile(block)
-
             if args.compile_args is not None:
                 # deprecated
-                compile_backend, compile_mode, compile_dynamic, compile_fullgraph = args.compile_args
-                compile_dynamic = compile_dynamic.lower() in "true"
-                compile_fullgraph = compile_fullgraph.lower() in "true"
+                args.compile_backend, args.compile_mode, args.compile_dynamic, compile_fullgraph = args.compile_args
+                args.compile_fullgraph = compile_fullgraph.lower() in "true"
                 args.compile_cache_size_limit = 32  # old default value
-            else:
-                compile_backend = args.compile_backend
-                compile_mode = args.compile_mode
-                compile_dynamic = args.compile_dynamic
-                compile_fullgraph = args.compile_fullgraph
-            logger.info(
-                f"Torch Compiling[Backend: {compile_backend}; Mode: {compile_mode}; Dynamic: {compile_dynamic}; Fullgraph: {compile_fullgraph}]"
+
+            transformer = model_utils.compile_transformer(
+                args, transformer, [transformer.double_blocks, transformer.single_blocks], disable_linear=args.blocks_to_swap > 0
             )
-            if args.compile_cache_size_limit is not None:
-                torch._dynamo.config.cache_size_limit = args.compile_cache_size_limit
-            for blocks in [transformer.double_blocks, transformer.single_blocks]:
-                for i, block in enumerate(blocks):
-                    block = torch.compile(
-                        block,
-                        backend=compile_backend,
-                        mode=compile_mode,
-                        dynamic=compile_dynamic,
-                        fullgraph=compile_fullgraph,
-                    )
-                    blocks[i] = block
 
         # load scheduler
         logger.info("Loading scheduler")

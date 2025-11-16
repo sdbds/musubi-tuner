@@ -423,23 +423,7 @@ def load_dit_model(
         model.to(device)
 
     if args.compile:
-        if args.blocks_to_swap > 0:
-            logger.info("Disable linear from torch.compile for swap blocks...")
-            for block in model.transformer_blocks:
-                model_utils.disable_linear_from_compile(block)
-
-        logger.info("Compiling DiT model with torch.compile...")
-        if args.compile_cache_size_limit is not None:
-            torch._dynamo.config.cache_size_limit = args.compile_cache_size_limit
-        for i, block in enumerate(model.transformer_blocks):
-            block = torch.compile(
-                block,
-                backend=args.compile_backend,
-                mode=args.compile_mode,
-                dynamic=args.compile_dynamic,
-                fullgraph=args.compile_fullgraph,
-            )
-            model.transformer_blocks[i] = block
+        model = model_utils.compile_transformer(args, model, [model.transformer_blocks], disable_linear=args.blocks_to_swap > 0)
 
     model.eval().requires_grad_(False)
     clean_memory_on_device(device)

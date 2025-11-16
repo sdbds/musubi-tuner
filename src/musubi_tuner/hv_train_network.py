@@ -1557,25 +1557,9 @@ class NetworkTrainer:
 
     def compile_transformer(self, args, transformer):
         transformer: HYVideoDiffusionTransformer = transformer
-        if self.blocks_to_swap > 0:
-            logger.info("Disable linear from torch.compile for swap blocks...")
-            for block in transformer.double_blocks + transformer.single_blocks:
-                model_utils.disable_linear_from_compile(block)
-
-        logger.info("Compiling DiT model with torch.compile...")
-        if args.compile_cache_size_limit is not None:
-            torch._dynamo.config.cache_size_limit = args.compile_cache_size_limit
-        for blocks in [transformer.double_blocks, transformer.single_blocks]:
-            for i, block in enumerate(blocks):
-                block = torch.compile(
-                    block,
-                    backend=args.compile_backend,
-                    mode=args.compile_mode,
-                    dynamic=args.compile_dynamic,
-                    fullgraph=args.compile_fullgraph,
-                )
-                blocks[i] = block
-        return transformer
+        return model_utils.compile_transformer(
+            args, transformer, [transformer.double_blocks, transformer.single_blocks], disable_linear=self.blocks_to_swap > 0
+        )
 
     def scale_shift_latents(self, latents):
         latents = latents * vae_module.SCALING_FACTOR
@@ -2413,8 +2397,11 @@ def setup_parser_common() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--compile_dynamic",
-        action="store_true",
-        help="Enable dynamic shapes in torch.compile / torch.compileで動的形状を有効にする",
+        type=str,
+        default=None,
+        choices=["true", "false", "auto"],
+        help="Dynamic shapes mode for torch.compile (default: None, same as auto)"
+        " / torch.compileの動的形状モード（デフォルト: None、autoと同じ動作）",
     )
     parser.add_argument(
         "--compile_fullgraph",
