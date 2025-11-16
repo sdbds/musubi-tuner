@@ -2222,6 +2222,8 @@ class NetworkTrainer:
 
                 # Checks if the accelerator has performed an optimization step behind the scenes
                 if accelerator.sync_gradients:
+                    if global_step == 0:
+                        progress_bar.reset()  # exclude first step from progress bar, because it may take long due to initializations
                     progress_bar.update(1)
                     global_step += 1
 
