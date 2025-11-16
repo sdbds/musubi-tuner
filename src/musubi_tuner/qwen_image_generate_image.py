@@ -792,7 +792,7 @@ def generate(
     scheduler.set_begin_index(0)
     with tqdm(total=num_inference_steps, desc="Denoising steps") as pbar:
         for i, t in enumerate(timesteps):
-            timestep = t.expand(latents.shape[0])  # .to(latents.dtype) # keep dtype as float32 for better precision
+            timestep = t.expand(latents.shape[0])  # keep dtype as float32 for better precision; avoid bfloat16 precision issues
 
             latent_model_input = latents
             if is_edit:
