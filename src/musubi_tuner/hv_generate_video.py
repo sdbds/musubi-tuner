@@ -746,6 +746,7 @@ def main():
             if args.compile_args is not None:
                 # deprecated
                 args.compile_backend, args.compile_mode, args.compile_dynamic, compile_fullgraph = args.compile_args
+                args.compile_dynamic = args.compile_dynamic.lower()
                 args.compile_fullgraph = compile_fullgraph.lower() in "true"
                 args.compile_cache_size_limit = 32  # old default value
 
