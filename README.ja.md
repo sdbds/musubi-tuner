@@ -61,6 +61,7 @@ GitHub Discussionsを有効にしました。コミュニティのQ&A、知識�
 - 2025/11/16
     - 破壊的変更: `torch.compile`使用時の、`--compile_dynamic`オプションの引数を修正しました。[PR #727](https://github.com/kohya-ss/musubi-tuner/pull/727)
         - `--compile_dynamic`の引数に`true`、`false`、`auto`を指定するように変更しました。デフォルトは`auto`相当です。
+    - 学習時に最初のステップが進捗バーの経過時間に含まれないように、試験的に変更しました。[PR #728](https://github.com/kohya-ss/musubi-tuner/pull/728) ご意見をお聞かせください。
 
 - 2025/11/15
     - 学習および推論スクリプトで `torch.compile` を使用できるようになりました。[PR #722](https://github.com/kohya-ss/musubi-tuner/pull/722)
