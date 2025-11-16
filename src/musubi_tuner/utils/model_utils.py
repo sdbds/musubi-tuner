@@ -7,7 +7,6 @@ import safetensors.torch
 import torch
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
 
 
 def model_hash(filename):
