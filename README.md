@@ -63,6 +63,10 @@ If you find this project helpful, please consider supporting its development via
 
 GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- November 16, 2025
+    - Breaking Change: Fixed the argument for the `--compile_dynamic` option when using `torch.compile`. See [PR #727](https://github.com/kohya-ss/musubi-tuner/pull/727).
+        - Changed to specify `true`, `false`, or `auto` for the `--compile_dynamic` argument. The default is equivalent to `auto`.
+
 - November 15, 2025
     - Added support for `torch.compile` in training and inference scripts. See [PR #722](https://github.com/kohya-ss/musubi-tuner/pull/722).
         - By specifying the `--compile` option, training and inference will utilize `torch.compile`. Please refer to the [documentation](./docs/torch_compile.md) for details.

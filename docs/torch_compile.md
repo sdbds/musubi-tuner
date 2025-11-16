@@ -8,6 +8,8 @@ For technical details and implementation specifics, please refer to [Pull Reques
 
 Also, refer to the official PyTorch documentation: https://docs.pytorch.org/tutorials/intermediate/torch_compile_tutorial.html#introduction-to-torch-compile
 
+Note: `torch.compile` may not work well in various situations. Please refer to the "Limitations and Known Issues" section below for details. If it does not work, please use the traditional method for training/inference.
+
 <details>
 <summary>日本語</summary>
 
@@ -16,6 +18,8 @@ Also, refer to the official PyTorch documentation: https://docs.pytorch.org/tuto
 技術的な詳細や実装の詳細については、[Pull Request #722](https://github.com/kohya-ss/musubi-tuner/pull/722)を参照してください。
 
 PyTorchの公式ドキュメントも参照してください: https://docs.pytorch.org/tutorials/intermediate/torch_compile_tutorial.html#introduction-to-torch-compile
+
+※ `torch.compile`は様々な要因でうまく動作しない場合があります。詳細は以下の「制限事項と既知の問題」セクションを参照してください。また動作しない場合には従来の方法での学習/推論を行ってください。
 
 </details>
 
@@ -90,14 +94,15 @@ The performance gains vary depending on hardware and settings. Here are some exa
 - `--compile_backend`: Backend to use (default: `inductor`)
 - `--compile_mode`: Compilation mode (default: `default` for training, `max-autotune-no-cudagraphs` for inference)
   - Choices: `default`, `reduce-overhead`, `max-autotune`, `max-autotune-no-cudagraphs`
-- `--compile_dynamic`: Enable dynamic shapes support (requires Visual Studio 2022 C++ compiler on Windows)
+- `--compile_dynamic`: Enable dynamic shapes support (default is None, equivalent to `auto`) (Requires Visual Studio 2022 C++ compiler on Windows)
+  - Choices: `true`, `false`, `auto`
 - `--compile_fullgraph`: Enable fullgraph mode
 - `--compile_cache_size_limit`: Set cache size limit (default: PyTorch default, typically 8-32, recommended: 32)
 
 So far, it has been observed that setting `compile_mode` to `max-autotune` may not work in some cases.
 Also, `compile_fullgraph` may not work depending on the architecture.
 
-If `compile_dynamic` is not specified, recompilation will occur each time the shape of the model input changes. This may result in longer training times for the first epoch, but subsequent epochs will be faster.
+If `compile_dynamic` is not set to `true`, recompilation will occur each time the shape of the model input changes. This may result in longer training times for the first epoch, but subsequent epochs will be faster.
 
 ### Additional Performance Arguments / 追加のパフォーマンス引数
 
@@ -113,14 +118,15 @@ If `compile_dynamic` is not specified, recompilation will occur each time the sh
 - `--compile_backend`: 使用するバックエンド（デフォルト: `inductor`）
 - `--compile_mode`: コンパイルモード（デフォルト: 学習時は`default`、推論時は`max-autotune-no-cudagraphs`）
   - 選択肢: `default`, `reduce-overhead`, `max-autotune`, `max-autotune-no-cudagraphs`
-- `--compile_dynamic`: 動的形状サポートを有効にする（Windows環境ではVisual Studio 2022のC++コンパイラが必要）
+- `--compile_dynamic`: 動的形状サポートを指定する（デフォルトは None で `auto` 相当）（Windows環境ではVisual Studio 2022のC++コンパイラが必要）
+  - 選択肢: `true`, `false`, `auto`
 - `--compile_fullgraph`: フルグラフモードを有効にする
 - `--compile_cache_size_limit`: キャッシュサイズ制限を設定（デフォルト: PyTorchのデフォルト、通常8-32、推奨: 32）
 
 これまでに確認したところ、`compile_mode`は`max-autotune`に設定すると動作しないケースがあるようです。
 また、`compile_fullgraph`はアーキテクチャにより動作しない場合があります。
 
-`compile_dynamic`を指定しない場合、モデルの入力の形状が変わるごとに再コンパイルが発生します。最初のエポックの学習時間が長くなる可能性がありますが、その後のエポックでは高速化されます。
+`compile_dynamic`で `true` を指定しない場合、モデルの入力の形状が変わるごとに再コンパイルが発生します。最初のエポックの学習時間が長くなる可能性がありますが、その後のエポックでは高速化されます。
 
 ### 追加のパフォーマンス引数
 
