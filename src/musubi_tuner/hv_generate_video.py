@@ -751,7 +751,7 @@ def main():
                 args.compile_cache_size_limit = 32  # old default value
 
             transformer = model_utils.compile_transformer(
-                args, transformer, [transformer.double_blocks, transformer.single_blocks], disable_linear=args.blocks_to_swap > 0
+                args, transformer, [transformer.double_blocks, transformer.single_blocks], disable_linear=blocks_to_swap > 0
             )
 
         # load scheduler
