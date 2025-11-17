@@ -520,7 +520,7 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
             metadata_to_save.update(sai_metadata)
 
             state_dict = unwrapped_model.state_dict()
-            
+
             # if model is compiled, get original model state dict
             if "transformer_blocks.0._orig_mod.attn.add_k_proj.bias" in state_dict:
                 logger.info("detected compiled model, getting original model state dict for saving")
