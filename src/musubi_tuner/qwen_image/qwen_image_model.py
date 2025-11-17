@@ -1100,7 +1100,7 @@ class QwenImageTransformer2DModel(nn.Module):  # ModelMixin, ConfigMixin, PeftAd
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor = None,
         encoder_hidden_states_mask: torch.Tensor = None,
-        timestep: torch.LongTensor = None,
+        timestep: torch.Tensor = None,
         img_shapes: Optional[List[Tuple[int, int, int]]] = None,
         txt_seq_lens: Optional[List[int]] = None,
         guidance: torch.Tensor = None,  # TODO: this should probably be removed
@@ -1116,7 +1116,7 @@ class QwenImageTransformer2DModel(nn.Module):  # ModelMixin, ConfigMixin, PeftAd
                 Conditional embeddings (embeddings computed from the input conditions such as prompts) to use.
             encoder_hidden_states_mask (`torch.Tensor` of shape `(batch_size, text_sequence_length)`):
                 Mask of the input conditions.
-            timestep ( `torch.LongTensor`):
+            timestep ( `torch.Tensor`):
                 Used to indicate denoising step.
             attention_kwargs (`dict`, *optional*):
                 A kwargs dictionary that if specified is passed along to the `AttentionProcessor` as defined under
