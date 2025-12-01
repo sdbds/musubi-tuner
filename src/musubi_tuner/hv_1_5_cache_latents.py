@@ -7,49 +7,18 @@ from PIL import Image
 
 from musubi_tuner.dataset import config_utils
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
-from musubi_tuner.dataset.image_video_dataset import ItemInfo, save_latent_cache_common, ARCHITECTURE_HUNYUAN_VIDEO
+from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_HUNYUAN_VIDEO_1_5, ItemInfo, save_latent_cache_hv15
 from musubi_tuner.frame_pack.clip_vision import hf_clip_vision_encode
 from musubi_tuner.frame_pack.framepack_utils import load_image_encoders
 from musubi_tuner.hunyuan_video_1_5 import hunyuan_video_1_5_vae
 from musubi_tuner.hunyuan_video_1_5.hunyuan_video_1_5_vae import AutoencoderKLConv3D
-from musubi_tuner.utils.model_utils import dtype_to_str, str_to_dtype
+from musubi_tuner.utils.model_utils import str_to_dtype
 import musubi_tuner.cache_latents as cache_latents
 
 import logging
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
-
-# メタデータ用のアーキテクチャ名。dataset側には未追加だが、将来のロード時に識別できるようにしておく。
-ARCHITECTURE_HUNYUAN_VIDEO_1_5_FULL = "hunyuan_video_1_5"
-
-
-def save_latent_cache_hv15(
-    item_info: ItemInfo,
-    latent: torch.Tensor,
-    cond_latent: Optional[torch.Tensor],
-    vision_feature: Optional[torch.Tensor],
-):
-    """HunyuanVideo 1.5用のキャッシュ保存"""
-    c, f, h, w = latent.shape
-    dtype_str = dtype_to_str(latent.dtype)
-    sd: dict[str, torch.Tensor] = {f"latents_{f}x{h}x{w}_{dtype_str}": latent.detach().cpu()}
-
-    if cond_latent is not None:
-        cond_dtype = dtype_to_str(cond_latent.dtype)
-        cond_f, cond_h, cond_w = cond_latent.shape[1:]
-        sd[f"cond_latents_{cond_f}x{cond_h}x{cond_w}_{cond_dtype}"] = cond_latent.detach().cpu()
-
-    if vision_feature is not None:
-        vf_dtype = dtype_to_str(vision_feature.dtype)
-        if vision_feature.dim() == 3:
-            _, seq_len, hidden_dim = vision_feature.shape
-            key = f"siglip_{seq_len}x{hidden_dim}_{vf_dtype}"
-        else:
-            key = f"siglip_{vf_dtype}"
-        sd[key] = vision_feature.detach().cpu()
-
-    save_latent_cache_common(item_info, sd, ARCHITECTURE_HUNYUAN_VIDEO_1_5_FULL)
 
 
 def encode_and_save_batch(
@@ -130,17 +99,21 @@ def main():
         torch.backends.cudnn.enabled = False
 
     if args.i2v:
-        assert args.image_encoder is not None, "--i2v 指定時は --image_encoder が必要です"
+        assert args.image_encoder is not None, "--i2v requires --image_encoder to be set."
+    elif args.image_encoder is not None:
+        logger.info("--image_encoder is set but --i2v is not set. Enabling --i2v.")
+        args.i2v = True
 
     device = args.device if args.device is not None else "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(device)
 
+    # Load dataset config
     blueprint_generator = BlueprintGenerator(ConfigSanitizer())
     logger.info(f"Load dataset config from {args.dataset_config}")
     user_config = config_utils.load_user_config(args.dataset_config)
-    # dataset側は現行のHV設定を流用
-    blueprint = blueprint_generator.generate(user_config, args, architecture=ARCHITECTURE_HUNYUAN_VIDEO)
+    blueprint = blueprint_generator.generate(user_config, args, architecture=ARCHITECTURE_HUNYUAN_VIDEO_1_5)
     train_dataset_group = config_utils.generate_dataset_group_by_blueprint(blueprint.dataset_group)
+
     datasets = train_dataset_group.datasets
 
     if args.debug_mode is not None:
@@ -173,14 +146,16 @@ def hv1_5_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentPars
         "--vae_sample_size",
         type=int,
         default=128,
-        help="VAE sample size (height/width). Default 128; set 256 ifVRAMが十分なら高品質化可能",
+        help="VAE sample size (height/width). Default 128; set 256 if VRAM is sufficient for better quality.",
     )
     parser.add_argument(
         "--i2v",
         action="store_true",
-        help="I2V学習/推論用に画像特徴量と条件latentをキャッシュする",
+        help="Cache image features and conditional latents for I2V training/inference",
     )
-    parser.add_argument("--image_encoder", type=str, default=None, help="SigLIP Image Encoderのディレクトリ/パス（--i2v時必須）")
+    parser.add_argument(
+        "--image_encoder", type=str, default=None, help="Directory/path of SigLIP Image Encoder (required if --i2v is set)"
+    )
     return parser
 
 

@@ -79,6 +79,8 @@ ARCHITECTURE_QWEN_IMAGE = "qi"
 ARCHITECTURE_QWEN_IMAGE_FULL = "qwen_image"
 ARCHITECTURE_QWEN_IMAGE_EDIT = "qie"
 ARCHITECTURE_QWEN_IMAGE_EDIT_FULL = "qwen_image_edit"
+ARCHITECTURE_HUNYUAN_VIDEO_1_5 = "hv15"
+ARCHITECTURE_HUNYUAN_VIDEO_1_5_FULL = "hunyuan_video_1_5"
 
 
 def glob_images(directory, base="*"):
@@ -296,9 +298,9 @@ def save_latent_cache_flux_kontext(
 def save_latent_cache_qwen_image(item_info: ItemInfo, latent: torch.Tensor, control_latent: Optional[list[torch.Tensor]]):
     """Qwen-Image architecture"""
     assert latent.dim() == 4, "latent should be 4D tensor (frame, channel, height, width)"
-    assert control_latent is None or all(cl.dim() == 4 for cl in control_latent), (
-        "control_latent should be 4D tensor (frame, channel, height, width) or None"
-    )
+    assert control_latent is None or all(
+        cl.dim() == 4 for cl in control_latent
+    ), "control_latent should be 4D tensor (frame, channel, height, width) or None"
 
     _, F, H, W = latent.shape
     dtype_str = dtype_to_str(latent.dtype)
@@ -310,6 +312,29 @@ def save_latent_cache_qwen_image(item_info: ItemInfo, latent: torch.Tensor, cont
             sd[f"latents_control_{i}_{F}x{H}x{W}_{dtype_str}"] = cl.detach().cpu().contiguous()
 
     save_latent_cache_common(item_info, sd, ARCHITECTURE_QWEN_IMAGE_FULL)
+
+
+def save_latent_cache_hv15(
+    item_info: ItemInfo,
+    latent: torch.Tensor,
+    image_latent: Optional[torch.Tensor],
+    vision_feature: Optional[torch.Tensor],
+):
+    """HunyuanVideo 1.5 architecture"""
+    _, F, H, W = latent.shape
+    dtype_str = dtype_to_str(latent.dtype)
+    sd: dict[str, torch.Tensor] = {f"latents_{F}x{H}x{W}_{dtype_str}": latent.detach().cpu()}
+
+    if image_latent is not None:
+        dtype_str = dtype_to_str(image_latent.dtype)
+        _, F, H, W = image_latent.shape
+        sd[f"latents_image_{F}x{H}x{W}_{dtype_str}"] = image_latent.detach().cpu()
+
+    if vision_feature is not None:
+        dtype_str = dtype_to_str(vision_feature.dtype)
+        sd[f"siglip_{dtype_str}"] = vision_feature.detach().cpu()
+
+    save_latent_cache_common(item_info, sd, ARCHITECTURE_HUNYUAN_VIDEO_1_5_FULL)
 
 
 def save_latent_cache_common(item_info: ItemInfo, sd: dict[str, torch.Tensor], arch_fullname: str):
@@ -336,9 +361,9 @@ def save_latent_cache_common(item_info: ItemInfo, sd: dict[str, torch.Tensor], a
 
 def save_text_encoder_output_cache(item_info: ItemInfo, embed: torch.Tensor, mask: Optional[torch.Tensor], is_llm: bool):
     """HunyuanVideo architecture"""
-    assert embed.dim() == 1 or embed.dim() == 2, (
-        f"embed should be 2D tensor (feature, hidden_size) or (hidden_size,), got {embed.shape}"
-    )
+    assert (
+        embed.dim() == 1 or embed.dim() == 2
+    ), f"embed should be 2D tensor (feature, hidden_size) or (hidden_size,), got {embed.shape}"
     assert mask is None or mask.dim() == 1, f"mask should be 1D tensor (feature), got {mask.shape}"
 
     sd = {}
@@ -395,6 +420,16 @@ def save_text_encoder_output_cache_qwen_image(item_info: ItemInfo, embed: torch.
     sd[f"varlen_vl_embed_{dtype_str}"] = embed.detach().cpu()
 
     save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_QWEN_IMAGE_FULL)
+
+
+def save_text_encoder_output_cache_hunyuan_video_15(item_info: ItemInfo, embed: torch.Tensor, byt5_embed: torch.Tensor):
+    """Hunyuan-Video 1.5 architecture."""
+    sd = {}
+    dtype_str = dtype_to_str(embed.dtype)
+    sd[f"varlen_vl_embed_{dtype_str}"] = embed.detach().cpu()
+    dtype_str = dtype_to_str(byt5_embed.dtype)
+    sd[f"varlen_byt5_embed_{dtype_str}"] = byt5_embed.detach().cpu()
+    save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_HUNYUAN_VIDEO_1_5_FULL)
 
 
 def save_text_encoder_output_cache_common(item_info: ItemInfo, sd: dict[str, torch.Tensor], arch_fullname: str):
