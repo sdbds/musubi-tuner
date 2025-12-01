@@ -26,6 +26,7 @@ from musubi_tuner.dataset import image_video_dataset
 from musubi_tuner.frame_pack.clip_vision import hf_clip_vision_encode
 from musubi_tuner.hunyuan_video_1_5 import hunyuan_video_1_5_text_encoder, hunyuan_video_1_5_utils, hunyuan_video_1_5_vae
 from musubi_tuner.hunyuan_video_1_5.hunyuan_video_1_5_models import (
+    detect_hunyuan_video_1_5_sd_dtype,
     load_hunyuan_video_1_5_model,
     HunyuanVideo_1_5_DiffusionTransformer,
 )
@@ -548,7 +549,9 @@ def prepare_i2v_or_t2v_inputs(
             latents_concat = None
             mask_concat = None
 
-            latents_concat = torch.zeros(1, vae.latent_channels, lat_f, lat_h, lat_w, dtype=torch.float32, device=device)
+            latents_concat = torch.zeros(
+                1, hunyuan_video_1_5_vae.VAE_LATENT_CHANNELS, lat_f, lat_h, lat_w, dtype=torch.float32, device=device
+            )
             latents_concat[:, :, 0:1, :, :] = cond_latents
 
             mask_concat = torch.ones(1, 1, lat_f, lat_h, lat_w) * latent_mask[None, None, :, None, None]
@@ -556,7 +559,9 @@ def prepare_i2v_or_t2v_inputs(
         else:
             # T2V mode
             image_encoder_last_hidden_state = None
-            cond_latents = torch.zeros(1, 17, lat_f, lat_h, lat_w, dtype=torch.float32, device=device)
+            cond_latents = torch.zeros(
+                1, hunyuan_video_1_5_vae.VAE_LATENT_CHANNELS + 1, lat_f, lat_h, lat_w, dtype=torch.float32, device=device
+            )
 
         context = (embed, mask, embed_byt5, mask_byt5, image_encoder_last_hidden_state, cond_latents)
         context_null = (
@@ -660,7 +665,7 @@ def generate(
     lat_f = 1 + (video_length - 1) // 4  # number of latent frames
     lat_h = height // 16
     lat_w = width // 16
-    noise_shape = (1, 32, lat_f, lat_h, lat_w)  # HunyuanVideo-1.5 latent channels = 32
+    noise_shape = (1, hunyuan_video_1_5_vae.VAE_LATENT_CHANNELS, lat_f, lat_h, lat_w)
 
     if not args.cpu_noise:
         noise = torch.randn(noise_shape, generator=seed_g, device=device, dtype=dit_dtype)
@@ -1317,8 +1322,11 @@ def process_interactive(args: argparse.Namespace) -> None:
 def get_generation_settings(args: argparse.Namespace) -> GenerationSettings:
     device = torch.device(args.device)
 
-    # select dtype
-    dit_dtype = torch.bfloat16
+    # select dtype: auto-detect from DiT model
+    dit_dtype = detect_hunyuan_video_1_5_sd_dtype(args.dit)
+    if dit_dtype == torch.float32:
+        dit_dtype = torch.bfloat16  # use bfloat16 instead of float32 for better performance
+
     dit_weight_dtype = dit_dtype  # default
     if args.fp8_scaled:
         dit_weight_dtype = None  # various precision weights, so don't cast to specific dtype

@@ -646,6 +646,10 @@ class AutoencoderKLConv3D(nn.Module):
         return (dec, posterior)
 
 
+VAE_LATENT_CHANNELS = 32
+VAE_SCALING_FACTOR = 1.03682
+
+
 def load_vae_from_checkpoint(
     ckpt_path: str, device: torch.device, dtype: torch.dtype, sample_size: int = 256
 ) -> AutoencoderKLConv3D:
@@ -695,14 +699,14 @@ def load_vae_from_checkpoint(
         vae = AutoencoderKLConv3D(
             in_channels=3,
             out_channels=3,
-            latent_channels=32,
+            latent_channels=VAE_LATENT_CHANNELS,
             block_out_channels=(128, 256, 512, 1024, 1024),
             layers_per_block=2,
             ffactor_spatial=16,
             ffactor_temporal=4,
             sample_size=sample_size,
             sample_tsize=64,
-            scaling_factor=1.03682,
+            scaling_factor=VAE_SCALING_FACTOR,
             shift_factor=None,
             downsample_match_channel=True,
             upsample_match_channel=True,

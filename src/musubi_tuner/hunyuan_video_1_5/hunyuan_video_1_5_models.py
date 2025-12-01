@@ -13,6 +13,7 @@ from musubi_tuner.modules.attention import AttentionParams
 from musubi_tuner.modules.custom_offloading_utils import ModelOffloader
 from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch
 from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
+from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen, WeightTransformHooks
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -420,6 +421,22 @@ class HunyuanVideo_1_5_DiffusionTransformer(nn.Module):
 # region Model Utils
 
 
+def detect_hunyuan_video_1_5_sd_dtype(path: str) -> torch.dtype:
+    # get dtype from model weights
+    with MemoryEfficientSafeOpen(path) as f:
+        keys = set(f.keys())
+        key1 = "double_blocks.0.img_attn_k.weight"  # Official
+        key2 = "double_blocks.0.img_attn_qkv.weight"  # ComfyUI repackaged
+        if key1 in keys:
+            dit_dtype = f.get_tensor(key1).dtype
+        elif key2 in keys:
+            dit_dtype = f.get_tensor(key2).dtype
+        else:
+            raise ValueError(f"Could not find the dtype in the model weights: {path}")
+    logger.info(f"Detected DiT dtype: {dit_dtype}")
+    return dit_dtype
+
+
 def create_model(
     task_type: str, attn_mode: str, split_attn: bool, dtype: Optional[torch.dtype]
 ) -> HunyuanVideo_1_5_DiffusionTransformer:
@@ -469,6 +486,19 @@ def load_hunyuan_video_1_5_model(
     # load model weights with dynamic fp8 optimization and LoRA merging if needed
     logger.info(f"Loading DiT model from {dit_path}, device={loading_device}")
 
+    def comfyui_hunyuan_video_1_5_weight_split_hook(
+        key: str, value: Optional[torch.Tensor]
+    ) -> Tuple[Optional[list[str]], Optional[list[torch.Tensor]]]:
+        # ComfyUI repackaged HunyuanVideo-1.5 uses packed QKV weights for double blocks
+        if "img_attn_qkv.weight" in key or "img_attn_qkv.bias" in key or "txt_attn_qkv.weight" in key or "txt_attn_qkv.bias" in key:
+            # convert to separate Q, K, V weights/biases
+            new_keys = [key.replace("_qkv", suffix) for suffix in ["_q", "_k", "_v"]]
+            return new_keys, list(torch.chunk(value, 3, dim=0)) if value is not None else None
+
+        return None, None
+
+    hooks = WeightTransformHooks(split_hook=comfyui_hunyuan_video_1_5_weight_split_hook, concat_hook=None)
+
     sd = load_safetensors_with_lora_and_fp8(
         model_files=dit_path,
         lora_weights_list=lora_weights_list,
@@ -479,6 +509,7 @@ def load_hunyuan_video_1_5_model(
         dit_weight_dtype=dit_weight_dtype,
         target_keys=FP8_OPTIMIZATION_TARGET_KEYS,
         exclude_keys=FP8_OPTIMIZATION_EXCLUDE_KEYS,
+        weight_transform_hooks=hooks,
     )
 
     if fp8_scaled:
