@@ -507,6 +507,14 @@ class AutoencoderKLConv3D(nn.Module):
         self.tile_latent_min_tsize = sample_tsize // ffactor_temporal
         self.tile_overlap_factor = 0.25
 
+    @property
+    def device(self):
+        return next(self.parameters()).device
+
+    @property
+    def dtype(self):
+        return next(self.parameters()).dtype
+
     def set_tile_sample_min_size(self, sample_size: int, tile_overlap_factor: float = 0.2):
         self.tile_sample_min_size = sample_size
         self.tile_latent_min_size = sample_size // self.ffactor_spatial
