@@ -298,9 +298,9 @@ def save_latent_cache_flux_kontext(
 def save_latent_cache_qwen_image(item_info: ItemInfo, latent: torch.Tensor, control_latent: Optional[list[torch.Tensor]]):
     """Qwen-Image architecture"""
     assert latent.dim() == 4, "latent should be 4D tensor (frame, channel, height, width)"
-    assert control_latent is None or all(
-        cl.dim() == 4 for cl in control_latent
-    ), "control_latent should be 4D tensor (frame, channel, height, width) or None"
+    assert control_latent is None or all(cl.dim() == 4 for cl in control_latent), (
+        "control_latent should be 4D tensor (frame, channel, height, width) or None"
+    )
 
     _, F, H, W = latent.shape
     dtype_str = dtype_to_str(latent.dtype)
@@ -314,7 +314,7 @@ def save_latent_cache_qwen_image(item_info: ItemInfo, latent: torch.Tensor, cont
     save_latent_cache_common(item_info, sd, ARCHITECTURE_QWEN_IMAGE_FULL)
 
 
-def save_latent_cache_hv15(
+def save_latent_cache_hunyuan_video_1_5(
     item_info: ItemInfo,
     latent: torch.Tensor,
     image_latent: Optional[torch.Tensor],
@@ -361,9 +361,9 @@ def save_latent_cache_common(item_info: ItemInfo, sd: dict[str, torch.Tensor], a
 
 def save_text_encoder_output_cache(item_info: ItemInfo, embed: torch.Tensor, mask: Optional[torch.Tensor], is_llm: bool):
     """HunyuanVideo architecture"""
-    assert (
-        embed.dim() == 1 or embed.dim() == 2
-    ), f"embed should be 2D tensor (feature, hidden_size) or (hidden_size,), got {embed.shape}"
+    assert embed.dim() == 1 or embed.dim() == 2, (
+        f"embed should be 2D tensor (feature, hidden_size) or (hidden_size,), got {embed.shape}"
+    )
     assert mask is None or mask.dim() == 1, f"mask should be 1D tensor (feature), got {mask.shape}"
 
     sd = {}
@@ -422,7 +422,7 @@ def save_text_encoder_output_cache_qwen_image(item_info: ItemInfo, embed: torch.
     save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_QWEN_IMAGE_FULL)
 
 
-def save_text_encoder_output_cache_hunyuan_video_15(item_info: ItemInfo, embed: torch.Tensor, byt5_embed: torch.Tensor):
+def save_text_encoder_output_cache_hunyuan_video_1_5(item_info: ItemInfo, embed: torch.Tensor, byt5_embed: torch.Tensor):
     """Hunyuan-Video 1.5 architecture."""
     sd = {}
     dtype_str = dtype_to_str(embed.dtype)
@@ -475,6 +475,7 @@ class BucketSelector:
     RESOLUTION_STEPS_FLUX_KONTEXT = 16
     RESOLUTION_STEPS_QWEN_IMAGE = 16
     RESOLUTION_STEPS_QWEN_IMAGE_EDIT = 16
+    RESOLUTION_STEPS_HUNYUAN_VIDEO_1_5 = 16
 
     ARCHITECTURE_STEPS_MAP = {
         ARCHITECTURE_HUNYUAN_VIDEO: RESOLUTION_STEPS_HUNYUAN,
@@ -483,6 +484,7 @@ class BucketSelector:
         ARCHITECTURE_FLUX_KONTEXT: RESOLUTION_STEPS_FLUX_KONTEXT,
         ARCHITECTURE_QWEN_IMAGE: RESOLUTION_STEPS_QWEN_IMAGE,
         ARCHITECTURE_QWEN_IMAGE_EDIT: RESOLUTION_STEPS_QWEN_IMAGE_EDIT,
+        ARCHITECTURE_HUNYUAN_VIDEO_1_5: RESOLUTION_STEPS_HUNYUAN_VIDEO_1_5,
     }
 
     def __init__(
@@ -1835,6 +1837,7 @@ class VideoDataset(BaseDataset):
     TARGET_FPS_WAN = 16.0
     TARGET_FPS_FRAMEPACK = 30.0
     TARGET_FPS_FLUX_KONTEXT = 1.0  # VideoDataset is not used for Flux Kontext, but this is a placeholder
+    TARGET_FPS_HUNYUAN_VIDEO_1_5 = 24.0
 
     def __init__(
         self,
@@ -1887,6 +1890,8 @@ class VideoDataset(BaseDataset):
             self.target_fps = VideoDataset.TARGET_FPS_FRAMEPACK
         elif self.architecture == ARCHITECTURE_FLUX_KONTEXT:
             self.target_fps = VideoDataset.TARGET_FPS_FLUX_KONTEXT
+        elif self.architecture == ARCHITECTURE_HUNYUAN_VIDEO_1_5:
+            self.target_fps = VideoDataset.TARGET_FPS_HUNYUAN_VIDEO_1_5
         else:
             raise ValueError(f"Unsupported architecture: {self.architecture}")
 

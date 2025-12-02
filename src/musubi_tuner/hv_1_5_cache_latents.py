@@ -1,13 +1,11 @@
 import argparse
 from typing import Optional
 
-import numpy as np
 import torch
-from PIL import Image
 
 from musubi_tuner.dataset import config_utils
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
-from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_HUNYUAN_VIDEO_1_5, ItemInfo, save_latent_cache_hv15
+from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_HUNYUAN_VIDEO_1_5, ItemInfo, save_latent_cache_hunyuan_video_1_5
 from musubi_tuner.frame_pack.clip_vision import hf_clip_vision_encode
 from musubi_tuner.frame_pack.framepack_utils import load_image_encoders
 from musubi_tuner.hunyuan_video_1_5 import hunyuan_video_1_5_vae
@@ -68,24 +66,27 @@ def encode_and_save_batch(
                 )
                 latents_concat[:, :, 0:1, :, :] = cond_latents
 
-                latent_mask = torch.zeros(lat_f, device=vae.device)
-                latent_mask[0] = 1.0
-                mask_concat = torch.ones(1, 1, lat_f, lat_h, lat_w, device=vae.device) * latent_mask[None, None, :, None, None]
+                # latent_mask = torch.zeros(lat_f, device=vae.device)
+                # latent_mask[0] = 1.0
+                # mask_concat = torch.ones(1, 1, lat_f, lat_h, lat_w, device=vae.device) * latent_mask[None, None, :, None, None]
+                mask_concat = torch.zeros(1, 1, lat_f, lat_h, lat_w, device=vae.device)
+                mask_concat[:, :, 0:1, :, :] = 1.0
 
                 cond_latents = torch.concat([latents_concat, mask_concat], dim=1)  # 1, C+1, F, H, W
                 cond_latents_list.append(cond_latents[0])  # remove batch dim
 
             # extract vision feature from first frame
+            first_frame_np = batch[i].content[0]  # H, W, C, uint8
             feature_extractor, image_encoder = image_encoder_assets
             with torch.no_grad():
-                vision_feature = hf_clip_vision_encode(first_frame, feature_extractor, image_encoder)
-            vision_features.append(vision_feature[0])  # remove batch dim
+                vision_feature = hf_clip_vision_encode(first_frame_np, feature_extractor, image_encoder)
+            vision_features.append(vision_feature[0])
 
     for i, item in enumerate(batch):
         latent = latents[i]
         cond_latent = None if cond_latents_list is None else cond_latents_list[i]
         vision_feature = None if vision_features is None else vision_features[i]
-        save_latent_cache_hv15(item, latent, cond_latent, vision_feature)
+        save_latent_cache_hunyuan_video_1_5(item, latent, cond_latent, vision_feature)
 
 
 def main():
@@ -126,7 +127,9 @@ def main():
 
     logger.info(f"Loading VAE model from {args.vae}")
     vae_dtype = torch.float16 if args.vae_dtype is None else str_to_dtype(args.vae_dtype)
-    vae = hunyuan_video_1_5_vae.load_vae_from_checkpoint(args.vae, device, vae_dtype, sample_size=args.vae_sample_size)
+    vae = hunyuan_video_1_5_vae.load_vae_from_checkpoint(
+        args.vae, device, vae_dtype, sample_size=args.vae_sample_size, enable_patch_conv=args.vae_enable_patch_conv
+    )
 
     if args.i2v:
         feature_extractor, image_encoder = load_image_encoders(args)
@@ -147,6 +150,11 @@ def hv1_5_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentPars
         type=int,
         default=128,
         help="VAE sample size (height/width). Default 128; set 256 if VRAM is sufficient for better quality.",
+    )
+    parser.add_argument(
+        "--vae_enable_patch_conv",
+        action="store_true",
+        help="Enable patch-based convolution in VAE for memory optimization",
     )
     parser.add_argument(
         "--i2v",

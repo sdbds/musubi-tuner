@@ -12,7 +12,7 @@ from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitize
 from musubi_tuner.dataset.image_video_dataset import (
     ARCHITECTURE_HUNYUAN_VIDEO_1_5,
     ItemInfo,
-    save_text_encoder_output_cache_hunyuan_video_15,
+    save_text_encoder_output_cache_hunyuan_video_1_5,
 )
 
 import musubi_tuner.cache_text_encoder_outputs as cache_text_encoder_outputs
@@ -79,12 +79,12 @@ def encode_and_save_batch(
         # get BYT5 embedding for this item
         embed_byt5_i = embed_byt5_list[i]
 
-        save_text_encoder_output_cache_hunyuan_video_15(item, embed_i, embed_byt5_i)
+        save_text_encoder_output_cache_hunyuan_video_1_5(item, embed_i, embed_byt5_i)
 
 
 def main():
     parser = cache_text_encoder_outputs.setup_parser_common()
-    parser = hv_1_5_setup_parser(parser)
+    parser = hunyuan_video_1_5_setup_parser(parser)
 
     args = parser.parse_args()
 
@@ -145,7 +145,7 @@ def main():
     )
 
 
-def hv_1_5_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+def hunyuan_video_1_5_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--text_encoder", type=str, default=None, required=True, help="Text Encoder (Qwen2.5-VL) checkpoint path")
     parser.add_argument("--byt5", type=str, default=None, required=True, help="BYT5 text encoder checkpoint path")
     parser.add_argument("--fp8_vl", action="store_true", help="use fp8 for Qwen2.5-VL model")
