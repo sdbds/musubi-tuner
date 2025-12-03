@@ -131,6 +131,7 @@ def main():
     vae = hunyuan_video_1_5_vae.load_vae_from_checkpoint(
         args.vae, device, vae_dtype, sample_size=args.vae_sample_size, enable_patch_conv=args.vae_enable_patch_conv
     )
+    vae.eval()
 
     if args.i2v:
         feature_extractor, image_encoder = load_image_encoders(args)
@@ -150,7 +151,7 @@ def hv1_5_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentPars
         "--vae_sample_size",
         type=int,
         default=128,
-        help="VAE sample size (height/width). Default 128; set 256 if VRAM is sufficient for better quality.",
+        help="VAE sample size (height/width). Default 128; set 256 if VRAM is sufficient for better quality; set 0 to disable tiling.",
     )
     parser.add_argument(
         "--vae_enable_patch_conv",

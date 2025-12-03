@@ -73,12 +73,15 @@ def parse_args() -> argparse.Namespace:
         "--vae_sample_size",
         type=int,
         default=128,
-        help="VAE sample size (height and width). Default is 128. If VRAM is sufficient, set to 256 for better quality.",
+        help="VAE sample size (height and width). Default is 128. If VRAM is sufficient, set to 256 for better quality. Set to 0 to disable tiling.",
+    )
+    parser.add_argument(
+        "--vae_enable_patch_conv", action="store_true", help="Enable patch-based convolution in VAE for memory optimization"
     )
     parser.add_argument("--text_encoder", type=str, default=None, help="Text encoder checkpoint path (Qwen2.5-VL)")
     parser.add_argument("--text_encoder_cpu", action="store_true", help="Load text encoder on CPU to save GPU memory")
     parser.add_argument("--byt5", type=str, default=None, help="BYT5 text encoder checkpoint path")
-    parser.add_argument("--image_encoder", type=str, required=True, help="Image Encoder directory or path")
+    parser.add_argument("--image_encoder", type=str, default=None, help="Image Encoder directory or path")
     # LoRA
     parser.add_argument("--lora_weight", type=str, nargs="*", required=False, default=None, help="LoRA weight path")
     parser.add_argument("--lora_multiplier", type=float, nargs="*", default=None, help="LoRA multiplier")
@@ -286,8 +289,10 @@ def load_vae(args: argparse.Namespace, device: torch.device, dtype: torch.dtype)
     vae_path = args.vae
 
     logger.info(f"Loading VAE model from {vae_path}")
-    vae = hunyuan_video_1_5_vae.load_vae_from_checkpoint(vae_path, device, dtype, sample_size=args.vae_sample_size)
-
+    vae = hunyuan_video_1_5_vae.load_vae_from_checkpoint(
+        vae_path, device, dtype, sample_size=args.vae_sample_size, enable_patch_conv=args.vae_enable_patch_conv
+    )
+    vae.eval()
     return vae
 
 
@@ -794,9 +799,7 @@ def decode_latent(latent: torch.Tensor, args: argparse.Namespace) -> torch.Tenso
 
     logger.info(f"Decoding video from latents: {latent.shape}")
     with torch.autocast(device_type=device.type, dtype=vae_dtype), torch.no_grad():
-        vae.enable_tiling()
         videos = vae.decode(x0)[0]
-        vae.disable_tiling()
 
     video = videos[0]
     del videos

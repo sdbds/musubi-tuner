@@ -328,7 +328,7 @@ class HunyuanVideo15NetworkTrainer(NetworkTrainer):
     def load_vae(self, args: argparse.Namespace, vae_dtype: torch.dtype, vae_path: str):
         logger.info(f"Loading VAE model from {vae_path}")
         vae = hunyuan_video_1_5_vae.load_vae_from_checkpoint(
-            vae_path, device="cpu", dtype=vae_dtype, sample_size=args.vae_sample_size
+            vae_path, device="cpu", dtype=vae_dtype, sample_size=args.vae_sample_size, enable_patch_conv=args.vae_enable_patch_conv
         )
         vae.eval()
         return vae
@@ -476,7 +476,12 @@ def hv1_5_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentPars
         "--vae_sample_size",
         type=int,
         default=128,
-        help="VAE sample size (height/width). Default 128; set 256 if VRAM is sufficient for better quality.",
+        help="VAE sample size (height/width). Default 128; set 256 if VRAM is sufficient for better quality. Set 0 to disable tiling.",
+    )
+    parser.add_argument(
+        "--vae_enable_patch_conv",
+        action="store_true",
+        help="Enable patch-based convolution in VAE for memory optimization",
     )
     return parser
 
