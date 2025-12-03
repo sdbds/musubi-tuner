@@ -57,7 +57,7 @@ def encode_and_save_batch(
                 tokenizer_byt5, text_encoder_byt5, prompt
             )
             embed_byt5_list.append(embed_byt5[0])  # remove batch dim
-            mask_byt5_list.append(mask_byt5[0])    # remove batch dim
+            mask_byt5_list.append(mask_byt5[0])  # remove batch dim
 
     # save prompt cache
     for i, item in enumerate(batch):
