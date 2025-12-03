@@ -50,22 +50,14 @@ def encode_and_save_batch(
 
     # encode prompt with BYT5 (for each prompt in batch)
     embed_byt5_list = []
+    mask_byt5_list = []
     with torch.no_grad():
         for prompt in prompts:
             embed_byt5, mask_byt5 = hunyuan_video_1_5_text_encoder.get_glyph_prompt_embeds(
                 tokenizer_byt5, text_encoder_byt5, prompt
             )
-            # BYT5 returns shape [1, seq_len, hidden_dim], squeeze the batch dimension
-            if embed_byt5.dim() == 3:
-                embed_byt5 = embed_byt5.squeeze(0)
-                mask_byt5 = mask_byt5.squeeze(0) if mask_byt5.dim() == 2 else mask_byt5
-            # Extract valid length (at least 1 token to avoid empty tensors)
-            if mask_byt5 is not None and mask_byt5.numel() > 0:
-                byt5_len = mask_byt5.to(dtype=torch.bool).sum().item()
-                if byt5_len > 0:
-                    embed_byt5 = embed_byt5[:byt5_len]
-                # If byt5_len is 0 (no quoted text), keep the full zeros tensor for consistency
             embed_byt5_list.append(embed_byt5)
+            mask_byt5_list.append(mask_byt5)
 
     # save prompt cache
     for i, item in enumerate(batch):
@@ -77,7 +69,8 @@ def encode_and_save_batch(
         embed_i = embed_i[:vlm_len]
 
         # get BYT5 embedding for this item
-        embed_byt5_i = embed_byt5_list[i]
+        byt5_len = mask_byt5_list[i].to(dtype=torch.bool).sum().item()  # may be zero
+        embed_byt5_i = embed_byt5_list[i][:byt5_len]
 
         save_text_encoder_output_cache_hunyuan_video_1_5(item, embed_i, embed_byt5_i)
 

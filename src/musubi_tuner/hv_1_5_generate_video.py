@@ -555,8 +555,8 @@ def prepare_i2v_or_t2v_inputs(
         vae.to(device)
 
         # prepare mask for image latent
-        latent_mask = torch.zeros(lat_f)
-        latent_mask[0] = 1.0  # first frame is image
+        latent_mask = torch.zeros(1, 1, lat_f, lat_h, lat_w, device=device)
+        latent_mask[0, 0, 0, :, :] = 1.0  # first frame is image
 
         # encode image to latent space
         with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=True), torch.no_grad():
@@ -565,16 +565,12 @@ def prepare_i2v_or_t2v_inputs(
 
         logger.info("Encoding complete")
 
-        latents_concat = None
-        mask_concat = None
-
         latents_concat = torch.zeros(
             1, hunyuan_video_1_5_vae.VAE_LATENT_CHANNELS, lat_f, lat_h, lat_w, dtype=torch.float32, device=device
         )
         latents_concat[:, :, 0:1, :, :] = cond_latents
 
-        mask_concat = torch.ones(1, 1, lat_f, lat_h, lat_w) * latent_mask[None, None, :, None, None]
-        cond_latents = torch.concat([latents_concat, mask_concat.to(device)], dim=1)
+        cond_latents = torch.concat([latents_concat, latent_mask], dim=1)
 
         vae.to(vae_original_device)
         if vae_original_device != device:
