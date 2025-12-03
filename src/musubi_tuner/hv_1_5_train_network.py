@@ -104,6 +104,9 @@ class HunyuanVideo15NetworkTrainer(NetworkTrainer):
         sample_prompts_te_outputs = {}
         with torch.no_grad():
             for prompt_dict in prompts:
+                if "negative_prompt" not in prompt_dict:
+                    # empty negative prompt if not provided, this can be ignored with cfg_scale=1.0
+                    prompt_dict["negative_prompt"] = ""
                 for p in [prompt_dict.get("prompt", ""), prompt_dict.get("negative_prompt", "")]:
                     if p is None or p in sample_prompts_te_outputs:
                         continue
@@ -122,12 +125,12 @@ class HunyuanVideo15NetworkTrainer(NetworkTrainer):
         clean_memory_on_device(device)
 
         # image embedding for I2V training
+        sample_prompts_image_embs = {}
         if self.i2v_training:
             feature_extractor, image_encoder = load_image_encoders(args)
             image_encoder.to(device)
 
             # encode image with image encoder
-            sample_prompts_image_embs = {}
             for prompt_dict in prompts:
                 image_path = prompt_dict.get("image_path", None)
                 assert image_path is not None, "image_path should be set for I2V training"
@@ -173,7 +176,7 @@ class HunyuanVideo15NetworkTrainer(NetworkTrainer):
             prompt_dict_copy["negative_byt5_mask"] = neg_mask_byt5
 
             p = prompt_dict_copy.get("image_path", None)  # for I2V, None for T2V
-            prompt_dict_copy["image_encoder_last_hidden_state"] = sample_prompts_image_embs[p]
+            prompt_dict_copy["image_encoder_last_hidden_state"] = sample_prompts_image_embs.get(p, None)
 
             sample_parameters.append(prompt_dict_copy)
 
@@ -201,7 +204,10 @@ class HunyuanVideo15NetworkTrainer(NetworkTrainer):
     ):
         """architecture dependent inference for sampling"""
         device = accelerator.device
-        cfg_scale = cfg_scale if cfg_scale is not None else 1.0
+        if do_classifier_free_guidance and cfg_scale is None:
+            logger.info(f"Using default guidance scale: {self.default_guidance_scale}")
+        cfg_scale = cfg_scale if cfg_scale is not None else self.default_guidance_scale
+
         # Skip CFG computation entirely when scale is 1.0 to save inference time
         do_cfg = do_classifier_free_guidance and cfg_scale != 1.0
 
@@ -261,10 +267,10 @@ class HunyuanVideo15NetworkTrainer(NetworkTrainer):
         byt5_mask = sample_parameter["byt5_mask"].to(device, dtype=torch.bool)
 
         if do_cfg:
-            negative_vl_embed = sample_parameter["negative_prompt_vl_embed"].to(device, dtype=torch.bfloat16)
-            negative_vl_mask = sample_parameter["negative_prompt_vl_mask"].to(device, dtype=torch.bool)
-            negative_byt5_embed = sample_parameter["negative_prompt_byt5_embed"].to(device, dtype=torch.bfloat16)
-            negative_byt5_mask = sample_parameter["negative_prompt_byt5_mask"].to(device, dtype=torch.bool)
+            negative_vl_embed = sample_parameter["negative_vl_embed"].to(device, dtype=torch.bfloat16)
+            negative_vl_mask = sample_parameter["negative_vl_mask"].to(device, dtype=torch.bool)
+            negative_byt5_embed = sample_parameter["negative_byt5_embed"].to(device, dtype=torch.bfloat16)
+            negative_byt5_mask = sample_parameter["negative_byt5_mask"].to(device, dtype=torch.bool)
         else:
             negative_vl_embed = negative_vl_mask = negative_byt5_embed = negative_byt5_mask = None
 
