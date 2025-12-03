@@ -554,16 +554,16 @@ def prepare_i2v_or_t2v_inputs(
         vae_original_device = vae.device
         vae.to(device)
 
-        # prepare mask for image latent
-        latent_mask = torch.zeros(1, 1, lat_f, lat_h, lat_w, device=device)
-        latent_mask[0, 0, 0, :, :] = 1.0  # first frame is image
-
         # encode image to latent space
         with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=True), torch.no_grad():
             cond_latents = vae.encode(img_tensor)[0].mode()
             cond_latents = cond_latents * vae.scaling_factor
 
         logger.info("Encoding complete")
+
+        # prepare mask for image latent
+        latent_mask = torch.zeros(1, 1, lat_f, lat_h, lat_w, device=device)
+        latent_mask[0, 0, 0, :, :] = 1.0  # first frame is image
 
         latents_concat = torch.zeros(
             1, hunyuan_video_1_5_vae.VAE_LATENT_CHANNELS, lat_f, lat_h, lat_w, dtype=torch.float32, device=device

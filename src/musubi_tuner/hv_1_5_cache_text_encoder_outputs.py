@@ -56,8 +56,8 @@ def encode_and_save_batch(
             embed_byt5, mask_byt5 = hunyuan_video_1_5_text_encoder.get_glyph_prompt_embeds(
                 tokenizer_byt5, text_encoder_byt5, prompt
             )
-            embed_byt5_list.append(embed_byt5)
-            mask_byt5_list.append(mask_byt5)
+            embed_byt5_list.append(embed_byt5[0])  # remove batch dim
+            mask_byt5_list.append(mask_byt5[0])    # remove batch dim
 
     # save prompt cache
     for i, item in enumerate(batch):

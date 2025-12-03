@@ -277,7 +277,6 @@ class HunyuanVideo_1_5_DiffusionTransformer(nn.Module):
 
         # Project vision features if provided
         if vision_states is not None:
-            extra_encoder_hidden_states = self.vision_in(vision_states)
             if self.task_type == "t2v" and torch.all(vision_states == 0):
                 # This does not affect the output because of the masks. Kept for reference.
                 # # If t2v, set extra_attention_mask to zeros when vision_states is all zeros
@@ -286,8 +285,9 @@ class HunyuanVideo_1_5_DiffusionTransformer(nn.Module):
                 # )
                 # # Original impl comment: Set vision tokens to zero to mitigate potential block mask error in SSTA
                 # extra_encoder_hidden_states = extra_encoder_hidden_states * 0
-                pass
+                vision_states = None
             else:
+                extra_encoder_hidden_states = self.vision_in(vision_states)
                 cond_emb = self.cond_type_embedding(
                     torch.full_like(
                         extra_encoder_hidden_states[:, :, 0], 2, device=extra_encoder_hidden_states.device, dtype=torch.long

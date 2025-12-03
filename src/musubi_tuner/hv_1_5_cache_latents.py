@@ -41,7 +41,7 @@ def encode_and_save_batch(
         content = contents[i : i + 1, :, :, :, :]  # 1, C, F, H, W
         with torch.autocast(device_type=vae.device.type, dtype=vae.dtype, enabled=True), torch.no_grad():
             latent = vae.encode(content)[0].mode()
-            latent = latent * vae.scaling_factor
+            # latent = latent * vae.scaling_factor  # no scaling here, saved in VAE latent space directly
         latents_list.append(latent)
     latents = torch.cat(latents_list, dim=0)  # B, C, F, H, W
 
@@ -59,7 +59,7 @@ def encode_and_save_batch(
             first_frame = images[i : i + 1, :, 0:1, :, :]  # 1, C, 1, H, W. normalized.
             with torch.autocast(device_type=vae.device.type, dtype=vae.dtype, enabled=True), torch.no_grad():
                 cond_latents = vae.encode(first_frame)[0].mode()
-                cond_latents = cond_latents * vae.scaling_factor
+                # cond_latents = cond_latents * vae.scaling_factor  # no scaling here, saved in VAE latent space directly
 
                 latents_concat = torch.zeros(
                     1, hunyuan_video_1_5_vae.VAE_LATENT_CHANNELS, lat_f, lat_h, lat_w, dtype=torch.float32, device=vae.device
@@ -80,7 +80,8 @@ def encode_and_save_batch(
             feature_extractor, image_encoder = image_encoder_assets
             with torch.no_grad():
                 vision_feature = hf_clip_vision_encode(first_frame_np, feature_extractor, image_encoder)
-            vision_features.append(vision_feature[0])
+                image_encoder_last_hidden_state = vision_feature.last_hidden_state  # float16
+            vision_features.append(image_encoder_last_hidden_state[0])  # remove batch dim
 
     for i, item in enumerate(batch):
         latent = latents[i]
