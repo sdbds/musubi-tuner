@@ -299,4 +299,3 @@ def step(latents, noise_pred, sigmas, step_i):
 
 
 # endregion
-

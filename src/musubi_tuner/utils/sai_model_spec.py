@@ -9,6 +9,7 @@ import logging
 
 from musubi_tuner.dataset.image_video_dataset import (
     ARCHITECTURE_HUNYUAN_VIDEO,
+    ARCHITECTURE_HUNYUAN_VIDEO_1_5,
     ARCHITECTURE_QWEN_IMAGE_EDIT,
     ARCHITECTURE_WAN,
     ARCHITECTURE_FRAMEPACK,
@@ -74,6 +75,7 @@ ARCH_QWEN_IMAGE_EDIT = "Qwen-Image-Edit"
 ARCH_QWEN_IMAGE_EDIT_PLUS = "Qwen-Image-Edit-Plus"
 CUSTOM_ARCH_QWEN_IMAGE_EDIT_PLUS = "@@Qwen-Image-Edit-Plus@@"  # special custom architecture name for Qwen-Image-Edit-Plus
 CUSTOM_ARCH_LONGCAT = "LongCat-Video"
+ARCH_HUNYUAN_VIDEO_1_5 = "hunyuan-video-1.5"
 
 ADAPTER_LORA = "lora"
 
@@ -84,6 +86,7 @@ IMPL_FLUX_KONTEXT = "https://github.com/black-forest-labs/flux"
 IMPL_QWEN_IMAGE = "https://github.com/QwenLM/Qwen-Image"
 IMPL_QWEN_IMAGE_EDIT = IMPL_QWEN_IMAGE
 IMPL_LONGCAT = "https://github.com/meituan-longcat/LongCat-Video"
+IMPL_HUNYUAN_VIDEO_1_5 = "https://github.com/Tencent-Hunyuan/HunyuanVideo-1.5"
 
 PRED_TYPE_EPSILON = "epsilon"
 # PRED_TYPE_V = "v"
@@ -171,6 +174,9 @@ def build_metadata(
     elif architecture == ARCHITECTURE_LONGCAT:
         arch = CUSTOM_ARCH_LONGCAT
         impl = IMPL_LONGCAT
+    elif architecture == ARCHITECTURE_HUNYUAN_VIDEO_1_5:
+        arch = ARCH_HUNYUAN_VIDEO_1_5
+        impl = IMPL_HUNYUAN_VIDEO_1_5
     else:
         raise ValueError(f"Unknown architecture: {architecture}")
 

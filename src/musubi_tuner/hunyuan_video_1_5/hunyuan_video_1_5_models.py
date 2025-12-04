@@ -210,75 +210,6 @@ class HunyuanVideo_1_5_DiffusionTransformer(nn.Module):
         freqs_cos, freqs_sin = get_nd_rotary_pos_embed(self.rope_dim_list, rope_sizes, theta=self.rope_theta)
         return freqs_cos, freqs_sin
 
-    def reorder_txt_token(
-        self,
-        byt5_txt: torch.Tensor,
-        txt: torch.Tensor,
-        byt5_text_mask: torch.Tensor,
-        text_mask: torch.Tensor,
-        zero_feat: bool = False,
-    ) -> Tuple[torch.Tensor, torch.Tensor, list[int]]:
-        """
-        Combine and reorder ByT5 character-level and word-level text embeddings.
-
-        Concatenates valid tokens from both encoders and creates appropriate masks.
-
-        Args:
-            byt5_txt: ByT5 character-level embeddings [B, L1, D].
-            txt: Word-level text embeddings [B, L2, D].
-            byt5_text_mask: Valid token mask for ByT5 [B, L1].
-            text_mask: Valid token mask for word tokens [B, L2].
-            zero_feat: If True, pads invalid tokens with zeros instead of original features.
-            (Kept for compatibility with original implementation. This does not affect the output because of the masks.)
-
-        Returns:
-            Tuple of (reordered_embeddings, combined_mask, sequence_lengths).
-        """
-        # Process each batch element separately to handle variable sequence lengths
-
-        reorder_txt = []
-        reorder_mask = []
-
-        txt_lens = []
-        for i in range(text_mask.shape[0]):
-            byt5_text_mask_i = byt5_text_mask[i].bool()
-            text_mask_i = text_mask[i].bool()
-            byt5_text_length = byt5_text_mask_i.sum()
-            text_length = text_mask_i.sum()
-            assert byt5_text_length == byt5_text_mask_i[:byt5_text_length].sum()
-            assert text_length == text_mask_i[:text_length].sum()
-
-            byt5_txt_i = byt5_txt[i]
-            txt_i = txt[i]
-            if zero_feat:
-                reorder_txt_i = torch.cat(
-                    [
-                        byt5_txt_i[:byt5_text_length],
-                        txt_i[:text_length],
-                        torch.zeros_like(byt5_txt_i[byt5_text_length:]),
-                        torch.zeros_like(txt_i[text_length:]),
-                    ],
-                    dim=0,
-                )
-            else:
-                reorder_txt_i = torch.cat(
-                    [byt5_txt_i[:byt5_text_length], txt_i[:text_length], byt5_txt_i[byt5_text_length:], txt_i[text_length:]], dim=0
-                )
-
-            reorder_mask_i = torch.zeros(
-                byt5_text_mask_i.shape[0] + text_mask_i.shape[0], dtype=torch.bool, device=byt5_text_mask_i.device
-            )
-            reorder_mask_i[: byt5_text_length + text_length] = True
-
-            reorder_txt.append(reorder_txt_i)
-            reorder_mask.append(reorder_mask_i)
-            txt_lens.append(byt5_text_length + text_length)
-
-        reorder_txt = torch.stack(reorder_txt)
-        reorder_mask = torch.stack(reorder_mask).to(dtype=torch.int64)
-
-        return reorder_txt, reorder_mask, txt_lens
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -338,45 +269,82 @@ class HunyuanVideo_1_5_DiffusionTransformer(nn.Module):
         cond_emb = self.cond_type_embedding(torch.zeros_like(txt[:, :, 0], device=txt.device, dtype=torch.long))
         txt = txt + cond_emb
 
-        # Integrate character-level ByT5 features with word-level tokens
-        # Use variable length sequences with sequence lengths
+        # Process ByT5 character-level text embeddings if provided
         byt5_txt = self.byt5_in(byt5_text_states)
+
         cond_emb = self.cond_type_embedding(torch.ones_like(byt5_txt[:, :, 0], device=byt5_txt.device, dtype=torch.long))
         byt5_txt = byt5_txt + cond_emb
-        txt, text_mask, txt_lens = self.reorder_txt_token(byt5_txt, txt, byt5_text_mask, text_mask, zero_feat=True)
 
         # Project vision features if provided
         if vision_states is not None:
-            extra_encoder_hidden_states = self.vision_in(vision_states)
             if self.task_type == "t2v" and torch.all(vision_states == 0):
-                # If t2v, set extra_attention_mask to zeros when vision_states is all zeros
-                extra_attention_mask = torch.zeros(
-                    bs, extra_encoder_hidden_states.shape[1], device=text_mask.device, dtype=text_mask.dtype
-                )
-                # Original impl comment: Set vision tokens to zero to mitigate potential block mask error in SSTA
-                extra_encoder_hidden_states = extra_encoder_hidden_states * 0
+                # This does not affect the output because of the masks. Kept for reference.
+                # # If t2v, set extra_attention_mask to zeros when vision_states is all zeros
+                # extra_attention_mask = torch.zeros(
+                #     bs, extra_encoder_hidden_states.shape[1], device=text_mask.device, dtype=text_mask.dtype
+                # )
+                # # Original impl comment: Set vision tokens to zero to mitigate potential block mask error in SSTA
+                # extra_encoder_hidden_states = extra_encoder_hidden_states * 0
+                vision_states = None
             else:
-                extra_attention_mask = torch.ones(
-                    bs, extra_encoder_hidden_states.shape[1], device=text_mask.device, dtype=text_mask.dtype
+                extra_encoder_hidden_states = self.vision_in(vision_states)
+                cond_emb = self.cond_type_embedding(
+                    torch.full_like(
+                        extra_encoder_hidden_states[:, :, 0], 2, device=extra_encoder_hidden_states.device, dtype=torch.long
+                    )
                 )
-            cond_emb = self.cond_type_embedding(
-                torch.full_like(
-                    extra_encoder_hidden_states[:, :, 0], 2, device=extra_encoder_hidden_states.device, dtype=torch.long
-                )
-            )
-            extra_encoder_hidden_states = extra_encoder_hidden_states + cond_emb
+                extra_encoder_hidden_states = extra_encoder_hidden_states + cond_emb
+        else:
+            extra_encoder_hidden_states = None
 
-            txt, text_mask, txt_lens = self.reorder_txt_token(
-                extra_encoder_hidden_states, txt, extra_attention_mask, text_mask, zero_feat=False
-            )
+        # concatenate txt tokens in the order of [vision (if any), ByT5, word tokens]
+        concatenated_txt = []
+        txt_lens = []
+        for i in range(bs):
+            txt_length = text_mask[i].to(dtype=torch.bool).sum()
+            byt5_txt_length = byt5_text_mask[i].to(dtype=torch.bool).sum()
+            total_length = txt_length + byt5_txt_length
 
-        # Trim sequences to maximum length in the batch
-        img_seq_len = img.shape[1]
+            txt_i = txt[i, :txt_length, :]
+            byt5_txt_i = byt5_txt[i, :byt5_txt_length, :]
+
+            if vision_states is not None:
+                extra_encoder_hidden_states_i = extra_encoder_hidden_states[i]
+                concatenated_txt_i = torch.cat([extra_encoder_hidden_states_i, byt5_txt_i, txt_i], dim=0)
+                total_length += extra_encoder_hidden_states_i.shape[0]
+            else:
+                concatenated_txt_i = torch.cat([byt5_txt_i, txt_i], dim=0)
+
+            concatenated_txt.append(concatenated_txt_i)
+            txt_lens.append(total_length)
+
+        # pad to max length in the batch
         max_txt_len = max(txt_lens)
-        txt = txt[:, :max_txt_len, :]
-        text_mask = text_mask[:, :max_txt_len]
+        txt = torch.stack(
+            [
+                torch.cat(
+                    [concatenated_txt[i], torch.zeros(max_txt_len - txt_lens[i], concatenated_txt[i].shape[-1], device=txt.device)]
+                )
+                for i in range(bs)
+            ]
+        )
+
+        # create combined text mask
         if bs == 1:
             text_mask = None  # for single batch, no need to pass mask
+        else:
+            text_mask = torch.stack(
+                [
+                    torch.cat(
+                        [
+                            torch.ones(txt_lens[i], device=text_mask.device, dtype=text_mask.dtype),
+                            torch.zeros(max_txt_len - txt_lens[i], device=text_mask.device, dtype=text_mask.dtype),
+                        ]
+                    )
+                    for i in range(bs)
+                ]
+            )
+        img_seq_len = img.shape[1]
 
         attn_params = AttentionParams.create_attention_params_from_mask(self.attn_mode, self.split_attn, img_seq_len, text_mask)
 

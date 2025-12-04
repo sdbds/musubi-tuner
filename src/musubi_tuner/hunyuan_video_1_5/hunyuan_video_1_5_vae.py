@@ -849,7 +849,7 @@ def load_vae_from_checkpoint(
         ckpt_path (str): Path to the checkpoint file.
         device (torch.device): Device to load the model onto.
         dtype (torch.dtype): Data type for the model parameters.
-        sample_size (int): Sample size for the VAE model.
+        sample_size (int): Sample size for the VAE model. 0 means no tiling (caller can call set_tile_sample_min_size() and enable_tiling() if needed).
         enable_patch_conv (bool): Whether to enable patch convolution.
 
     Returns:
@@ -887,6 +887,8 @@ def load_vae_from_checkpoint(
         vae_state_dict = torch.load(ckpt_path, map_location="cpu")
 
     logger.info("Initializing VAE model with empty weights")
+    enable_tiling = sample_size != 0
+    sample_size = sample_size if sample_size != 0 else 256
     with init_empty_weights():
         vae = AutoencoderKLConv3D(
             in_channels=3,
@@ -907,6 +909,9 @@ def load_vae_from_checkpoint(
     info = vae.load_state_dict(vae_state_dict, strict=True, assign=True)
     logger.info(f"VAE loaded with info: {info}")
     vae.to(device=device, dtype=dtype)
+    if enable_tiling:
+        logger.info(f"Enabling VAE tiling with sample size: {sample_size}")
+        vae.enable_tiling()
     return vae
 
 
