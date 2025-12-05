@@ -63,6 +63,10 @@ If you find this project helpful, please consider supporting its development via
 
 GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- December 5, 2025
+    - Added support for HunyuanVideo 1.5. See [PR #748](https://github.com/kohya-ss/musubi-tuner/pull/748).
+        - LoRA training for T2V and I2V is now supported. Please refer to the [documentation](./docs/hunyuan_video_1_5.md) for details.
+
 - November 16, 2025
     - Breaking Change: Fixed the argument for the `--compile_dynamic` option when using `torch.compile`. See [PR #727](https://github.com/kohya-ss/musubi-tuner/pull/727).
         - Changed to specify `true`, `false`, or `auto` for the `--compile_dynamic` argument. The default is equivalent to `auto`.
@@ -300,6 +304,8 @@ We welcome contributions! Please see [CONTRIBUTING.md](./CONTRIBUTING.md) for de
 ## License
 
 Code under the `hunyuan_model` directory is modified from [HunyuanVideo](https://github.com/Tencent/HunyuanVideo) and follows their license.
+
+Code under the `hunyuan_video_1_5` directory is modified from [HunyuanVideo 1.5](https://github.com/Tencent-Hunyuan/HunyuanVideo-1.5) and follows their license.
 
 Code under the `wan` directory is modified from [Wan2.1](https://github.com/Wan-Video/Wan2.1). The license is under the Apache License 2.0.
 
