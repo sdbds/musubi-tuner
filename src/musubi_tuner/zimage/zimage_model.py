@@ -707,8 +707,8 @@ class ZImageTransformer2DModel(nn.Module):
         return x
 
 
-FP8_OPTIMIZATION_TARGET_KEYS = [".layers."]
-FP8_OPTIMIZATION_EXCLUDE_KEYS = ["_embedder", "final_layer"]
+FP8_OPTIMIZATION_TARGET_KEYS = ["layers.", "noise_refiner.", "context_refiner."]
+FP8_OPTIMIZATION_EXCLUDE_KEYS = ["_modulation", ".norm_", "_norm"]
 
 
 def create_model(
@@ -824,6 +824,8 @@ def load_zimage_model(
         disable_numpy_memmap=disable_numpy_memmap,
         weight_transform_hooks=hooks,
     )
+
+    # TODO cast weights to mixed precision dtype when fp8_scaled is True, and original weights are in fp32
 
     if fp8_scaled:
         apply_fp8_monkey_patch(model, sd, use_scaled_mm=False)
