@@ -84,6 +84,8 @@ ARCHITECTURE_LONGCAT = "lc"
 ARCHITECTURE_LONGCAT_FULL = "longcat_video"
 ARCHITECTURE_HUNYUAN_VIDEO_1_5 = "hv15"
 ARCHITECTURE_HUNYUAN_VIDEO_1_5_FULL = "hunyuan_video_1_5"
+ARCHITECTURE_Z_IMAGE = "zi"
+ARCHITECTURE_Z_IMAGE_FULL = "z_image"
 
 
 def glob_images(directory, base="*"):
@@ -359,6 +361,18 @@ def save_latent_cache_hunyuan_video_1_5(
     save_latent_cache_common(item_info, sd, ARCHITECTURE_HUNYUAN_VIDEO_1_5_FULL)
 
 
+def save_latent_cache_z_image(item_info: ItemInfo, latent: torch.Tensor):
+    """Z-Image architecture. No control latent is supported."""
+    assert latent.dim() == 3, "latent should be 3D tensor (channel, height, width)"
+
+    C, H, W = latent.shape
+    F = 1
+    dtype_str = dtype_to_str(latent.dtype)
+    sd = {f"latents_{F}x{H}x{W}_{dtype_str}": latent.detach().cpu().contiguous()}
+
+    save_latent_cache_common(item_info, sd, ARCHITECTURE_Z_IMAGE_FULL)
+
+
 def save_latent_cache_common(item_info: ItemInfo, sd: dict[str, torch.Tensor], arch_fullname: str):
     metadata = {
         "architecture": arch_fullname,
@@ -471,6 +485,15 @@ def save_text_encoder_output_cache_hunyuan_video_1_5(item_info: ItemInfo, embed:
     save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_HUNYUAN_VIDEO_1_5_FULL)
 
 
+def save_text_encoder_output_cache_z_image(item_info: ItemInfo, embed: torch.Tensor):
+    """Z-Image architecture."""
+    sd = {}
+    dtype_str = dtype_to_str(embed.dtype)
+    sd[f"varlen_llm_embed_{dtype_str}"] = embed.detach().cpu()
+
+    save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_Z_IMAGE_FULL)
+
+
 def save_text_encoder_output_cache_common(item_info: ItemInfo, sd: dict[str, torch.Tensor], arch_fullname: str):
     for key, value in sd.items():
         # NaN check and show warning, replace NaN with 0
@@ -515,6 +538,7 @@ class BucketSelector:
     RESOLUTION_STEPS_QWEN_IMAGE = 16
     RESOLUTION_STEPS_QWEN_IMAGE_EDIT = 16
     RESOLUTION_STEPS_HUNYUAN_VIDEO_1_5 = 16
+    RESOLUTION_STEPS_Z_IMAGE = 16
 
     ARCHITECTURE_STEPS_MAP = {
         ARCHITECTURE_HUNYUAN_VIDEO: RESOLUTION_STEPS_HUNYUAN,
@@ -525,6 +549,7 @@ class BucketSelector:
         ARCHITECTURE_QWEN_IMAGE_EDIT: RESOLUTION_STEPS_QWEN_IMAGE_EDIT,
         ARCHITECTURE_LONGCAT: RESOLUTION_STEPS_WAN,
         ARCHITECTURE_HUNYUAN_VIDEO_1_5: RESOLUTION_STEPS_HUNYUAN_VIDEO_1_5,
+        ARCHITECTURE_Z_IMAGE: RESOLUTION_STEPS_Z_IMAGE,
     }
 
     def __init__(
