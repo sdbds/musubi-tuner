@@ -14,6 +14,7 @@ from musubi_tuner.dataset.image_video_dataset import (
     ARCHITECTURE_FRAMEPACK,
     ARCHITECTURE_FLUX_KONTEXT,
     ARCHITECTURE_QWEN_IMAGE,
+    ARCHITECTURE_KANDINSKY5,
 )
 
 logger = logging.getLogger(__name__)
@@ -72,6 +73,7 @@ ARCH_QWEN_IMAGE = "Qwen-Image"
 ARCH_QWEN_IMAGE_EDIT = "Qwen-Image-Edit"
 ARCH_QWEN_IMAGE_EDIT_PLUS = "Qwen-Image-Edit-Plus"
 CUSTOM_ARCH_QWEN_IMAGE_EDIT_PLUS = "@@Qwen-Image-Edit-Plus@@"  # special custom architecture name for Qwen-Image-Edit-Plus
+ARCH_KANDINSKY5 = "Kandinsky-5"
 
 ADAPTER_LORA = "lora"
 
@@ -81,6 +83,7 @@ IMPL_FRAMEPACK = "https://github.com/lllyasviel/FramePack"
 IMPL_FLUX_KONTEXT = "https://github.com/black-forest-labs/flux"
 IMPL_QWEN_IMAGE = "https://github.com/QwenLM/Qwen-Image"
 IMPL_QWEN_IMAGE_EDIT = IMPL_QWEN_IMAGE
+IMPL_KANDINSKY5 = "https://github.com/kandinskylab/kandinsky-5"
 
 PRED_TYPE_EPSILON = "epsilon"
 # PRED_TYPE_V = "v"
@@ -165,6 +168,9 @@ def build_metadata(
             custom_arch = None  # clear custom_arch to avoid override later
         else:
             arch = ARCH_QWEN_IMAGE_EDIT  # override with custom_arch later
+    elif architecture == ARCHITECTURE_KANDINSKY5:
+        arch = ARCH_KANDINSKY5
+        impl = IMPL_KANDINSKY5
     else:
         raise ValueError(f"Unknown architecture: {architecture}")
 

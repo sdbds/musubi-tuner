@@ -79,6 +79,8 @@ ARCHITECTURE_QWEN_IMAGE = "qi"
 ARCHITECTURE_QWEN_IMAGE_FULL = "qwen_image"
 ARCHITECTURE_QWEN_IMAGE_EDIT = "qie"
 ARCHITECTURE_QWEN_IMAGE_EDIT_FULL = "qwen_image_edit"
+ARCHITECTURE_KANDINSKY5 = "k5"
+ARCHITECTURE_KANDINSKY5_FULL = "kandinsky5"
 
 
 def glob_images(directory, base="*"):
@@ -312,6 +314,38 @@ def save_latent_cache_qwen_image(item_info: ItemInfo, latent: torch.Tensor, cont
     save_latent_cache_common(item_info, sd, ARCHITECTURE_QWEN_IMAGE_FULL)
 
 
+def save_latent_cache_kandinsky5(
+    item_info: ItemInfo,
+    latent: torch.Tensor,
+    image_latent: Optional[torch.Tensor] = None,
+    control_latent: Optional[torch.Tensor] = None,
+    scaling_factor: Optional[float] = None,
+):
+    """Kandinsky 5 architecture (image/video), with optional source/control latents for i2v/control."""
+    assert latent.dim() == 3 or latent.dim() == 4, "latent should be 3D (C,H,W) or 4D (F,C,H,W) tensor"
+
+    if latent.dim() == 4:
+        _, F, H, W = latent.shape
+    else:
+        F, H, W = 1, latent.shape[1], latent.shape[2]
+        latent = latent.unsqueeze(0)
+    dtype_str = dtype_to_str(latent.dtype)
+    sd = {f"latents_{F}x{H}x{W}_{dtype_str}": latent.detach().cpu().contiguous().clone()}
+
+    if image_latent is not None:
+        _, F_img, H_img, W_img = image_latent.shape
+        sd[f"latents_image_{F_img}x{H_img}x{W_img}_{dtype_str}"] = image_latent.detach().cpu().contiguous().clone()
+
+    if control_latent is not None:
+        _, F_ctrl, H_ctrl, W_ctrl = control_latent.shape
+        sd[f"latents_control_{F_ctrl}x{H_ctrl}x{W_ctrl}_{dtype_str}"] = control_latent.detach().cpu().contiguous().clone()
+
+    if scaling_factor is not None:
+        sd["vae_scaling_factor"] = torch.tensor(float(scaling_factor))
+
+    save_latent_cache_common(item_info, sd, ARCHITECTURE_KANDINSKY5_FULL)
+
+
 def save_latent_cache_common(item_info: ItemInfo, sd: dict[str, torch.Tensor], arch_fullname: str):
     metadata = {
         "architecture": arch_fullname,
@@ -397,6 +431,20 @@ def save_text_encoder_output_cache_qwen_image(item_info: ItemInfo, embed: torch.
     save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_QWEN_IMAGE_FULL)
 
 
+def save_text_encoder_output_cache_kandinsky5(
+    item_info: ItemInfo, text_embeds: torch.Tensor, pooled_embed: torch.Tensor, attention_mask: torch.Tensor
+):
+    """Kandinsky 5 architecture."""
+    sd = {}
+    dtype_str = dtype_to_str(text_embeds.dtype)
+    sd[f"text_embeds_{dtype_str}"] = text_embeds.detach().cpu()
+    dtype_str = dtype_to_str(pooled_embed.dtype)
+    sd[f"pooled_embed_{dtype_str}"] = pooled_embed.detach().cpu()
+    sd["attention_mask"] = attention_mask.detach().cpu()
+
+    save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_KANDINSKY5_FULL)
+
+
 def save_text_encoder_output_cache_common(item_info: ItemInfo, sd: dict[str, torch.Tensor], arch_fullname: str):
     for key, value in sd.items():
         # NaN check and show warning, replace NaN with 0
@@ -440,6 +488,7 @@ class BucketSelector:
     RESOLUTION_STEPS_FLUX_KONTEXT = 16
     RESOLUTION_STEPS_QWEN_IMAGE = 16
     RESOLUTION_STEPS_QWEN_IMAGE_EDIT = 16
+    RESOLUTION_STEPS_KANDINSKY5 = 16
 
     ARCHITECTURE_STEPS_MAP = {
         ARCHITECTURE_HUNYUAN_VIDEO: RESOLUTION_STEPS_HUNYUAN,
@@ -448,6 +497,7 @@ class BucketSelector:
         ARCHITECTURE_FLUX_KONTEXT: RESOLUTION_STEPS_FLUX_KONTEXT,
         ARCHITECTURE_QWEN_IMAGE: RESOLUTION_STEPS_QWEN_IMAGE,
         ARCHITECTURE_QWEN_IMAGE_EDIT: RESOLUTION_STEPS_QWEN_IMAGE_EDIT,
+        ARCHITECTURE_KANDINSKY5: RESOLUTION_STEPS_KANDINSKY5,
     }
 
     def __init__(
@@ -1852,6 +1902,8 @@ class VideoDataset(BaseDataset):
             self.target_fps = VideoDataset.TARGET_FPS_FRAMEPACK
         elif self.architecture == ARCHITECTURE_FLUX_KONTEXT:
             self.target_fps = VideoDataset.TARGET_FPS_FLUX_KONTEXT
+        elif self.architecture == ARCHITECTURE_KANDINSKY5:
+            self.target_fps = VideoDataset.TARGET_FPS_HUNYUAN
         else:
             raise ValueError(f"Unsupported architecture: {self.architecture}")
 
