@@ -24,7 +24,7 @@ This feature is experimental.
 You need to download the DiT, VAE, and Text Encoder (Qwen3) models. 
 
 Since the base model has not been released, it is recommended to use AI Toolkit/ostris's De-Turbo model. Download `z_image_de_turbo_v1_bf16.safetensors` from [ostris/Z-Image-De-Turbo](https://huggingface.co/ostris/Z-Image-De-Turbo) and use it as the DiT model.
-    
+
 The Turbo version DiT, VAE, and Text Encoder can be obtained from Tongyi-MAI's official repository or ComfyUI weights. You can use either of the following:
 
 - **Official Repository**: [Tongyi-MAI/Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo/)
@@ -38,7 +38,7 @@ You need to prepare the following models:
 - **VAE**: The autoencoder model.
 - **Text Encoder**: Qwen3 model.
 
-As another option, you can also use ostris's (ostris/zimage_turbo_training_adapter)[https://huggingface.co/ostris/zimage_turbo_training_adapter] to train by combining the Turbo version with an adapter. In this case, download `zimage_turbo_training_adapter_v2.safetensors`, etc., and specify this LoRA weight in the `--base_weights` option during training.
+As another option, you can also use ostris's [ostris/zimage_turbo_training_adapter](https://huggingface.co/ostris/zimage_turbo_training_adapter) to train by combining the Turbo version with an adapter. In this case, download `zimage_turbo_training_adapter_v2.safetensors`, etc., and specify this LoRA weight in the `--base_weights` option during training.
 
 We would like to express our deep gratitude to ostris for providing the De-Turbo model and Training Adapter.
 
@@ -62,7 +62,7 @@ Turbo版のDiT、VAEとText EncoderはTongyi-MAIの公式リポジトリまた�
 - **VAE**: Autoencoderモデル。
 - **Text Encoder**: Qwen3モデル。
 
-別のオプションとして、ostris氏の (ostris/zimage_turbo_training_adapter)[https://huggingface.co/ostris/zimage_turbo_training_adapter] を使用して、Turbo版とAdapterを組み合わせて学習することもできます。この場合は、`zimage_turbo_training_adapter_v2.safetensors` 等をダウンロードし、学習時に `--base_weights` オプションにこのLoRA重みを指定してください。
+別のオプションとして、ostris氏の [ostris/zimage_turbo_training_adapter](https://huggingface.co/ostris/zimage_turbo_training_adapter) を使用して、Turbo版とAdapterを組み合わせて学習することもできます。この場合は、`zimage_turbo_training_adapter_v2.safetensors` 等をダウンロードし、学習時に `--base_weights` オプションにこのLoRA重みを指定してください。
 
 De-TurboモデルおよびTraining Adapterを提供してくださった ostris 氏に深く感謝します。
 
