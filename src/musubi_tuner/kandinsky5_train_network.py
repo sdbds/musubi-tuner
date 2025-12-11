@@ -416,17 +416,12 @@ class Kandinsky5NetworkTrainer(NetworkTrainer):
             use_fp8 = False  # skip re-quantization below
         elif use_fp8:
             # Limit fp8 to the heavy transformer blocks and output layer to reduce slow per-channel fallbacks on small embeddings.
-            if blocks_to_swap == 0:
-                target_keys = [
-                    "visual_transformer_blocks",
-                    "text_transformer_blocks",
-                    "out_layer",
-                ]
-            else:
-                # In swap mode, keep fp8 narrow to reduce RAM/scale tensors.
-                target_keys = [
-                    "visual_transformer_blocks",
-                ]
+            # Keep the target set consistent even when block swap is used so all transformer blocks are quantized.
+            target_keys = [
+                "visual_transformer_blocks",
+                "text_transformer_blocks",
+                "out_layer",
+            ]
             exclude_keys: list[str] = ["norm"]  # skip LayerNorm-like weights to avoid unmatched scale_weight buffers
             logger.info(f"Applying fp8 optimization (scaled={args.fp8_scaled}, base={args.fp8_base}) on {quant_device}")
             # If block swap is disabled, keep weights on GPU for speed; otherwise keep them on CPU to avoid OOM.
@@ -438,7 +433,9 @@ class Kandinsky5NetworkTrainer(NetworkTrainer):
                 move_to_device = False
                 # quantize on GPU even when block swap is on, but keep weights on CPU afterwards for swap
                 fp8_quant_device = accelerator.device if quant_device == "cpu" else quant_device
-                logger.info("blocks_to_swap > 0, quantizing fp8 on GPU and keeping weights on CPU for block swap.")
+                logger.info(
+                    "blocks_to_swap > 0, quantizing fp8 on GPU and keeping weights on CPU for block swap (all transformer blocks)."
+                )
                 block_size = 64  # larger block to reduce scale tensor size in CPU path
             try:
                 state_dict = optimize_state_dict_with_fp8(
