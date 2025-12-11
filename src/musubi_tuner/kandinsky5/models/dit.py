@@ -153,7 +153,12 @@ class DiffusionTransformer3D(nn.Module):
     def before_text_transformer_blocks(self, text_embed, time, pooled_text_embed, x, text_rope_pos):
         text_embed = self.text_embeddings(text_embed)
         time_embed = self.time_embeddings(time)
-        time_embed = time_embed + self.pooled_text_embeddings(pooled_text_embed)
+        pooled_time_embed = self.pooled_text_embeddings(pooled_text_embed)
+        if pooled_time_embed.dim() > 1 and pooled_time_embed.shape[0] > 1:
+            # Reduce any per-frame pooled embeddings to a single vector so modulation can broadcast to all tokens.
+            pooled_time_embed = pooled_time_embed.mean(dim=0, keepdim=True)
+        time_embed = time_embed + pooled_time_embed
+
         visual_embed = self.visual_embeddings(x)
         text_rope = self.text_rope_embeddings(text_rope_pos)
         return text_embed, time_embed, text_rope, visual_embed

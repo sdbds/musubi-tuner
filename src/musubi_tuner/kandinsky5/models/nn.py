@@ -113,11 +113,30 @@ class RoPE1D(nn.Module):
         self.dim = dim
         self.max_pos = max_pos
         freq = get_freqs(dim // 2, max_period)
+        # Cache base frequencies and an initial args table; expand lazily if longer sequences arrive.
+        self.register_buffer("freqs", freq, persistent=False)
         pos = torch.arange(max_pos, dtype=freq.dtype)
-        self.register_buffer(f"args", torch.outer(pos, freq), persistent=False)
+        self.register_buffer("args", torch.outer(pos, freq), persistent=False)
 
     @torch.autocast(device_type="cuda", enabled=False)
     def forward(self, pos):
+        pos = pos.to(torch.long)
+        if pos.numel() == 0:
+            # Avoid downstream shape issues if an empty position tensor is passed.
+            pos = torch.zeros(1, device=self.args.device, dtype=torch.long)
+
+        max_pos_needed = int(pos.max().item()) + 1
+        # Grow the cached args table on-demand to avoid index OOB with long/replicated token sequences.
+        if max_pos_needed > self.args.shape[0]:
+            new_max_pos = max(max_pos_needed, self.args.shape[0] * 2)
+            freq = self.freqs.to(device=pos.device, dtype=self.freqs.dtype)
+            expanded_pos = torch.arange(new_max_pos, device=pos.device, dtype=freq.dtype)
+            args = torch.outer(expanded_pos, freq)
+            self.register_buffer("args", args, persistent=False)
+        elif self.args.device != pos.device:
+            # Keep cached args on the caller's device to avoid device-mismatch indexing.
+            self.args = self.args.to(pos.device)
+
         args = self.args[pos].to(dtype=torch.float32)
         cosine = torch.cos(args)
         sine = torch.sin(args)
