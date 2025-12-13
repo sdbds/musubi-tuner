@@ -102,6 +102,9 @@ class ZImageTrainer(ZImageNetworkTrainer):
         # check model specific arguments
         self.handle_model_specific_args(args)
 
+        # ZImageNetrworkTrainer set args.dit_dtype as mixed precision, override it here to support float32/bfloat16 (full_bf16)
+        args.dit_dtype = "bfloat16" if args.full_bf16 else "float32"
+
         # show timesteps for debugging
         if args.show_timesteps:
             self.show_timesteps(args)
