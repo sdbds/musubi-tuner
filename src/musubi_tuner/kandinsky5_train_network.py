@@ -53,6 +53,7 @@ class Kandinsky5NetworkTrainer(NetworkTrainer):
         self._text_encoder_clip_path: str | None = None
         self._nabla_mask_cache: dict[tuple[int, int, int, torch.device], torch.Tensor] = {}
         self._i2v_training = False
+        self._i2v_mode = "first"
         self._control_training = False
         self.visual_cond_prob: float = 1.0
 
@@ -103,6 +104,7 @@ class Kandinsky5NetworkTrainer(NetworkTrainer):
         self._i2v_training = "i2v" in args.task
         if self._i2v_training:
             logger.info("I2V training mode enabled")
+        self._i2v_mode = getattr(args, "i2v_mode", "first") or "first"
         self._control_training = False
         self.visual_cond_prob = float(getattr(args, "visual_cond_prob", 1.0) or 0.0)
         if self.visual_cond_prob < 0.0 or self.visual_cond_prob > 1.0:
@@ -707,8 +709,16 @@ class Kandinsky5NetworkTrainer(NetworkTrainer):
                         assert "latents_image" in batch, (
                             "latents_image not found in batch; run kandinsky5_cache_latents to populate I2V caches"
                         )
-                        cond_lat = batch["latents_image"][b].to(accelerator.device, dtype=network_dtype)  # C,F,H,W
-                        cond_lat = cond_lat.permute(1, 2, 3, 0)  # F,H,W,C
+                    cond_lat = batch["latents_image"][b].to(accelerator.device, dtype=network_dtype)  # C,F,H,W
+                    cond_lat = cond_lat.permute(1, 2, 3, 0)  # F,H,W,C
+                    # Align conditioning frames to match video duration.
+                    if self._i2v_mode == "first_last" and cond_lat.shape[0] >= 2 and x.shape[0] > 1:
+                        # Place first frame at index 0 and last frame at the final index; zero elsewhere.
+                        aligned = torch.zeros((x.shape[0], *cond_lat.shape[1:]), device=cond_lat.device, dtype=cond_lat.dtype)
+                        aligned[0] = cond_lat[0]
+                        aligned[-1] = cond_lat[-1]
+                        cond_lat = aligned
+                    else:
                         # pad/truncate to match duration
                         if cond_lat.shape[0] < x.shape[0]:
                             pad = x.shape[0] - cond_lat.shape[0]
@@ -723,9 +733,14 @@ class Kandinsky5NetworkTrainer(NetworkTrainer):
                             cond_lat = cond_lat[: x.shape[0]]
 
                     if cond_lat is not None:
-                        frame_mask = torch.rand(cond_lat.shape[0], device=cond_lat.device) < self.visual_cond_prob
-                        if not frame_mask.any():
-                            frame_mask[0] = True  # ensure at least first frame conditioned
+                        if self._i2v_mode == "first_last" and cond_lat.shape[0] >= 2:
+                            frame_mask = torch.zeros(cond_lat.shape[0], device=cond_lat.device, dtype=torch.bool)
+                            frame_mask[0] = True
+                            frame_mask[-1] = True
+                        else:
+                            frame_mask = torch.rand(cond_lat.shape[0], device=cond_lat.device) < self.visual_cond_prob
+                            if not frame_mask.any():
+                                frame_mask[0] = True  # ensure at least first frame conditioned
                         visual_cond[frame_mask] = cond_lat[frame_mask]
                         visual_cond_mask[frame_mask] = 1
 
@@ -815,6 +830,13 @@ def kandinsky5_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argumen
     parser.add_argument("--offload_dit_during_sampling", action="store_true", help="Offload DiT during sampling")
     parser.add_argument("--no_vae_load", action="store_true", help="Skip loading VAE; use cached scaling factor only")
     parser.add_argument("--scheduler_scale", type=float, default=None, help="Override scheduler scale (default from task config)")
+    parser.add_argument(
+        "--i2v_mode",
+        type=str,
+        default="first",
+        choices=["first", "first_last"],
+        help="I2V conditioning mode: first frame only (default) or first+last frame.",
+    )
     parser.add_argument("--force_nabla_attention", action="store_true", help="Force nabla attention for training regardless of task default")
     parser.add_argument("--nabla_P", type=float, default=0.9, help="CDF threshold P for nabla attention (default 0.9)")
     parser.add_argument("--nabla_wT", type=int, default=11, help="Temporal STA window for nabla attention (default 11)")

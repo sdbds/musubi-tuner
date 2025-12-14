@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 
-def encode_and_save_batch(vae, batch: List[ItemInfo]):
+def encode_and_save_batch(vae, batch: List[ItemInfo], i2v_mode: str = "first"):
     if len(batch) == 0:
         return
 
@@ -108,7 +108,13 @@ def encode_and_save_batch(vae, batch: List[ItemInfo]):
         control_latents.append((ctrl_latent * scaling_factor).cpu())
 
     for idx, (item, latent) in enumerate(zip(batch, latents)):
-        image_latent = latent[:, :1, :, :].clone() if latent.dim() == 4 else None  # first frame as source
+        image_latent = None
+        if latent.dim() == 4:
+            # C, F, H, W
+            if i2v_mode == "first_last" and latent.shape[1] >= 2:
+                image_latent = torch.cat([latent[:, :1, :, :], latent[:, -1:, :, :]], dim=1).clone()
+            else:
+                image_latent = latent[:, :1, :, :].clone()
         ctrl_latent = control_latents[idx]
         logger.info(
             f"Saving cache for item {item.item_key} at {item.latent_cache_path}. latents shape: {latent.shape}, "
@@ -130,6 +136,13 @@ def main():
         "--nabla_resize",
         action="store_true",
         help="Resize inputs to the next multiple of 128 for NABLA-compatible latents (H/W divisible by 16 after VAE).",
+    )
+    parser.add_argument(
+        "--i2v_mode",
+        type=str,
+        default="first",
+        choices=["first", "first_last"],
+        help="I2V conditioning mode: first frame only (default) or first+last frame.",
     )
     args = parser.parse_args()
 
@@ -167,7 +180,7 @@ def main():
     logger.info(f"Loaded VAE. dtype: {vae.dtype}, device: {vae.device}")
 
     def encode(batch: List[ItemInfo]):
-        encode_and_save_batch(vae, batch)
+        encode_and_save_batch(vae, batch, args.i2v_mode)
 
     cache_latents.encode_datasets(datasets, encode, args)
 
