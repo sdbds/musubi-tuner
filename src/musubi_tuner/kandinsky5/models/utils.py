@@ -92,6 +92,8 @@ def nablaT_v2(
     k: Tensor,
     sta: Tensor,
     thr: float = 0.9,
+    add_sta: bool = True,
+    method: str = "topcdf",
 ) -> BlockMask:
     # Map estimation
     B, h, S, D = q.shape
@@ -103,11 +105,21 @@ def nablaT_v2(
     map = torch.softmax(map / math.sqrt(D), dim=-1)
     # Map binarization
     vals, inds = map.sort(-1)
-    cvals = vals.cumsum_(-1)
-    mask = (cvals >= 1 - thr).int()
-    mask = mask.gather(-1, inds.argsort(-1))
+    if method == "topk":
+        # thr can be a float ratio (0-1) or absolute count
+        k_top = int(thr * vals.shape[-1]) if 0 < thr < 1 else int(thr)
+        k_top = max(1, min(k_top, vals.shape[-1]))
+        mask = torch.zeros_like(vals, dtype=torch.int)
+        topk_inds = inds[..., -k_top:]
+        mask.scatter_(-1, topk_inds, 1)
+    else:
+        # default: cumulative CDF threshold
+        cvals = vals.cumsum_(-1)
+        mask = (cvals >= 1 - thr).int()
+        mask = mask.gather(-1, inds.argsort(-1))
 
-    mask = torch.logical_or(mask, sta)
+    if add_sta:
+        mask = torch.logical_or(mask, sta)
 
     # BlockMask creation
     kv_nb = mask.sum(-1).to(torch.int32)

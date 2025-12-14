@@ -8,7 +8,7 @@ This is an unofficial training and inference script for [Kandinsky 5](https://gi
 
 - fp8 support and memory reduction by block swap
 - Inference without installing Flash attention (using PyTorch's scaled dot product attention)
-- LoRA training for text-to-video (T2V) models
+- LoRA training for text-to-video (T2V) and image-to-video (I2V, Pro) models
 
 This feature is experimental.
 
@@ -21,7 +21,7 @@ This feature is experimental.
 
 - fp8対応およびblock swapによる省メモリ化
 - Flash attentionのインストールなしでの実行（PyTorchのscaled dot product attentionを使用）
-- テキストから動画（T2V）モデルのLoRA学習
+- テキストから動画（T2V）および画像から動画（I2V、Pro）モデルのLoRA学習
 
 この機能は実験的なものです。
 
@@ -33,30 +33,24 @@ Download the model weights from the [Kandinsky 5.0 Collection](https://huggingfa
 
 ### DiT Model / DiTモデル
 
-Download the DiT checkpoint from one of the following repositories:
+This document focuses on **Pro** models.
 
-**Lite models (2B parameters):**
-- [Kandinsky-5.0-T2V-Lite-sft-5s](https://huggingface.co/kandinskylab/Kandinsky-5.0-T2V-Lite-sft-5s) - SFT model, highest quality
-- [Kandinsky-5.0-T2V-Lite-sft-10s](https://huggingface.co/kandinskylab/Kandinsky-5.0-T2V-Lite-sft-10s) - 10 second videos
-- [Kandinsky-5.0-T2V-Lite-pretrain-5s](https://huggingface.co/kandinskylab/Kandinsky-5.0-T2V-Lite-pretrain-5s) - Pretrain model for fine-tuning
-- [Kandinsky-5.0-T2V-Lite-nocfg-5s](https://huggingface.co/kandinskylab/Kandinsky-5.0-T2V-Lite-nocfg-5s) - CFG-distilled, 2x faster
-- [Kandinsky-5.0-T2V-Lite-distilled16steps-5s](https://huggingface.co/kandinskylab/Kandinsky-5.0-T2V-Lite-distilled16steps-5s) - Diffusion-distilled, 6x faster
-- [Kandinsky-5.0-I2V-Lite-5s](https://huggingface.co/kandinskylab/Kandinsky-5.0-I2V-Lite-5s) - Image-to-Video
-
-Download the `.safetensors` file (e.g., `kandinsky5lite_t2v_sft_5s.safetensors`).
+Download a Pro DiT `.safetensors` checkpoint from the Kandinsky 5.0 Collection (e.g. `kandinsky5pro_t2v_pretrain_5s.safetensors` or `kandinsky5pro_i2v_sft_5s.safetensors`).
 
 ### VAE
 
 Kandinsky 5 uses the HunyuanVideo 3D VAE. Download `diffusion_pytorch_model.safetensors` (or `pytorch_model.pt`) from:
-https://huggingface.co/tencent/HunyuanVideo/tree/main/hunyuan-video-t2v-720p/vae
+https://huggingface.co/hunyuanvideo-community/HunyuanVideo
 
 ### Text Encoders / テキストエンコーダ
 
-Kandinsky 5 uses Qwen2.5-VL and CLIP for text encoding.
+Kandinsky 5 uses Qwen2.5-VL-7B and CLIP for text encoding.
 
-**Qwen2.5-VL**: Download from https://huggingface.co/Qwen/Qwen2.5-VL-3B-Instruct (or use the path to your local Qwen2.5-VL model)
+**Qwen2.5-VL-7B**: Download from https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct (or use the path to your local Qwen/Qwen2.5-VL-7B-Instruct model)
 
-**CLIP**: Download `clip_l.safetensors` from https://huggingface.co/Comfy-Org/HunyuanVideo_repackaged/tree/main/split_files/text_encoders and place it in a directory (e.g., `text_encoder2/clip_l.safetensors`)
+**CLIP**: Use the Hugging Face Transformers model `openai/clip-vit-large-patch14`.
+
+Pass either the model ID (e.g., `--text_encoder_clip openai/clip-vit-large-patch14`) or a path to the locally cached snapshot directory.
 
 ### Directory Structure / ディレクトリ構造
 
@@ -65,13 +59,13 @@ Place them in your chosen directory structure:
 ```
 weights/
 ├── model/
-│   └── kandinsky5lite_t2v_sft_5s.safetensors
+│   └── kandinsky5pro_t2v_pretrain_5s.safetensors
 ├── vae/
 │   └── diffusion_pytorch_model.safetensors
 ├── text_encoder/
-│   └── (Qwen2.5-VL files)
+│   └── (Qwen2.5-VL-7B files)
 └── text_encoder2/
-    └── clip_l.safetensors
+    └── (openai/clip-vit-large-patch14 files)
 ```
 
 <details>
@@ -79,11 +73,17 @@ weights/
 
 Hugging Faceの[Kandinsky 5.0 Collection](https://huggingface.co/collections/ai-forever/kandinsky-50)からモデルの重みをダウンロードしてください。
 
+このドキュメントは **Proモデル** を前提に説明しています。
+
 **DiTモデル**: 上記のリポジトリから`.safetensors`ファイルをダウンロードしてください。
 
 **VAE**: Kandinsky 5はHunyuanVideo 3D VAEを使用します。上記リンクから`diffusion_pytorch_model.safetensors`（または`pytorch_model.pt`）をダウンロードしてください。
 
-**テキストエンコーダ**: Qwen2.5-VLとCLIPを使用します。上記リンクからダウンロードしてください。
+**テキストエンコーダ**: Qwen2.5-VL-7BとCLIPを使用します。
+
+**Qwen2.5-VL-7B**: https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct からダウンロードしてください（またはローカルの `Qwen/Qwen2.5-VL-7B-Instruct` を指定します）。
+
+**CLIP**: Hugging Face Transformersの `openai/clip-vit-large-patch14` を使用してください（モデルIDまたはローカルにキャッシュされたsnapshotディレクトリへのパスを指定します）。
 
 任意のディレクトリ構造に配置してください。
 
@@ -92,22 +92,6 @@ Hugging Faceの[Kandinsky 5.0 Collection](https://huggingface.co/collections/ai-
 ## Available Tasks / 利用可能なタスク
 
 The `--task` option specifies the model configuration. Available tasks:
-
-**Lite models (2B parameters):**
-
-| Task | Description | Resolution | Notes |
-|------|-------------|------------|-------|
-| `k5-lite-t2i-hd` | Lite T2I | 1024 | Image generation |
-| `k5-lite-i2i-hd` | Lite I2I | 1024 | Image-to-image |
-| `k5-lite-t2v-5s-sd` | Lite T2V 5s | 512 | SFT model |
-| `k5-lite-t2v-10s-sd` | Lite T2V 10s | 512 | SFT model |
-| `k5-lite-i2v-5s-sd` | Lite I2V 5s | 512 | Image-to-video |
-| `k5-lite-t2v-5s-distil-sd` | Lite T2V 5s Distilled | 512 | 16 steps, faster |
-| `k5-lite-t2v-10s-distil-sd` | Lite T2V 10s Distilled | 512 | 16 steps, faster |
-| `k5-lite-t2v-5s-nocfg-sd` | Lite T2V 5s No-CFG | 512 | CFG-distilled |
-| `k5-lite-t2v-10s-nocfg-sd` | Lite T2V 10s No-CFG | 512 | CFG-distilled |
-| `k5-lite-t2v-5s-pretrain-sd` | Lite T2V 5s Pretrain | 512 | For fine-tuning |
-| `k5-lite-t2v-10s-pretrain-sd` | Lite T2V 10s Pretrain | 512 | For fine-tuning |
 
 **Pro models (19B parameters):**
 
@@ -125,15 +109,28 @@ The `--task` option specifies the model configuration. Available tasks:
 
 `--task`オプションでモデル設定を指定します。利用可能なタスクは上記の表を参照してください。
 
-**Liteモデル (2Bパラメータ)**: 公開されている軽量モデルです。
-
-**Proモデル (19Bパラメータ)**: 高品質な大規模モデルです。
+このドキュメントでは **Proモデル (19Bパラメータ)** のみを扱います。
 
 </details>
 
 ## Pre-caching / 事前キャッシュ
 
 Pre-caching is required before training. This involves caching both latents and text encoder outputs.
+
+### Notes for Kandinsky5 / Kandinsky5の注意点
+
+- You must cache **text encoder outputs** with `kandinsky5_cache_text_encoder_outputs.py` before training.
+- `--text_encoder_qwen` / `--text_encoder_clip` are Hugging Face Transformers models: pass a model ID (recommended) or a local HF snapshot directory.
+- For I2V tasks, the latent cache will also store the first-frame latents (`latents_image`) when running `kandinsky5_cache_latents.py`.
+
+<details>
+<summary>日本語</summary>
+
+- 学習前に、`kandinsky5_cache_text_encoder_outputs.py` による **テキストエンコーダ出力のキャッシュ** が必須です。
+- `--text_encoder_qwen` / `--text_encoder_clip` はHugging Face Transformersのモデルです。モデルID（推奨）またはローカルのHF snapshotディレクトリを指定してください。
+- I2Vタスクでは、`kandinsky5_cache_latents.py` 実行時に最初のフレーム用latent（`latents_image`）もキャッシュされます。
+
+</details>
 
 ### Text Encoder Output Pre-caching / テキストエンコーダ出力の事前キャッシュ
 
@@ -142,8 +139,8 @@ Text encoder output pre-caching is required. Create the cache using the followin
 ```bash
 python kandinsky5_cache_text_encoder_outputs.py \
     --dataset_config path/to/dataset.toml \
-    --text_encoder_qwen path/to/text_encoder \
-    --text_encoder_clip path/to/text_encoder2 \
+    --text_encoder_qwen Qwen/Qwen2.5-VL-7B-Instruct \
+    --text_encoder_clip openai/clip-vit-large-patch14 \
     --batch_size 4
 ```
 
@@ -172,6 +169,15 @@ python kandinsky5_cache_latents.py \
     --vae path/to/vae/diffusion_pytorch_model.safetensors
 ```
 
+For NABLA training, you may want to build NABLA-compatible latent caches:
+
+```bash
+python kandinsky5_cache_latents.py \
+    --dataset_config path/to/dataset.toml \
+    --vae path/to/vae/diffusion_pytorch_model.safetensors \
+    --nabla_resize
+```
+
 If you're running low on VRAM, lower the `--batch_size`.
 
 For additional options, use `python kandinsky5_cache_latents.py --help`.
@@ -182,6 +188,15 @@ For additional options, use `python kandinsky5_cache_latents.py --help`.
 latentの事前キャッシュは必須です。上のコマンド例を使用してキャッシュを作成してください。
 
 VRAMが足りない場合は、`--batch_size`を小さくしてください。
+
+NABLAで学習する場合は、NABLA互換のlatentキャッシュを作成することを推奨します：
+
+```bash
+python kandinsky5_cache_latents.py \
+    --dataset_config path/to/dataset.toml \
+    --vae path/to/vae/diffusion_pytorch_model.safetensors \
+    --nabla_resize
+```
 
 その他のオプションは `--help` で確認できます。
 
@@ -198,12 +213,11 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 \
     --dataset_config path/to/dataset.toml \
     --task k5-pro-t2v-5s-sd \
     --dit path/to/kandinsky5pro_t2v_pretrain_5s.safetensors \
-    --text_encoder_qwen path/to/text_encoder \
-    --text_encoder_clip path/to/text_encoder2 \
+    --text_encoder_qwen Qwen/Qwen2.5-VL-7B-Instruct \
+    --text_encoder_clip openai/clip-vit-large-patch14 \
     --vae path/to/vae/diffusion_pytorch_model.safetensors \
     --fp8_base \
-    --blocks_to_swap 10 \
-    --flash_attn \
+    --sdpa \
     --gradient_checkpointing \
     --max_data_loader_n_workers 1 \
     --persistent_data_loader_workers \
@@ -214,16 +228,18 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 \
     --lr_scheduler constant_with_warmup \
     --lr_warmup_steps 100 \
     --network_module networks.lora_kandinsky \
-    --network_dim 16 \
-    --network_alpha 16 \
+    --network_dim 32 \
+    --network_alpha 32 \
     --timestep_sampling shift \
     --discrete_flow_shift 5.0 \
     --output_dir path/to/output \
-    --output_name my_lora \
-    --save_every_n_epochs 5 \
+    --output_name k5_lora \
+    --save_every_n_epochs 1 \
     --max_train_epochs 50 \
     --scheduler_scale 10.0
 ```
+
+For I2V training, switch the task and checkpoint to an I2V preset (e.g., `k5-pro-i2v-5s-sd` with `kandinsky5pro_i2v_sft_5s.safetensors`). The latent cache already stores the first-frame latents (`latents_image`) when you run `kandinsky5_cache_latents.py`, so no extra flags are needed beyond picking an I2V task.
 
 The training settings are experimental. Appropriate learning rates, training steps, timestep distribution, etc. are not yet fully determined. Feedback is welcome.
 
@@ -236,9 +252,9 @@ For additional options, use `python kandinsky5_train_network.py --help`.
 - `--vae`: Path to VAE checkpoint (overrides task default)
 - `--network_module`: Use `networks.lora_kandinsky` for Kandinsky5 LoRA
 
-**Note**: The `--task` option only sets the model architecture and parameters, not the weights. Use `--dit` to specify which checkpoint to load. For example, you can train a pretrain checkpoint using `--task k5-lite-t2v-5s-sd --dit path/to/pretrain.safetensors`.
+**Note**: The `--task` option only sets the model architecture and parameters, not the weights. Use `--dit` to specify which checkpoint to load.
 
-**注意**: `--task`オプションはモデルのアーキテクチャとパラメータのみを設定し、重みは設定しません。`--dit`で読み込むチェックポイントを指定してください。例えば、`--task k5-lite-t2v-5s-sd --dit path/to/pretrain.safetensors`のように、pretrainチェックポイントを使用できます。
+**注意**: `--task`オプションはモデルのアーキテクチャとパラメータのみを設定し、重みは設定しません。`--dit`で読み込むチェックポイントを指定してください。
 
 ### Memory Optimization / メモリ最適化
 
@@ -254,9 +270,22 @@ If you're running low on VRAM, use `--blocks_to_swap` to offload some blocks to 
 
 Use `--sdpa` for PyTorch's scaled dot product attention. Use `--flash_attn` for FlashAttention. Use `--xformers` for xformers.
 
-### Timestep Sampling / タイムステップサンプリング
+### Kandinsky5-specific Options / Kandinsky5固有オプション
 
-You can specify the range of timesteps with `--min_timestep` and `--max_timestep`. See [advanced configuration](./advanced_config.md) for details.
+- `--scheduler_scale`: Overrides the task's scheduler scaling factor. This affects the timestep schedule used in sampling/inference and is also stored in the task config used during training.
+- `--offload_dit_during_sampling`: Offloads the DiT model to CPU during sampling (sample generation during training, and in `kandinsky5_generate_video.py`) to reduce peak VRAM usage.
+
+**NABLA attention (training):**
+
+- `--force_nabla_attention`: Force NABLA attention regardless of the task default.
+- `--nabla_method`: NABLA binarization method (default `topcdf`).
+- `--nabla_P`: CDF threshold (default `0.9`).
+- `--nabla_wT`, `--nabla_wH`, `--nabla_wW`: STA window sizes (defaults `11`, `3`, `3`).
+- `--nabla_add_sta` / `--no_nabla_add_sta`: Enable/disable STA prior when forcing NABLA.
+
+**NABLA-compatible latent caching:**
+
+- `kandinsky5_cache_latents.py --nabla_resize`: Resizes inputs to the next multiple of 128 before VAE encoding, which helps produce latents compatible with NABLA geometry constraints.
 
 ### Sample Generation During Training / 学習中のサンプル生成
 
@@ -266,6 +295,43 @@ Sample generation during training is supported. See [sampling during training](.
 <summary>日本語</summary>
 
 上のコマンド例を使用して学習を開始してください（実際には一行で入力）。
+
+日本語セクションの例（英語セクションと同じ内容）：
+
+```bash
+accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 \
+    kandinsky5_train_network.py \
+    --mixed_precision bf16 \
+    --dataset_config path/to/dataset.toml \
+    --task k5-pro-t2v-5s-sd \
+    --dit path/to/kandinsky5pro_t2v_pretrain_5s.safetensors \
+    --text_encoder_qwen Qwen/Qwen2.5-VL-7B-Instruct \
+    --text_encoder_clip openai/clip-vit-large-patch14 \
+    --vae path/to/vae/diffusion_pytorch_model.safetensors \
+    --fp8_base \
+    --sdpa \
+    --gradient_checkpointing \
+    --max_data_loader_n_workers 1 \
+    --persistent_data_loader_workers \
+    --learning_rate 1e-4 \
+    --optimizer_type AdamW8Bit \
+    --optimizer_args "weight_decay=0.001" "betas=(0.9,0.95)" \
+    --max_grad_norm 1.0 \
+    --lr_scheduler constant_with_warmup \
+    --lr_warmup_steps 100 \
+    --network_module networks.lora_kandinsky \
+    --network_dim 32 \
+    --network_alpha 32 \
+    --timestep_sampling shift \
+    --discrete_flow_shift 5.0 \
+    --output_dir path/to/output \
+    --output_name k5_lora \
+    --save_every_n_epochs 1 \
+    --max_train_epochs 50 \
+    --scheduler_scale 10.0
+```
+
+I2Vの学習を行う場合は、タスクとチェックポイントをI2V向けプリセットに変更してください（例: `k5-pro-i2v-5s-sd` と `kandinsky5pro_i2v_sft_5s.safetensors`）。`kandinsky5_cache_latents.py` でlatentをキャッシュする際に、最初のフレームlatent（`latents_image`）も保存されるため、I2V専用の追加フラグは不要です（I2Vタスクを選ぶだけで動作します）。
 
 学習設定は実験的なものです。適切な学習率、学習ステップ数、タイムステップの分布などは、まだ完全には決まっていません。フィードバックをお待ちしています。
 
@@ -292,9 +358,22 @@ VRAMが足りない場合は、`--blocks_to_swap`を指定して、一部のブ�
 
 `--sdpa`でPyTorchのscaled dot product attentionを使用します。`--flash_attn`でFlashAttentionを使用します。`--xformers`でxformersを使用します。
 
-**タイムステップサンプリング**
+**Kandinsky5固有オプション**
 
-`--min_timestep`と`--max_timestep`を指定すると、学習時のタイムステップの範囲を指定できます。詳細は[高度な設定](./advanced_config.md)を参照してください。
+- `--scheduler_scale`: タスクの`scheduler_scale`を上書きします。サンプリング/推論で使うタイムステップスケジュールに影響します。
+- `--offload_dit_during_sampling`: サンプル生成時（学習中のサンプリング、および `kandinsky5_generate_video.py`）にDiTをCPUへ退避し、ピークVRAMを下げます。
+
+**NABLAアテンション（学習）**
+
+- `--force_nabla_attention`: タスク設定に関係なくNABLAを強制します。
+- `--nabla_method`: NABLAの二値化メソッド（デフォルト `topcdf`）。
+- `--nabla_P`: CDFしきい値（デフォルト `0.9`）。
+- `--nabla_wT`, `--nabla_wH`, `--nabla_wW`: STAウィンドウ（デフォルト `11`, `3`, `3`）。
+- `--nabla_add_sta` / `--no_nabla_add_sta`: STA priorの有効/無効。
+
+**NABLA互換latentキャッシュ**
+
+- `kandinsky5_cache_latents.py --nabla_resize`: VAEエンコード前に入力を128の倍数へリサイズし、NABLAの幾何条件に合うlatentを生成しやすくします。
 
 **学習中のサンプル生成**
 
@@ -311,9 +390,8 @@ python kandinsky5_generate_video.py \
     --task k5-pro-t2v-5s-sd \
     --dit path/to/kandinsky5pro_t2v_pretrain_5s.safetensors \
     --vae path/to/vae/diffusion_pytorch_model.safetensors \
-    --text_encoder_qwen path/to/text_encoder \
-    --text_encoder_clip path/to/text_encoder2 \
-    --blocks_to_swap 10 \
+    --text_encoder_qwen Qwen/Qwen2.5-VL-7B-Instruct \
+    --text_encoder_clip openai/clip-vit-large-patch14 \
     --offload_dit_during_sampling \
     --fp8_base \
     --dtype bfloat16 \
@@ -374,66 +452,13 @@ For additional options, use `python kandinsky5_generate_video.py --help`.
 
 </details>
 
-## FP8 Checkpoints / FP8チェックポイント
-
-You can pre-quantize the DiT checkpoint to fp8 format using the provided script:
-
-```bash
-python _make_fp8_ckpt.py \
-    --input path/to/kandinsky5pro_t2v_sft_5s.safetensors \
-    --output path/to/kandinsky5pro_t2v_sft_5s_fp8.safetensors
-```
-
-The fp8 checkpoint can be used directly with training and inference scripts. When an fp8 checkpoint is detected, it will be used as-is without re-quantization.
-
-<details>
-<summary>日本語</summary>
-
-提供されているスクリプトを使用して、DiTチェックポイントをfp8形式に事前量子化できます。
-
-fp8チェックポイントは、学習および推論スクリプトで直接使用できます。fp8チェックポイントが検出されると、再量子化せずにそのまま使用されます。
-
-</details>
-
 ## Dataset Configuration / データセット設定
 
 Dataset configuration is the same as other architectures. See [dataset configuration](./dataset_config.md) for details.
-
-```toml
-[general]
-enable_bucket = true
-bucket_no_upscale = false
-
-# Image dataset example
-[[datasets]]
-image_directory = "path/to/images"
-cache_directory = "path/to/images/cache"
-resolution = [512, 512]
-batch_size = 1
-num_repeats = 1
-caption_extension = ".txt"
-
-# Video dataset example
-[[datasets]]
-video_directory = "path/to/videos"
-cache_directory = "path/to/videos/cache"
-resolution = [256, 256]
-batch_size = 1
-num_repeats = 1
-frame_extraction = "head"
-target_frames = [17]
-caption_extension = ".txt"
-```
-
-Note: `target_frames` values must follow the `N*4+1` pattern (1, 5, 9, 13, 17, 21, 25, 29, 33, 37, 41, 45, 49, ...).
 
 <details>
 <summary>日本語</summary>
 
 データセット設定は他のアーキテクチャと同じです。詳細は[データセット設定](./dataset_config.md)を参照してください。
-
-データセットTOMLの形式は他のアーキテクチャと同じです。
-
-注意: `target_frames` の値は `N*4+1` パターン（1, 5, 9, 13, 17, 21, 25, 29, 33, ...）に従う必要があります。
 
 </details>

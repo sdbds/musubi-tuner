@@ -25,6 +25,7 @@ from musubi_tuner.kandinsky5.models.dit import DiffusionTransformer3D, get_dit
 from musubi_tuner.kandinsky5.models.vae import build_vae
 from musubi_tuner.kandinsky5.models.text_embedders import get_text_embedder
 from musubi_tuner.kandinsky5 import generation_utils
+from musubi_tuner.kandinsky5.models.utils import fast_sta_nabla
 from musubi_tuner.modules.custom_offloading_utils import ModelOffloader
 from musubi_tuner.modules.fp8_optimization_utils import (
     optimize_state_dict_with_fp8,
@@ -50,6 +51,10 @@ class Kandinsky5NetworkTrainer(NetworkTrainer):
         self._cached_sample_vae = None
         self._text_encoder_qwen_path: str | None = None
         self._text_encoder_clip_path: str | None = None
+        self._nabla_mask_cache: dict[tuple[int, int, int, torch.device], torch.Tensor] = {}
+        self._i2v_training = False
+        self._control_training = False
+        self.visual_cond_prob: float = 1.0
 
     # region model specific
 
@@ -72,15 +77,105 @@ class Kandinsky5NetworkTrainer(NetworkTrainer):
 
             self.task_conf = replace(self.task_conf, scheduler_scale=args.scheduler_scale)
             logger.info(f"Overriding scheduler_scale to {args.scheduler_scale}")
+        if getattr(args, "force_nabla_attention", False):
+            from dataclasses import replace
+
+            self.task_conf = replace(
+                self.task_conf,
+                attention=replace(
+                    self.task_conf.attention,
+                    type="nabla",
+                    method=getattr(args, "nabla_method", "topcdf"),
+                    P=getattr(args, "nabla_P", 0.9),
+                    add_sta=getattr(args, "nabla_add_sta", True),
+                    wT=getattr(args, "nabla_wT", 11),
+                    wH=getattr(args, "nabla_wH", 3),
+                    wW=getattr(args, "nabla_wW", 3),
+                ),
+            )
+            logger.info(
+                "Forcing nabla attention for training: "
+                f"method={self.task_conf.attention.method}, P={self.task_conf.attention.P}, "
+                f"wT={self.task_conf.attention.wT}, wH={self.task_conf.attention.wH}, wW={self.task_conf.attention.wW}, "
+                f"add_sta={self.task_conf.attention.add_sta}"
+            )
         self.dit_dtype = torch.bfloat16 if args.mixed_precision == "bf16" else torch.float16
-        self._i2v_training = False
+        self._i2v_training = "i2v" in args.task
+        if self._i2v_training:
+            logger.info("I2V training mode enabled")
         self._control_training = False
+        self.visual_cond_prob = float(getattr(args, "visual_cond_prob", 1.0) or 0.0)
+        if self.visual_cond_prob < 0.0 or self.visual_cond_prob > 1.0:
+            logger.warning(f"visual_cond_prob {self.visual_cond_prob} out of [0,1]; clamping.")
+            self.visual_cond_prob = min(1.0, max(0.0, self.visual_cond_prob))
         self.default_guidance_scale = self.task_conf.guidance_weight
         # Text token padding is always enabled to mirror the working inference path.
         self.text_token_padding = True
         self._text_encoder_qwen_path = getattr(args, "text_encoder_qwen", None)
         self._text_encoder_clip_path = getattr(args, "text_encoder_clip", None)
         self._vae_checkpoint_path = getattr(args, "vae", None) or self.task_conf.vae.checkpoint_path
+
+    @property
+    def i2v_training(self) -> bool:
+        return self._i2v_training
+
+    @property
+    def control_training(self) -> bool:
+        return self._control_training
+
+    def _build_sparse_params(self, x: torch.Tensor, device: torch.device):
+        """Create (and cache) nabla sparse attention params for the current visual grid."""
+        attn_conf = getattr(self.task_conf, "attention", None)
+        if attn_conf is None or getattr(attn_conf, "type", None) != "nabla":
+            return None
+        if not self.dit_conf:
+            return None
+
+        patch_size = self.dit_conf.get("patch_size", (1, 2, 2))
+        # Enforce geometry assumptions required by NABLA/STA masks and fractal flattening.
+        if patch_size[0] != 1:
+            raise ValueError("NABLA requires temporal patch size == 1 (got patch_size[0] != 1)")
+
+        duration, height, width = x.shape[:3]
+        if height % patch_size[1] != 0 or width % patch_size[2] != 0:
+            raise ValueError(
+                f"NABLA requires spatial dims divisible by patch_size; got H={height}, W={width}, patch={patch_size}"
+            )
+        T = duration // patch_size[0]
+        H = height // patch_size[1]
+        W = width // patch_size[2]
+        if H % 8 != 0 or W % 8 != 0:
+            raise ValueError(
+                f"NABLA requires H//patch and W//patch divisible by 8 for fractal flattening; got H={H}, W={W}"
+            )
+
+        # Cache STA masks per (T, H/8, W/8, device) to avoid recomputing every step.
+        sta_key = (T, H // 8, W // 8, device)
+        sta_mask = self._nabla_mask_cache.get(sta_key)
+        if sta_mask is None:
+            sta_mask = fast_sta_nabla(
+                T,
+                H // 8,
+                W // 8,
+                attn_conf.wT,
+                attn_conf.wH,
+                attn_conf.wW,
+                device=device,
+            )
+            self._nabla_mask_cache[sta_key] = sta_mask
+
+        return {
+            "sta_mask": sta_mask.unsqueeze(0).unsqueeze(0),
+            "attention_type": attn_conf.type,
+            "to_fractal": True,
+            "P": attn_conf.P,
+            "wT": attn_conf.wT,
+            "wW": attn_conf.wW,
+            "wH": attn_conf.wH,
+            "add_sta": attn_conf.add_sta,
+            "visual_shape": (T, H, W),
+            "method": getattr(attn_conf, "method", "topcdf"),
+        }
 
     def sample_images(self, accelerator: Accelerator, args, epoch, steps, vae, transformer, sample_parameters, dit_dtype):
         """Use kandinsky5.generation_utils for quick qualitative checks with on-demand loading/offload."""
@@ -606,26 +701,41 @@ class Kandinsky5NetworkTrainer(NetworkTrainer):
                 if transformer.visual_cond:
                     visual_cond = torch.zeros_like(x)
                     visual_cond_mask = torch.zeros((*x.shape[:-1], 1), device=accelerator.device, dtype=x.dtype)
+
+                    cond_lat = None
+                    if self._i2v_training:
+                        assert "latents_image" in batch, (
+                            "latents_image not found in batch; run kandinsky5_cache_latents to populate I2V caches"
+                        )
+                        cond_lat = batch["latents_image"][b].to(accelerator.device, dtype=network_dtype)  # C,F,H,W
+                        cond_lat = cond_lat.permute(1, 2, 3, 0)  # F,H,W,C
+                        # pad/truncate to match duration
+                        if cond_lat.shape[0] < x.shape[0]:
+                            pad = x.shape[0] - cond_lat.shape[0]
+                            cond_lat = torch.cat(
+                                [
+                                    cond_lat,
+                                    torch.zeros((pad, *cond_lat.shape[1:]), device=cond_lat.device, dtype=cond_lat.dtype),
+                                ],
+                                dim=0,
+                            )
+                        elif cond_lat.shape[0] > x.shape[0]:
+                            cond_lat = cond_lat[: x.shape[0]]
+
+                    if cond_lat is not None:
+                        frame_mask = torch.rand(cond_lat.shape[0], device=cond_lat.device) < self.visual_cond_prob
+                        if not frame_mask.any():
+                            frame_mask[0] = True  # ensure at least first frame conditioned
+                        visual_cond[frame_mask] = cond_lat[frame_mask]
+                        visual_cond_mask[frame_mask] = 1
+
                     x = torch.cat([x, visual_cond, visual_cond_mask], dim=-1)
 
-                    # i2v/control: if control/source latents exist, append them channel-wise
+                    # control: if control/source latents exist, append them channel-wise after cond inputs
                     if self._control_training and "latents_control" in batch:
                         ctrl = batch["latents_control"][b].to(accelerator.device, dtype=network_dtype)  # C,F,H,W
                         ctrl = ctrl.permute(1, 2, 3, 0)  # F,H,W,C
                         x = torch.cat([ctrl, x], dim=-1)
-                    if self._i2v_training and "latents_image" in batch:
-                        img_lat = batch["latents_image"][b].to(accelerator.device, dtype=network_dtype)  # C,F,H,W
-                        img_lat = img_lat.permute(1, 2, 3, 0)  # F,H,W,C
-                        # pad/truncate to match duration
-                        if img_lat.shape[0] < x.shape[0]:
-                            pad = x.shape[0] - img_lat.shape[0]
-                            img_lat = torch.cat(
-                                [img_lat, torch.zeros((pad, *img_lat.shape[1:]), device=img_lat.device, dtype=img_lat.dtype)],
-                                dim=0,
-                            )
-                        elif img_lat.shape[0] > x.shape[0]:
-                            img_lat = img_lat[: x.shape[0]]
-                        x = torch.cat([img_lat, x], dim=-1)
 
                 # repeat text embeddings and masks per frame (default) or per chunk
                 repeat_units = math.ceil(duration / chunk_len) if chunk_mode else duration
@@ -650,6 +760,8 @@ class Kandinsky5NetworkTrainer(NetworkTrainer):
                     visual_cond_mask = torch.zeros((*x.shape[:-1], 1), device=accelerator.device, dtype=x.dtype)
                     x = torch.cat([x, visual_cond, visual_cond_mask], dim=-1)
 
+            sparse_params = self._build_sparse_params(x, x.device)
+
             visual_rope_pos = [
                 torch.arange(duration, device=accelerator.device),
                 torch.arange(height // patch_size[1], device=accelerator.device),
@@ -671,7 +783,7 @@ class Kandinsky5NetworkTrainer(NetworkTrainer):
                     visual_rope_pos,
                     text_rope_pos,
                     scale_factor=tuple(self.task_conf.scale_factor),
-                    sparse_params=None,
+                    sparse_params=sparse_params,
                     attention_mask=attention_mask,
                 )
 
@@ -697,11 +809,20 @@ def kandinsky5_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argumen
     parser.add_argument("--task", type=str, required=True, help="Kandinsky5 task key (see configs.TASK_CONFIGS)")
     parser.add_argument("--override_dit", type=str, default=None, help="JSON dict to override DiT params")
     # fp8 and block swap flags are defined in setup_parser_common; reuse them to avoid conflicts
+    parser.add_argument("--fp8_scaled", action="store_true", help="use scaled fp8 for DiT / DiTにスケーリングされたfp8を使う")
     parser.add_argument("--text_encoder_qwen", type=str, default=None, help="Override Qwen text encoder path")
     parser.add_argument("--text_encoder_clip", type=str, default=None, help="Override CLIP text encoder path")
     parser.add_argument("--offload_dit_during_sampling", action="store_true", help="Offload DiT during sampling")
     parser.add_argument("--no_vae_load", action="store_true", help="Skip loading VAE; use cached scaling factor only")
     parser.add_argument("--scheduler_scale", type=float, default=None, help="Override scheduler scale (default from task config)")
+    parser.add_argument("--force_nabla_attention", action="store_true", help="Force nabla attention for training regardless of task default")
+    parser.add_argument("--nabla_P", type=float, default=0.9, help="CDF threshold P for nabla attention (default 0.9)")
+    parser.add_argument("--nabla_wT", type=int, default=11, help="Temporal STA window for nabla attention (default 11)")
+    parser.add_argument("--nabla_wH", type=int, default=3, help="Height STA window for nabla attention (default 3)")
+    parser.add_argument("--nabla_wW", type=int, default=3, help="Width STA window for nabla attention (default 3)")
+    parser.add_argument("--nabla_method", type=str, default="topcdf", help="Nabla map binarization method (default topcdf)")
+    parser.add_argument("--nabla_add_sta", dest="nabla_add_sta", action="store_true", default=True, help="Include STA prior when forcing nabla attention (default: True)")
+    parser.add_argument("--no_nabla_add_sta", dest="nabla_add_sta", action="store_false", help="Disable STA prior when forcing nabla attention")
     return parser
 
 

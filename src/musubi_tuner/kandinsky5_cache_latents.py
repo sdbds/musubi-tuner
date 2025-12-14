@@ -24,6 +24,7 @@ def encode_and_save_batch(vae, batch: List[ItemInfo]):
 
     videos = []
     controls = []
+    resize_info = []
     for item in batch:
         content = item.content
         if content is None:
@@ -37,6 +38,7 @@ def encode_and_save_batch(vae, batch: List[ItemInfo]):
         if video.dim() == 3:  # H, W, C -> add temporal dimension
             video = video.unsqueeze(0)
         videos.append(video)
+        resize_info.append((video.shape[-2], video.shape[-1]))
 
         if item.control_content is not None:
             ctrl = item.control_content
@@ -53,6 +55,21 @@ def encode_and_save_batch(vae, batch: List[ItemInfo]):
     inputs = inputs.permute(0, 4, 1, 2, 3).contiguous()  # B, C, F, H, W
     inputs = inputs / 127.5 - 1.0
 
+    # Optionally enforce NABLA-friendly spatial multiples of 128 (latents multiples of 16).
+    use_nabla_resize = bool(getattr(vae.config, "nabla_force_resize", False))
+    _, _, _, height, width = inputs.shape
+    if use_nabla_resize:
+        target_h = ((height + 127) // 128) * 128
+        target_w = ((width + 127) // 128) * 128
+        if target_h != height or target_w != width:
+            b, c, f, _, _ = inputs.shape
+            inputs = inputs.reshape(-1, c, height, width)  # (B*F, C, H, W)
+            inputs = torch.nn.functional.interpolate(
+                inputs, size=(target_h, target_w), mode="bilinear", align_corners=False
+            )
+            inputs = inputs.reshape(b, c, f, target_h, target_w)  # restore (B, C, F, H, W)
+            height, width = target_h, target_w
+
     scaling_factor = getattr(vae.config, "scaling_factor", 1.0)
 
     with torch.no_grad():
@@ -67,14 +84,19 @@ def encode_and_save_batch(vae, batch: List[ItemInfo]):
 
     latents = latents.cpu()
 
-    # encode control latents if present
+    # encode control latents if present (resize to same target if needed)
     control_latents = []
     for ctrl in controls:
         if ctrl is None:
             control_latents.append(None)
             continue
         ctrl = ctrl.to(device=vae.device, dtype=vae.dtype)
-        ctrl = ctrl.permute(3, 0, 1, 2).contiguous()  # F, H, W, C -> C, F, H, W
+        if ctrl.dim() == 4:  # F, H, W, C
+            ctrl = ctrl.permute(3, 0, 1, 2).contiguous()  # C, F, H, W
+        if ctrl.shape[-2:] != (height, width):
+            ctrl = torch.nn.functional.interpolate(
+                ctrl.unsqueeze(0), size=(height, width), mode="bilinear", align_corners=False
+            ).squeeze(0)
         with torch.no_grad():
             encoded_ctrl = vae.encode(ctrl.unsqueeze(0))
             if hasattr(encoded_ctrl, "latent_dist"):
@@ -92,6 +114,7 @@ def encode_and_save_batch(vae, batch: List[ItemInfo]):
             f"Saving cache for item {item.item_key} at {item.latent_cache_path}. latents shape: {latent.shape}, "
             f"image_latent: {None if image_latent is None else image_latent.shape}, "
             f"control_latent: {None if ctrl_latent is None else ctrl_latent.shape}"
+            f" (original frame: {resize_info[idx]})"
         )
         save_latent_cache_kandinsky5(
             item_info=item,
@@ -103,6 +126,11 @@ def encode_and_save_batch(vae, batch: List[ItemInfo]):
 
 def main():
     parser = cache_latents.setup_parser_common()
+    parser.add_argument(
+        "--nabla_resize",
+        action="store_true",
+        help="Resize inputs to the next multiple of 128 for NABLA-compatible latents (H/W divisible by 16 after VAE).",
+    )
     args = parser.parse_args()
 
     device = args.device if args.device is not None else "cuda" if torch.cuda.is_available() else "cpu"
@@ -124,6 +152,9 @@ def main():
     # Build VAE (Hunyuan-based 3D VAE) from Kandinsky weights
     vae_conf = type("VAEConf", (), {"name": "hunyuan", "checkpoint_path": args.vae})
     vae = build_vae(vae_conf)
+    if args.nabla_resize:
+        # flag to trigger NABLA-friendly resizing in encode_and_save_batch
+        vae.config.nabla_force_resize = True
 
     # Apply vae_dtype if specified
     if args.vae_dtype is not None:

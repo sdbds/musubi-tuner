@@ -329,6 +329,8 @@ class MultiheadSelfAttentionDec(nn.Module):
             key,
             sparse_params["sta_mask"],
             thr=sparse_params["P"],
+            add_sta=bool(sparse_params.get("add_sta", True)),
+            method=sparse_params.get("method", "topcdf"),
         )
         out = flex_attention(query, key, value, block_mask=block_mask).transpose(1, 2).squeeze(0).contiguous()
         out = out.flatten(-2, -1)
