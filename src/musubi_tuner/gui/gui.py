@@ -131,6 +131,7 @@ def construct_ui():
                         gr.update(),
                         gr.update(),
                         gr.update(),
+                        gr.update(),
                     )
                 try:
                     os.makedirs(os.path.join(path, "training"), exist_ok=True)
@@ -156,6 +157,7 @@ def construct_ui():
                     new_save_n = settings.get("save_every_n_epochs", 1)
                     new_flow = settings.get("discrete_flow_shift", 2.0)
                     new_swap = settings.get("block_swap", 0)
+                    new_use_pinned_memory_for_block_swap = settings.get("use_pinned_memory_for_block_swap", False)
                     new_prec = settings.get("mixed_precision", "bf16")
                     new_grad_cp = settings.get("gradient_checkpointing", True)
                     new_fp8_s = settings.get("fp8_scaled", True)
@@ -206,6 +208,7 @@ def construct_ui():
                         new_save_n,
                         new_flow,
                         new_swap,
+                        new_use_pinned_memory_for_block_swap,
                         new_prec,
                         new_grad_cp,
                         new_fp8_s,
@@ -223,6 +226,8 @@ def construct_ui():
                 except Exception as e:
                     return (
                         f"Error initializing project: {str(e)}",
+                        gr.update(),
+                        gr.update(),
                         gr.update(),
                         gr.update(),
                         gr.update(),
@@ -378,6 +383,7 @@ num_repeats = 1
                 save_n = defaults.get("save_every_n_epochs", 1)
                 flow = defaults.get("discrete_flow_shift", 2.0)
                 swap = defaults.get("block_swap", 0)
+                use_pinned_memory_for_block_swap = defaults.get("use_pinned_memory_for_block_swap", False)
                 prec = defaults.get("mixed_precision", "bf16")
                 grad_cp = defaults.get("gradient_checkpointing", True)
                 fp8_s = defaults.get("fp8_scaled", True)
@@ -395,6 +401,7 @@ num_repeats = 1
                         save_every_n_epochs=save_n,
                         discrete_flow_shift=flow,
                         block_swap=swap,
+                        use_pinned_memory_for_block_swap=use_pinned_memory_for_block_swap,
                         mixed_precision=prec,
                         gradient_checkpointing=grad_cp,
                         fp8_scaled=fp8_s,
@@ -413,6 +420,7 @@ num_repeats = 1
                     save_n,
                     flow,
                     swap,
+                    use_pinned_memory_for_block_swap,
                     prec,
                     grad_cp,
                     fp8_s,
@@ -604,6 +612,10 @@ num_repeats = 1
                 with gr.Row():
                     discrete_flow_shift = gr.Number(label=i18n("lbl_flow_shift"), value=2.0)
                     block_swap = gr.Slider(label=i18n("lbl_block_swap"), minimum=0, maximum=60, step=1, value=0)
+                    use_pinned_memory_for_block_swap = gr.Checkbox(
+                        label=i18n("lbl_use_pinned_memory_for_block_swap"),
+                        value=False,
+                    )
 
                 with gr.Accordion(i18n("accordion_advanced"), open=False):
                     gr.Markdown(i18n("desc_training_detailed"))
@@ -703,6 +715,7 @@ num_repeats = 1
             save_n,
             flow_shift,
             swap,
+            use_pinned_memory_for_block_swap,
             prec,
             grad_cp,
             fp8_s,
@@ -746,6 +759,7 @@ num_repeats = 1
                 save_every_n_epochs=save_n,
                 discrete_flow_shift=flow_shift,
                 block_swap=swap,
+                use_pinned_memory_for_block_swap=use_pinned_memory_for_block_swap,
                 mixed_precision=prec,
                 gradient_checkpointing=grad_cp,
                 fp8_scaled=fp8_s,
@@ -886,6 +900,8 @@ num_repeats = 1
 
             if swap > 0:
                 inner_cmd.extend(["--blocks_to_swap", str(int(swap))])
+                if use_pinned_memory_for_block_swap:
+                    inner_cmd.append("--use_pinned_memory_for_block_swap")
 
             inner_cmd.append("--sdpa")
             inner_cmd.append("--split_attn")
@@ -951,6 +967,7 @@ num_repeats = 1
                 save_every_n_epochs,
                 discrete_flow_shift,
                 block_swap,
+                use_pinned_memory_for_block_swap,
                 mixed_precision,
                 gradient_checkpointing,
                 fp8_scaled,
@@ -1015,6 +1032,7 @@ num_repeats = 1
                 save_every_n_epochs,
                 discrete_flow_shift,
                 block_swap,
+                use_pinned_memory_for_block_swap,
                 mixed_precision,
                 gradient_checkpointing,
                 fp8_scaled,
@@ -1074,6 +1092,7 @@ num_repeats = 1
                 save_every_n_epochs,
                 discrete_flow_shift,
                 block_swap,
+                use_pinned_memory_for_block_swap,
                 mixed_precision,
                 gradient_checkpointing,
                 fp8_scaled,
