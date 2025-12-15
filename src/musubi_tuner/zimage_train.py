@@ -265,9 +265,8 @@ class ZImageTrainer(ZImageNetworkTrainer):
             transformer = accelerator.prepare(transformer)
 
         if args.compile:
-            orig_transformer = accelerator.unwrap_model(transformer)  # save original reference before compile
             transformer = self.compile_transformer(args, transformer)
-            transformer.__dict__["_orig_mod"] = orig_transformer  # for annoying accelerator checks (avoid self-reference)
+            transformer.__dict__["_orig_mod"] = transformer  # for annoying accelerator checks
 
         optimizer, train_dataloader, lr_scheduler = accelerator.prepare(optimizer, train_dataloader, lr_scheduler)
         training_model = transformer
@@ -447,7 +446,21 @@ class ZImageTrainer(ZImageNetworkTrainer):
 
             metadata_to_save.update(sai_metadata)
 
-            state_dict = unwrapped_model.state_dict()
+            # temporarily remove self-referencing _orig_mod to avoid infinite recursion in state_dict()
+            has_self_ref_orig_mod_module = (
+                hasattr(unwrapped_model, "_modules")
+                and "_orig_mod" in unwrapped_model._modules
+                and unwrapped_model._modules["_orig_mod"] is unwrapped_model
+            )
+            if has_self_ref_orig_mod_module:
+                del unwrapped_model._modules["_orig_mod"]
+
+            try:
+                state_dict = unwrapped_model.state_dict()
+            finally:
+                # restore _orig_mod after state_dict() if it was removed
+                if has_self_ref_orig_mod_module:
+                    unwrapped_model._modules["_orig_mod"] = unwrapped_model
 
             # if model is compiled, get original model state dict
             if any("_orig_mod." in k for k in state_dict.keys()):
