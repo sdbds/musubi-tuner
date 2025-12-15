@@ -265,8 +265,9 @@ class ZImageTrainer(ZImageNetworkTrainer):
             transformer = accelerator.prepare(transformer)
 
         if args.compile:
+            orig_transformer = accelerator.unwrap_model(transformer)  # save original reference before compile
             transformer = self.compile_transformer(args, transformer)
-            transformer.__dict__["_orig_mod"] = transformer  # for annoying accelerator checks
+            transformer.__dict__["_orig_mod"] = orig_transformer  # for annoying accelerator checks (avoid self-reference)
 
         optimizer, train_dataloader, lr_scheduler = accelerator.prepare(optimizer, train_dataloader, lr_scheduler)
         training_model = transformer
