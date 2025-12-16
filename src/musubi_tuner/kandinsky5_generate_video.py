@@ -9,6 +9,7 @@ from safetensors.torch import load_file
 
 from musubi_tuner.kandinsky5.configs import TASK_CONFIGS
 from musubi_tuner.kandinsky5.generation_utils import generate_sample_latents_only, decode_latents
+from musubi_tuner.kandinsky5.i2v_pipeline import get_first_frame_from_image
 from musubi_tuner.kandinsky5.models.text_embedders import get_text_embedder
 from musubi_tuner.kandinsky5_train_network import Kandinsky5NetworkTrainer
 from musubi_tuner.hv_train_network import clean_memory_on_device
@@ -27,6 +28,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--task", type=str, default="k5-pro-t2v-5s-sd", choices=list(TASK_CONFIGS.keys()))
     parser.add_argument("--prompt", type=str, required=True)
     parser.add_argument("--negative_prompt", type=str, default="")
+    parser.add_argument("--i", "--image", dest="image", type=str, default=None, help="Init image path for i2v-style seeding")
     parser.add_argument("--output", type=str, required=True)  # mp4 for video, png for image
     parser.add_argument("--width", type=int, default=None)
     parser.add_argument("--height", type=int, default=None)
@@ -48,7 +50,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fp8_fast", action="store_true")
     parser.add_argument("--disable_numpy_memmap", action="store_true")
     parser.add_argument("--lora_weight", type=str, nargs="*", default=None, help="LoRA weight path(s) to merge for inference")
-    parser.add_argument("--lora_multiplier", type=float, nargs="*", default=None, help="LoRA multiplier(s), align with lora_weight order")
+    parser.add_argument(
+        "--lora_multiplier", type=float, nargs="*", default=None, help="LoRA multiplier(s), align with lora_weight order"
+    )
     return parser.parse_args()
 
 
@@ -92,9 +96,7 @@ def main():
         qwen=SimpleNamespace(checkpoint_path=qwen_path, max_length=task_conf.text.qwen_max_length),
         clip=SimpleNamespace(checkpoint_path=clip_path, max_length=task_conf.text.clip_max_length),
     )
-    text_embedder = get_text_embedder(
-        text_embedder_conf, device=device, quantized_qwen=False, text_token_padding=True
-    )
+    text_embedder = get_text_embedder(text_embedder_conf, device=device, quantized_qwen=False, text_token_padding=True)
     neg_text = args.negative_prompt or "low quality, bad quality"
     enc_out, _, attention_mask = text_embedder.encode([args.prompt], type_of_content=("video" if frames > 1 else "image"))
     neg_out, _, neg_attention_mask = text_embedder.encode([neg_text], type_of_content=("video" if frames > 1 else "image"))
@@ -159,6 +161,34 @@ def main():
             dit.to("cpu")
             torch.cuda.empty_cache()
 
+        first_frames = None
+        # Optional init image -> latent first frame (i2v-style). Requires temporary VAE load.
+        if args.image:
+            vae_for_encode = trainer._load_vae_for_sampling(args, device=device)
+            try:
+                max_area = 512 * 768 if int(task_conf.resolution) == 512 else 1024 * 1024
+                divisibility = 16 if int(task_conf.resolution) == 512 else 128
+                _, lat_image, _ = get_first_frame_from_image(
+                    args.image,
+                    vae_for_encode,
+                    device,
+                    max_area=max_area,
+                    divisibility=divisibility,
+                )
+                first_frames = lat_image[:1]
+                # If the init image was resized by the encoder, match sampling shape to it.
+                if first_frames is not None:
+                    latent_h = int(first_frames.shape[1])
+                    latent_w = int(first_frames.shape[2])
+                    shape = (1, frames, latent_h, latent_w, task_conf.dit_params.in_visual_dim)
+            finally:
+                try:
+                    vae_for_encode.to("cpu")
+                except Exception:
+                    pass
+                del vae_for_encode
+                clean_memory_on_device(device)
+
         if transformer_offloaded:
             if hasattr(dit, "move_to_device_except_swap_blocks"):
                 dit.move_to_device_except_swap_blocks(original_device)
@@ -178,6 +208,7 @@ def main():
                 null_text_embeds=null_text_embeds,
                 null_pooled_embed=null_pooled_embed,
                 null_attention_mask=neg_attention_mask,
+                first_frames=first_frames,
                 num_steps=steps,
                 guidance_weight=guidance,
                 scheduler_scale=scheduler_scale,

@@ -159,6 +159,7 @@ def generate_sample_latents_only(
     null_text_embeds=None,
     null_pooled_embed=None,
     null_attention_mask=None,
+    first_frames=None,
     num_steps=25,
     guidance_weight=5.0,
     scheduler_scale=1,
@@ -170,7 +171,7 @@ def generate_sample_latents_only(
     """Minimal sampler that returns latents only (no VAE decode)."""
     bs, duration, height, width, dim = shape
 
-    g = torch.Generator(device="cuda")
+    g = torch.Generator(device=device)
     g.manual_seed(seed)
     img = torch.randn(bs * duration, height, width, dim, device=device, generator=g, dtype=torch.bfloat16)
 
@@ -247,7 +248,7 @@ def generate_sample_latents_only(
         null_text_rope_pos,
         guidance_weight,
         scheduler_scale,
-        None,
+        first_frames,
         conf,
         progress=progress,
         seed=seed,

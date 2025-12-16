@@ -8,7 +8,6 @@ from typing import Optional
 import torch
 import torch.nn.functional as F
 from accelerate import Accelerator, init_empty_weights
-from safetensors.torch import load_file
 from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen
 
 from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_KANDINSKY5, ARCHITECTURE_KANDINSKY5_FULL
@@ -26,12 +25,10 @@ from musubi_tuner.kandinsky5.models.vae import build_vae
 from musubi_tuner.kandinsky5.models.text_embedders import get_text_embedder
 from musubi_tuner.kandinsky5 import generation_utils
 from musubi_tuner.kandinsky5.models.utils import fast_sta_nabla
-from musubi_tuner.modules.custom_offloading_utils import ModelOffloader
+from musubi_tuner.kandinsky5.i2v_pipeline import get_first_frame_from_image
 from musubi_tuner.modules.fp8_optimization_utils import (
     optimize_state_dict_with_fp8,
     apply_fp8_monkey_patch,
-    calculate_fp8_maxval,
-    quantize_weight,
 )
 from musubi_tuner.utils import model_utils
 
@@ -140,16 +137,12 @@ class Kandinsky5NetworkTrainer(NetworkTrainer):
 
         duration, height, width = x.shape[:3]
         if height % patch_size[1] != 0 or width % patch_size[2] != 0:
-            raise ValueError(
-                f"NABLA requires spatial dims divisible by patch_size; got H={height}, W={width}, patch={patch_size}"
-            )
+            raise ValueError(f"NABLA requires spatial dims divisible by patch_size; got H={height}, W={width}, patch={patch_size}")
         T = duration // patch_size[0]
         H = height // patch_size[1]
         W = width // patch_size[2]
         if H % 8 != 0 or W % 8 != 0:
-            raise ValueError(
-                f"NABLA requires H//patch and W//patch divisible by 8 for fractal flattening; got H={H}, W={W}"
-            )
+            raise ValueError(f"NABLA requires H//patch and W//patch divisible by 8 for fractal flattening; got H={H}, W={W}")
 
         # Cache STA masks per (T, H/8, W/8, device) to avoid recomputing every step.
         sta_key = (T, H // 8, W // 8, device)
@@ -194,12 +187,12 @@ class Kandinsky5NetworkTrainer(NetworkTrainer):
         transformer.switch_block_swap_for_inference()
         original_device = next(transformer.parameters()).device
         offload = bool(getattr(args, "offload_dit_during_sampling", False))
-        transformer_offloaded = offload and original_device.type == "cuda"
+        transformer_offloaded = offload and accelerator.device.type == "cuda"
         if transformer_offloaded:
             transformer.to("cpu")
             clean_memory_on_device(accelerator.device)
         # When block swap is enabled the first param can live on CPU; ensure the rest of the model is on the sampling device.
-        if getattr(transformer, "blocks_to_swap", 0) and original_device.type == "cpu":
+        if getattr(transformer, "blocks_to_swap", 0) and original_device.type == "cpu" and not transformer_offloaded:
             if hasattr(transformer, "move_to_device_except_swap_blocks"):
                 transformer.move_to_device_except_swap_blocks(accelerator.device)
             else:
@@ -215,6 +208,7 @@ class Kandinsky5NetworkTrainer(NetworkTrainer):
                 prompt = sample.get("prompt", "")
                 neg_prompt = sample.get("negative_prompt", "")
                 seed = sample.get("seed", 42)
+                image_path = sample.get("image_path", None)
                 # honor per-prompt overrides from sample file
                 width = sample.get("width", sample.get("w", self.task_conf.resolution))
                 height = sample.get("height", sample.get("h", self.task_conf.resolution))
@@ -226,121 +220,171 @@ class Kandinsky5NetworkTrainer(NetworkTrainer):
                     f"offload_dit={transformer_offloaded}, blocks_to_swap={getattr(transformer, 'blocks_to_swap', 0)}"
                 )
 
-            # latent resolution (already /8 in cache)
-            latent_w = max(1, width // 8)
-            latent_h = max(1, height // 8)
-            shape = (1, duration, latent_h, latent_w, self.task_conf.dit_params.in_visual_dim)
+                # latent resolution (already /8 in cache)
+                latent_w = max(1, width // 8)
+                latent_h = max(1, height // 8)
+                shape = (1, duration, latent_h, latent_w, self.task_conf.dit_params.in_visual_dim)
 
-            text_embedder_conf = SimpleNamespace(
-                qwen=SimpleNamespace(
-                    checkpoint_path=self._text_encoder_qwen_path or self.task_conf.text.qwen_checkpoint,
-                    max_length=self.task_conf.text.qwen_max_length,
-                ),
-                clip=SimpleNamespace(
-                    checkpoint_path=self._text_encoder_clip_path or self.task_conf.text.clip_checkpoint,
-                    max_length=self.task_conf.text.clip_max_length,
-                ),
-            )
-            # 1) Encode text, then free encoder
-            text_embedder = get_text_embedder(
-                text_embedder_conf,
-                device=accelerator.device,
-                quantized_qwen=False,
-                text_token_padding=self.text_token_padding,
-            )
-            # default negative prompt if none provided
-            neg_text = neg_prompt if neg_prompt else "low quality, bad quality"
-            enc_out, _, attention_mask = text_embedder.encode([prompt], type_of_content=("video" if duration > 1 else "image"))
-            neg_out, _, neg_attention_mask = text_embedder.encode(
-                [neg_text], type_of_content=("video" if duration > 1 else "image")
-            )
-            text_embeds = enc_out["text_embeds"]
-            pooled_embed = enc_out["pooled_embed"]
-            null_text_embeds = neg_out["text_embeds"]
-            null_pooled_embed = neg_out["pooled_embed"]
-            # move encoder off GPU promptly
-            try:
-                text_embedder.to("cpu")
-            except Exception:
-                pass
-            del text_embedder
-            clean_memory_on_device(accelerator.device)
-
-            # 2) Bring DiT back; keep swap/offload settings (aligns with inference path)
-            if transformer_offloaded and next(transformer.parameters()).device.type == "cpu":
-                if hasattr(transformer, "move_to_device_except_swap_blocks"):
-                    transformer.move_to_device_except_swap_blocks(accelerator.device)
-                else:
-                    transformer.to(accelerator.device)
-                clean_memory_on_device(accelerator.device)
-            if hasattr(transformer, "prepare_block_swap_before_forward"):
-                transformer.prepare_block_swap_before_forward()
-            conf_ns = SimpleNamespace(model=self.task_conf, metrics=SimpleNamespace(scale_factor=self.task_conf.scale_factor))
-            autocast_dtype = torch.bfloat16 if accelerator.device.type == "cuda" else None
-            with torch.autocast(device_type=accelerator.device.type, dtype=autocast_dtype, enabled=autocast_dtype is not None):
-                images_latent = generation_utils.generate_sample_latents_only(
-                    shape=shape,
-                    dit=transformer,
-                    text_embeds=text_embeds,
-                    pooled_embed=pooled_embed,
-                    attention_mask=attention_mask,
-                    null_text_embeds=null_text_embeds,
-                    null_pooled_embed=null_pooled_embed,
-                    null_attention_mask=neg_attention_mask,
-                    num_steps=steps_to_use,
-                    guidance_weight=guidance,
-                    scheduler_scale=self.task_conf.scheduler_scale or 1,
-                    seed=seed,
+                text_embedder_conf = SimpleNamespace(
+                    qwen=SimpleNamespace(
+                        checkpoint_path=self._text_encoder_qwen_path or self.task_conf.text.qwen_checkpoint,
+                        max_length=self.task_conf.text.qwen_max_length,
+                    ),
+                    clip=SimpleNamespace(
+                        checkpoint_path=self._text_encoder_clip_path or self.task_conf.text.clip_checkpoint,
+                        max_length=self.task_conf.text.clip_max_length,
+                    ),
+                )
+                # 1) Encode text, then free encoder
+                text_embedder = get_text_embedder(
+                    text_embedder_conf,
                     device=accelerator.device,
-                    conf=conf_ns,
-                    progress=False,
+                    quantized_qwen=False,
+                    text_token_padding=self.text_token_padding,
                 )
-
-            # offload DiT between steps if requested
-            if transformer_offloaded:
-                transformer.to("cpu")
+                # default negative prompt if none provided
+                neg_text = neg_prompt if neg_prompt else "low quality, bad quality"
+                enc_out, _, attention_mask = text_embedder.encode([prompt], type_of_content=("video" if duration > 1 else "image"))
+                neg_out, _, neg_attention_mask = text_embedder.encode(
+                    [neg_text], type_of_content=("video" if duration > 1 else "image")
+                )
+                text_embeds = enc_out["text_embeds"]
+                pooled_embed = enc_out["pooled_embed"]
+                null_text_embeds = neg_out["text_embeds"]
+                null_pooled_embed = neg_out["pooled_embed"]
+                # move encoder off GPU promptly
+                try:
+                    text_embedder.to("cpu")
+                except Exception:
+                    pass
+                del text_embedder
                 clean_memory_on_device(accelerator.device)
 
-            # 3) Load VAE only for decode, then free it
-            vae_for_sampling = self._load_vae_for_sampling(args, accelerator.device)
-            try:
-                images = generation_utils.decode_latents(
-                    images_latent,
-                    vae_for_sampling,
-                    device=accelerator.device,
-                    batch_size=shape[0],
-                    num_frames=duration,
-                )
-            except Exception as ex:
-                logger.warning(f"VAE decode on {accelerator.device} failed ({ex}); retrying on CPU for sampling.")
+                # 2) Bring DiT back; keep swap/offload settings (aligns with inference path)
+                if not transformer_offloaded and next(transformer.parameters()).device != accelerator.device:
+                    if hasattr(transformer, "move_to_device_except_swap_blocks"):
+                        transformer.move_to_device_except_swap_blocks(accelerator.device)
+                    else:
+                        transformer.to(accelerator.device)
+                    clean_memory_on_device(accelerator.device)
+
+                conf_ns = SimpleNamespace(model=self.task_conf, metrics=SimpleNamespace(scale_factor=self.task_conf.scale_factor))
+
+                # Load VAE only when needed for init-frame encoding / decoding
+                vae_for_sampling = None
+                first_frames = None
+                if image_path:
+                    try:
+                        vae_for_sampling = self._load_vae_for_sampling(args, accelerator.device)
+                        max_area = 512 * 768 if int(self.task_conf.resolution) == 512 else 1024 * 1024
+                        divisibility = 16 if int(self.task_conf.resolution) == 512 else 128
+                        _, lat_image, _ = get_first_frame_from_image(
+                            image_path,
+                            vae_for_sampling,
+                            accelerator.device,
+                            max_area=max_area,
+                            divisibility=divisibility,
+                        )
+                        first_frames = lat_image[:1]
+                        if first_frames is not None:
+                            latent_h = int(first_frames.shape[1])
+                            latent_w = int(first_frames.shape[2])
+                            shape = (1, duration, latent_h, latent_w, self.task_conf.dit_params.in_visual_dim)
+                    except Exception as ex:
+                        logger.warning(f"Failed to load i2v first frame from image_path='{image_path}': {ex}")
+
+                # If DiT offloading is enabled, immediately unload VAE after init-frame encoding.
+                # We'll reload it later only for decoding.
+                if transformer_offloaded and vae_for_sampling is not None:
+                    try:
+                        vae_for_sampling.to("cpu")
+                    except Exception:
+                        pass
+                    del vae_for_sampling
+                    vae_for_sampling = None
+                    clean_memory_on_device(accelerator.device)
+
+                # Ensure DiT is only on GPU during the actual sampling step when offloading is enabled.
+                if transformer_offloaded and next(transformer.parameters()).device.type == "cpu":
+                    if hasattr(transformer, "move_to_device_except_swap_blocks"):
+                        transformer.move_to_device_except_swap_blocks(accelerator.device)
+                    else:
+                        transformer.to(accelerator.device)
+                    clean_memory_on_device(accelerator.device)
+                if hasattr(transformer, "prepare_block_swap_before_forward"):
+                    transformer.prepare_block_swap_before_forward()
+
+                autocast_dtype = torch.bfloat16 if accelerator.device.type == "cuda" else None
+                with torch.autocast(
+                    device_type=accelerator.device.type,
+                    dtype=autocast_dtype,
+                    enabled=autocast_dtype is not None,
+                ):
+                    images_latent = generation_utils.generate_sample_latents_only(
+                        shape=shape,
+                        dit=transformer,
+                        text_embeds=text_embeds,
+                        pooled_embed=pooled_embed,
+                        attention_mask=attention_mask,
+                        null_text_embeds=null_text_embeds,
+                        null_pooled_embed=null_pooled_embed,
+                        null_attention_mask=neg_attention_mask,
+                        first_frames=first_frames,
+                        num_steps=steps_to_use,
+                        guidance_weight=guidance,
+                        scheduler_scale=self.task_conf.scheduler_scale or 1,
+                        seed=seed,
+                        device=accelerator.device,
+                        conf=conf_ns,
+                        progress=False,
+                    )
+
+                # offload DiT between steps if requested
+                if transformer_offloaded:
+                    transformer.to("cpu")
+                    clean_memory_on_device(accelerator.device)
+
+                if vae_for_sampling is None:
+                    vae_for_sampling = self._load_vae_for_sampling(args, accelerator.device)
+
+                try:
+                    images = generation_utils.decode_latents(
+                        images_latent,
+                        vae_for_sampling,
+                        device=accelerator.device,
+                        batch_size=shape[0],
+                        num_frames=duration,
+                    )
+                except Exception as ex:
+                    logger.warning(f"VAE decode on {accelerator.device} failed ({ex}); retrying on CPU for sampling.")
+                    clean_memory_on_device(accelerator.device)
+                    vae_cpu = vae_for_sampling.to("cpu")
+                    images = generation_utils.decode_latents(
+                        images_latent.to("cpu"),
+                        vae_cpu,
+                        device=torch.device("cpu"),
+                        batch_size=shape[0],
+                        num_frames=duration,
+                    )
+                del vae_for_sampling
                 clean_memory_on_device(accelerator.device)
-                vae_cpu = vae_for_sampling.to("cpu")
-                images = generation_utils.decode_latents(
-                    images_latent.to("cpu"),
-                    vae_cpu,
-                    device=torch.device("cpu"),
-                    batch_size=shape[0],
-                    num_frames=duration,
-                )
-            del vae_for_sampling
-            clean_memory_on_device(accelerator.device)
 
-            # save video and first frame
-            from musubi_tuner.hv_generate_video import save_videos_grid
+                # save video and first frame
+                from musubi_tuner.hv_generate_video import save_videos_grid
 
-            video_out = os.path.join(save_dir, f"sample_{steps:06d}_{idx:02d}.mp4")
-            # move to CPU before saving to avoid numpy conversion on CUDA tensors
-            video_tensor = images.permute(0, 4, 1, 2, 3).float().cpu() / 255.0
-            save_videos_grid(video_tensor, video_out, rescale=False, n_rows=1)
+                video_out = os.path.join(save_dir, f"sample_{steps:06d}_{idx:02d}.mp4")
+                # move to CPU before saving to avoid numpy conversion on CUDA tensors
+                video_tensor = images.permute(0, 4, 1, 2, 3).float().cpu() / 255.0
+                save_videos_grid(video_tensor, video_out, rescale=False, n_rows=1)
 
-            out_path = os.path.join(save_dir, f"sample_{steps:06d}_{idx:02d}.png")
-            import torchvision.utils as vutils
+                out_path = os.path.join(save_dir, f"sample_{steps:06d}_{idx:02d}.png")
+                import torchvision.utils as vutils
 
-            frame = images[0, 0] if images.dim() == 5 else images[0]
-            frame = frame.float().cpu() / 255.0
-            frame = frame.permute(2, 0, 1)  # C, H, W
-            vutils.save_image(frame, out_path)
-            logger.info(f"Saved sample to {out_path} and {video_out}")
+                frame = images[0, 0] if images.dim() == 5 else images[0]
+                frame = frame.float().cpu() / 255.0
+                frame = frame.permute(2, 0, 1)  # C, H, W
+                vutils.save_image(frame, out_path)
+                logger.info(f"Saved sample to {out_path} and {video_out}")
 
         # move DiT back to training device if we offloaded it
         if transformer_offloaded and original_device != next(transformer.parameters()).device:
@@ -837,14 +881,24 @@ def kandinsky5_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argumen
         choices=["first", "first_last"],
         help="I2V conditioning mode: first frame only (default) or first+last frame.",
     )
-    parser.add_argument("--force_nabla_attention", action="store_true", help="Force nabla attention for training regardless of task default")
+    parser.add_argument(
+        "--force_nabla_attention", action="store_true", help="Force nabla attention for training regardless of task default"
+    )
     parser.add_argument("--nabla_P", type=float, default=0.9, help="CDF threshold P for nabla attention (default 0.9)")
     parser.add_argument("--nabla_wT", type=int, default=11, help="Temporal STA window for nabla attention (default 11)")
     parser.add_argument("--nabla_wH", type=int, default=3, help="Height STA window for nabla attention (default 3)")
     parser.add_argument("--nabla_wW", type=int, default=3, help="Width STA window for nabla attention (default 3)")
     parser.add_argument("--nabla_method", type=str, default="topcdf", help="Nabla map binarization method (default topcdf)")
-    parser.add_argument("--nabla_add_sta", dest="nabla_add_sta", action="store_true", default=True, help="Include STA prior when forcing nabla attention (default: True)")
-    parser.add_argument("--no_nabla_add_sta", dest="nabla_add_sta", action="store_false", help="Disable STA prior when forcing nabla attention")
+    parser.add_argument(
+        "--nabla_add_sta",
+        dest="nabla_add_sta",
+        action="store_true",
+        default=True,
+        help="Include STA prior when forcing nabla attention (default: True)",
+    )
+    parser.add_argument(
+        "--no_nabla_add_sta", dest="nabla_add_sta", action="store_false", help="Disable STA prior when forcing nabla attention"
+    )
     return parser
 
 

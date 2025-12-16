@@ -274,6 +274,7 @@ Use `--sdpa` for PyTorch's scaled dot product attention. Use `--flash_attn` for 
 
 - `--scheduler_scale`: Overrides the task's scheduler scaling factor. This affects the timestep schedule used in sampling/inference and is also stored in the task config used during training.
 - `--offload_dit_during_sampling`: Offloads the DiT model to CPU during sampling (sample generation during training, and in `kandinsky5_generate_video.py`) to reduce peak VRAM usage.
+- `--i` / `--image`: Init image path for i2v-style seeding in `kandinsky5_generate_video.py`.
 
 **NABLA attention (training):**
 
@@ -362,6 +363,7 @@ VRAMが足りない場合は、`--blocks_to_swap`を指定して、一部のブ�
 
 - `--scheduler_scale`: タスクの`scheduler_scale`を上書きします。サンプリング/推論で使うタイムステップスケジュールに影響します。
 - `--offload_dit_during_sampling`: サンプル生成時（学習中のサンプリング、および `kandinsky5_generate_video.py`）にDiTをCPUへ退避し、ピークVRAMを下げます。
+- `--i` / `--image`: `kandinsky5_generate_video.py` でi2v風の初期画像（1フレーム目のシード）を指定します。
 
 **NABLAアテンション（学習）**
 

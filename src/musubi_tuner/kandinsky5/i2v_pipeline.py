@@ -6,14 +6,21 @@
 import json
 import logging
 import struct
-from math import floor, sqrt
+from math import sqrt
 from typing import Union, Optional
 
 import transformers
 import torch
 import torchvision
 import torchvision.transforms.functional as F
-from peft import PeftConfig, LoraConfig, inject_adapter_in_model, set_peft_model_state_dict
+
+try:
+    from peft import PeftConfig, LoraConfig, inject_adapter_in_model, set_peft_model_state_dict
+except ModuleNotFoundError:  # optional dependency
+    PeftConfig = None
+    LoraConfig = None
+    inject_adapter_in_model = None
+    set_peft_model_state_dict = None
 from PIL import Image
 from safetensors.torch import load_file
 from torch.distributed.device_mesh import DeviceMesh
@@ -28,9 +35,11 @@ torch._dynamo.config.verbose = True
 def resize_image(image, max_area, divisibility=16):
     h, w = image.shape[2:]
     area = h * w
-    k = sqrt(max_area / area) / divisibility
-    new_h = int(round(h * k) * divisibility)
-    new_w = int(round(w * k) * divisibility)
+    k = min(1.0, sqrt(max_area / area))
+    new_h = int(round((h * k) / divisibility) * divisibility)
+    new_w = int(round((w * k) / divisibility) * divisibility)
+    new_h = max(divisibility, new_h)
+    new_w = max(divisibility, new_w)
     return F.resize(image, (new_h, new_w)), k
 
 
@@ -47,8 +56,13 @@ def get_first_frame_from_image(image, vae, device, max_area, divisibility):
     image = image / 127.5 - 1.0
 
     with torch.no_grad():
-        image = image.to(device=device, dtype=torch.float16).transpose(0, 1).unsqueeze(0)
-        lat_image = vae.encode(image, opt_tiling=False).latent_dist.sample().squeeze(0).permute(1, 2, 3, 0)
+        target_dtype = getattr(vae, "dtype", torch.float16)
+        image = image.to(device=device, dtype=target_dtype).transpose(0, 1).unsqueeze(0)
+        try:
+            enc_out = vae.encode(image, opt_tiling=False)
+        except TypeError:
+            enc_out = vae.encode(image)
+        lat_image = enc_out.latent_dist.sample().squeeze(0).permute(1, 2, 3, 0)
         lat_image = lat_image * vae.config.scaling_factor
 
     return pil_image, lat_image, k
@@ -222,6 +236,8 @@ class Kandinsky5I2VPipeline:
         adapter_name: Optional[str] = None,
         trigger: Optional[str] = None,
     ) -> None:
+        if PeftConfig is None:
+            raise ModuleNotFoundError("No module named 'peft'. Install peft to use Kandinsky5I2VPipeline.load_adapter().")
         if adapter_name is None:
             adapter_name = "default"
         if self._hf_peft_config_loaded and adapter_name in self.peft_config:
@@ -233,7 +249,7 @@ class Kandinsky5I2VPipeline:
                     adapter_config = json.load(f)
                 adapter_config = LoraConfig(**adapter_config)
             except:
-                raise TypeError(f"adapter_config should be an instance of PeftConfig or a path to a json file.")
+                raise TypeError("adapter_config should be an instance of PeftConfig or a path to a json file.")
         self.peft_config[adapter_name] = adapter_config
 
         inject_adapter_in_model(adapter_config, self.dit, adapter_name)
@@ -291,6 +307,8 @@ class Kandinsky5I2VPipeline:
         self.set_adapter(adapter_name)
 
     def set_adapter(self, adapter_name: Union[list[str], str]) -> None:
+        if PeftConfig is None:
+            raise ModuleNotFoundError("No module named 'peft'. Install peft to use Kandinsky5I2VPipeline.set_adapter().")
         if not self._hf_peft_config_loaded:
             raise ValueError("No adapter loaded. Please load an adapter first.")
         elif isinstance(adapter_name, list):
@@ -332,6 +350,8 @@ class Kandinsky5I2VPipeline:
         self.peft_trigger = self.peft_triggers[adapter_name]
 
     def disable_adapters(self) -> None:
+        if PeftConfig is None:
+            raise ModuleNotFoundError("No module named 'peft'. Install peft to use Kandinsky5I2VPipeline.disable_adapters().")
         if not self._hf_peft_config_loaded:
             raise ValueError("No adapter loaded. Please load an adapter first.")
 
