@@ -86,7 +86,7 @@ class Qwen2_5_VLTextEmbedder:
             conf.checkpoint_path, torch_dtype=torch.bfloat16, device_map=device, quantization_config=quantization_config
         )
         self.model = freeze(self.model)
-        # Disable torch.compile to avoid Triton dependency during caching/inference.
+
         self.processor = AutoProcessor.from_pretrained(conf.checkpoint_path, use_fast=True)
         self.max_length = conf.max_length
         self.text_token_padding = text_token_padding

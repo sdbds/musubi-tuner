@@ -4,7 +4,6 @@
 # Licensed under the MIT License
 
 import logging
-import os
 import torch
 from torch import nn
 from torch.utils.checkpoint import checkpoint

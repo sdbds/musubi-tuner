@@ -7,10 +7,8 @@ import math
 
 import torch
 
-from torch import Tensor, IntTensor, BoolTensor
-from torch.nn.attention.flex_attention import BlockMask, _mask_mod_signature
-
-from einops import rearrange
+from torch import Tensor
+from torch.nn.attention.flex_attention import BlockMask
 
 
 def exist(item):

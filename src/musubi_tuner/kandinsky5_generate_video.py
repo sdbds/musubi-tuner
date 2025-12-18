@@ -8,8 +8,7 @@ import torchvision.utils as vutils
 from safetensors.torch import load_file
 
 from musubi_tuner.kandinsky5.configs import TASK_CONFIGS
-from musubi_tuner.kandinsky5.generation_utils import generate_sample_latents_only, decode_latents
-from musubi_tuner.kandinsky5.i2v_pipeline import get_first_frame_from_image
+from musubi_tuner.kandinsky5.generation_utils import generate_sample_latents_only, decode_latents, get_first_frame_from_image
 from musubi_tuner.kandinsky5.models.text_embedders import get_text_embedder
 from musubi_tuner.kandinsky5_train_network import Kandinsky5NetworkTrainer
 from musubi_tuner.hv_train_network import clean_memory_on_device
@@ -28,7 +27,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--task", type=str, default="k5-pro-t2v-5s-sd", choices=list(TASK_CONFIGS.keys()))
     parser.add_argument("--prompt", type=str, required=True)
     parser.add_argument("--negative_prompt", type=str, default="")
-    parser.add_argument("--i", "--image", dest="image", type=str, default=None, help="Init image path for i2v-style seeding")
+    parser.add_argument(
+        "--i", "--image", dest="image", type=str, default=None, help="Init image path for i2v-style seeding (first frame)"
+    )
+    parser.add_argument(
+        "--image_last", type=str, default=None, help="Optional last-frame image path for i2v first_last conditioning"
+    )
     parser.add_argument("--output", type=str, required=True)  # mp4 for video, png for image
     parser.add_argument("--width", type=int, default=None)
     parser.add_argument("--height", type=int, default=None)
@@ -66,6 +70,7 @@ def main():
     width = args.width or task_conf.resolution
     height = args.height or task_conf.resolution
     frames = args.frames if args.frames is not None else (5 if task_conf.dit_params.visual_cond else 1)
+    i2v_mode = "first_last" if args.image_last else "first"
     steps = args.steps or task_conf.num_steps
     guidance = args.guidance if args.guidance is not None else task_conf.guidance_weight
     scheduler_scale = args.scheduler_scale if args.scheduler_scale is not None else (task_conf.scheduler_scale or 1.0)
@@ -162,20 +167,32 @@ def main():
             torch.cuda.empty_cache()
 
         first_frames = None
-        # Optional init image -> latent first frame (i2v-style). Requires temporary VAE load.
+        # Optional init image(s) -> latent first/last frames (i2v-style). Requires temporary VAE load.
         if args.image:
             vae_for_encode = trainer._load_vae_for_sampling(args, device=device)
             try:
                 max_area = 512 * 768 if int(task_conf.resolution) == 512 else 1024 * 1024
                 divisibility = 16 if int(task_conf.resolution) == 512 else 128
-                _, lat_image, _ = get_first_frame_from_image(
+                # Always encode the first image
+                _, lat_image_first, _ = get_first_frame_from_image(
                     args.image,
                     vae_for_encode,
                     device,
                     max_area=max_area,
                     divisibility=divisibility,
                 )
-                first_frames = lat_image[:1]
+                frame_list = [lat_image_first[:1]]
+                # Optionally encode the last image
+                if args.image_last:
+                    _, lat_image_last, _ = get_first_frame_from_image(
+                        args.image_last,
+                        vae_for_encode,
+                        device,
+                        max_area=max_area,
+                        divisibility=divisibility,
+                    )
+                    frame_list.append(lat_image_last[:1])
+                first_frames = torch.cat(frame_list, dim=0)
                 # If the init image was resized by the encoder, match sampling shape to it.
                 if first_frames is not None:
                     latent_h = int(first_frames.shape[1])
@@ -216,6 +233,7 @@ def main():
                 device=device,
                 conf=conf_ns,
                 progress=True,
+                i2v_mode=i2v_mode,
             )
         # free DiT
         dit.to("cpu")

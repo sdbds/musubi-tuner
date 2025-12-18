@@ -4,7 +4,6 @@
 # Licensed under the MIT License
 
 import math
-import os
 
 import torch
 from torch import nn
@@ -12,10 +11,15 @@ import torch.nn.functional as F
 from torch.nn.attention.flex_attention import flex_attention
 
 from .utils import get_freqs, nablaT_v2
-from .attention import SelfAttentionEngine, sdpa
+from .attention import SelfAttentionEngine
 
-# Allow disabling torch.compile via env (KANDINSKY_ENABLE_COMPILE=1 to enable). This avoids Triton/Inductor on unsupported setups.
-_ENABLE_COMPILE = os.environ.get("KANDINSKY_ENABLE_COMPILE", "").lower() not in ("", "0", "false", "no")
+# torch.compile toggle is set via set_compile_enabled (default: disabled)
+_ENABLE_COMPILE = False
+
+
+def set_compile_enabled(enabled: bool):
+    global _ENABLE_COMPILE
+    _ENABLE_COMPILE = bool(enabled)
 
 
 def _maybe_compile(fn=None, **kwargs):
@@ -24,10 +28,6 @@ def _maybe_compile(fn=None, **kwargs):
     if _ENABLE_COMPILE:
         return torch.compile(fn, **kwargs)
     return fn
-
-
-# Backward alias for existing decorators
-_compile = _maybe_compile
 
 
 @_maybe_compile()
@@ -187,7 +187,7 @@ class Modulation(nn.Module):
         self.out_layer.weight.data.zero_()
         self.out_layer.bias.data.zero_()
 
-    @_compile()
+    @_maybe_compile()
     @torch.autocast(device_type="cuda", dtype=torch.float32)
     def forward(self, x):
         return self.out_layer(self.activation(x))
@@ -212,7 +212,7 @@ class MultiheadSelfAttentionEnc(nn.Module):
         self.attn_engine = SelfAttentionEngine("flash" if self.use_flash else ("sdpa" if text_token_padding else attention_engine))
         self.sdpa_engine = SelfAttentionEngine("sdpa")
 
-    @_compile()
+    @_maybe_compile()
     def get_qkv(self, x):
         query = self.to_query(x)
         key = self.to_key(x)
@@ -225,7 +225,7 @@ class MultiheadSelfAttentionEnc(nn.Module):
 
         return query, key, value
 
-    @_compile()
+    @_maybe_compile()
     def norm_qk(self, q, k):
         # Force norm weights to float to avoid fp8 promotion issues
         q_weight = self.query_norm.weight.float() if self.query_norm.weight is not None else None
@@ -234,7 +234,7 @@ class MultiheadSelfAttentionEnc(nn.Module):
         k = F.rms_norm(k.float(), self.key_norm.normalized_shape, k_weight, self.key_norm.eps).type_as(k)
         return q, k
 
-    @_compile()
+    @_maybe_compile()
     def scaled_dot_product_attention(self, query, key, value, attention_mask=None):
         attn_fn = self.attn_engine.get_attention()
         mask = attention_mask
@@ -250,7 +250,7 @@ class MultiheadSelfAttentionEnc(nn.Module):
         out = out.flatten(-2, -1)
         return out
 
-    @_compile()
+    @_maybe_compile()
     def out_l(self, x):
         return self.out_layer(x)
 
@@ -290,7 +290,7 @@ class MultiheadSelfAttentionDec(nn.Module):
 
         self.attn_engine = SelfAttentionEngine(attention_engine)
 
-    @_compile()
+    @_maybe_compile()
     def get_qkv(self, x):
         query = self.to_query(x)
         key = self.to_key(x)
@@ -303,7 +303,7 @@ class MultiheadSelfAttentionDec(nn.Module):
 
         return query, key, value
 
-    @_compile()
+    @_maybe_compile()
     def norm_qk(self, q, k):
         # Force norm weights to float to avoid fp8 promotion issues
         q_weight = self.query_norm.weight.float() if self.query_norm.weight is not None else None
@@ -312,14 +312,14 @@ class MultiheadSelfAttentionDec(nn.Module):
         k = F.rms_norm(k.float(), self.key_norm.normalized_shape, k_weight, self.key_norm.eps).type_as(k)
         return q, k
 
-    @_compile()
+    @_maybe_compile()
     def attention(self, query, key, value):
         attn_fn = self.attn_engine.get_attention()
         # decoder attention currently has no mask
         out = attn_fn(q=query.unsqueeze(0), k=key.unsqueeze(0), v=value.unsqueeze(0))[0].flatten(-2, -1)
         return out
 
-    @_compile(mode="max-autotune-no-cudagraphs", dynamic=True)
+    @_maybe_compile(mode="max-autotune-no-cudagraphs", dynamic=True)
     def nabla(self, query, key, value, sparse_params=None):
         query = query.unsqueeze(0).transpose(1, 2).contiguous()
         key = key.unsqueeze(0).transpose(1, 2).contiguous()
@@ -336,7 +336,7 @@ class MultiheadSelfAttentionDec(nn.Module):
         out = out.flatten(-2, -1)
         return out
 
-    @_compile()
+    @_maybe_compile()
     def out_l(self, x):
         return self.out_layer(x)
 
@@ -374,7 +374,7 @@ class MultiheadCrossAttention(nn.Module):
         else:
             self.attn_engine = SelfAttentionEngine(attention_engine)
 
-    @_compile()
+    @_maybe_compile()
     def get_qkv(self, x, cond):
         query = self.to_query(x)
         key = self.to_key(cond)
@@ -387,7 +387,7 @@ class MultiheadCrossAttention(nn.Module):
 
         return query, key, value
 
-    @_compile()
+    @_maybe_compile()
     def norm_qk(self, q, k):
         q_weight = self.query_norm.weight.float() if self.query_norm.weight is not None else None
         k_weight = self.key_norm.weight.float() if self.key_norm.weight is not None else None
@@ -395,7 +395,7 @@ class MultiheadCrossAttention(nn.Module):
         k = F.rms_norm(k.float(), self.key_norm.normalized_shape, k_weight, self.key_norm.eps).type_as(k)
         return q, k
 
-    @_compile()
+    @_maybe_compile()
     def attention(self, query, key, value, attention_mask=None):
         if not hasattr(self, "use_flash"):
             self.use_flash = False
@@ -441,7 +441,7 @@ class MultiheadCrossAttention(nn.Module):
             out = out.squeeze(0)
         return out
 
-    @_compile()
+    @_maybe_compile()
     def out_l(self, x):
         return self.out_layer(x)
 
@@ -471,7 +471,7 @@ class FeedForward(nn.Module):
         self.activation = nn.GELU()
         self.out_layer = nn.Linear(ff_dim, dim, bias=False)
 
-    @_compile()
+    @_maybe_compile()
     def forward(self, x):
         return self.out_layer(self.activation(self.in_layer(x)))
 

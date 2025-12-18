@@ -3,16 +3,89 @@
 # Copyright (c) 2025 Kandinsky Lab
 # Licensed under the MIT License
 
-import os
-
-os.environ["TOKENIZERS_PARALLELISM"] = "False"
-
 import torch
+from PIL import Image
 from torch.distributed import all_gather
 from tqdm import tqdm
 
 from .models.utils import fast_sta_nabla
 import torchvision.transforms.functional as F
+from math import sqrt
+from typing import Sequence, Union
+
+
+def resize_image(image, max_area, divisibility=16):
+    h, w = image.shape[2:]
+    area = h * w
+    k = min(1.0, sqrt(max_area / area))
+    new_h = int(round((h * k) / divisibility) * divisibility)
+    new_w = int(round((w * k) / divisibility) * divisibility)
+    new_h = max(divisibility, new_h)
+    new_w = max(divisibility, new_w)
+    return F.resize(image, (new_h, new_w)), k
+
+
+def _to_pil(image):
+    if isinstance(image, str):
+        return Image.open(image).convert("RGB")
+    if isinstance(image, Image.Image):
+        return image
+    raise ValueError(f"unknown image type: {type(image)}")
+
+
+def get_reference_latents(
+    image: Union[str, Image.Image, Sequence],
+    vae,
+    device,
+    max_area,
+    divisibility,
+    i2v_mode: str = "first",
+):
+    """
+    Returns reference PIL (first element), stacked reference latents [N, H, W, C], and resize scale.
+    Supports single image or list/tuple for first+last conditioning.
+    """
+    if isinstance(image, (list, tuple)):
+        pil_images = [_to_pil(im) for im in image]
+    else:
+        pil_images = [_to_pil(image)]
+
+    # resize target from the first image to keep spatial shape consistent across references
+    image_tensor = F.pil_to_tensor(pil_images[0]).unsqueeze(0)
+    image_tensor, k = resize_image(image_tensor, max_area=max_area, divisibility=divisibility)
+    target_hw = image_tensor.shape[2:]
+
+    latents = []
+    target_dtype = getattr(vae, "dtype", torch.float16)
+    for pil in pil_images:
+        tensor = F.pil_to_tensor(pil).unsqueeze(0)
+        tensor = F.resize(tensor, target_hw)
+        tensor = tensor / 127.5 - 1.0
+        with torch.no_grad():
+            tensor = tensor.to(device=device, dtype=target_dtype).transpose(0, 1).unsqueeze(0)
+            try:
+                enc_out = vae.encode(tensor, opt_tiling=False)
+            except TypeError:
+                enc_out = vae.encode(tensor)
+            lat_image = enc_out.latent_dist.sample().squeeze(0).permute(1, 2, 3, 0)
+            lat_image = lat_image * vae.config.scaling_factor
+            latents.append(lat_image)
+
+    latents = torch.stack(latents, dim=0) if len(latents) > 1 else latents[0]
+
+    # If caller requested first_last but only one image provided, duplicate to keep indices valid downstream.
+    if i2v_mode == "first_last" and latents.dim() == 3:
+        latents = torch.stack([latents, latents], dim=0)
+
+    return pil_images[0], latents, k
+
+
+def get_first_frame_from_image(image, vae, device, max_area, divisibility):
+    """Backward-compatible helper: returns a single-frame latent and scale."""
+    pil, latents, k = get_reference_latents(image, vae, device, max_area, divisibility, i2v_mode="first")
+    if latents.dim() == 4 and latents.shape[0] > 1:
+        latents = latents[0]
+    return pil, latents, k
 
 
 def get_sparse_params(conf, batch_embeds, device):
@@ -167,6 +240,7 @@ def generate_sample_latents_only(
     device="cuda",
     conf=None,
     progress=False,
+    i2v_mode=None,  # unused; kept for call-site compatibility
 ):
     """Minimal sampler that returns latents only (no VAE decode)."""
     bs, duration, height, width, dim = shape

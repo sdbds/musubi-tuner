@@ -4,7 +4,7 @@
 # Licensed under the MIT License
 
 import os
-from math import sqrt, floor, ceil
+from math import sqrt, ceil
 from typing import Optional, Tuple, Union, List
 import numpy as np
 import torch
@@ -21,12 +21,6 @@ from diffusers.models.autoencoders.vae import (
     DecoderOutput,
     DiagonalGaussianDistribution,
 )
-
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-os.environ["TORCHINDUCTOR_FX_GRAPH_CACHE"] = "1"
-torch.backends.cudnn.allow_tf32 = True
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.benchmark = True
 
 
 def prepare_causal_attention_mask(f: int, s: int, dtype: torch.dtype, device: torch.device, b: int) -> torch.Tensor:

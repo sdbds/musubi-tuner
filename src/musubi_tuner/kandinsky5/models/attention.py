@@ -3,33 +3,30 @@
 # Copyright (c) 2025 Kandinsky Lab
 # Licensed under the MIT License
 
-import os
 import torch
 import torch.nn.functional as F
-from torch.nn.attention.flex_attention import flex_attention
 
 try:
     from flash_attn import flash_attn_func as flash_attention_2
-
-    print("FlashAttention 2 is found")
 except:
     flash_attention_2 = None
 
 try:
     from flash_attn_interface import flash_attn_func as flash_attention_3
-
-    print("FlashAttention 3 is found")
 except:
     flash_attention_3 = None
 
 try:
     import sageattention
-
-    print(f"Sage Attention is found")
 except:
     sageattention = None
 
-_ENABLE_COMPILE = os.environ.get("KANDINSKY_ENABLE_COMPILE", "").lower() not in ("", "0", "false", "no")
+_ENABLE_COMPILE = False
+
+
+def set_compile_enabled(enabled: bool):
+    global _ENABLE_COMPILE
+    _ENABLE_COMPILE = bool(enabled)
 
 
 def _maybe_compile(fn=None, **kwargs):

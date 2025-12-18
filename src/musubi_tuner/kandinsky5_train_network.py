@@ -25,7 +25,9 @@ from musubi_tuner.kandinsky5.models.vae import build_vae
 from musubi_tuner.kandinsky5.models.text_embedders import get_text_embedder
 from musubi_tuner.kandinsky5 import generation_utils
 from musubi_tuner.kandinsky5.models.utils import fast_sta_nabla
-from musubi_tuner.kandinsky5.i2v_pipeline import get_first_frame_from_image
+from musubi_tuner.kandinsky5.generation_utils import get_first_frame_from_image
+from musubi_tuner.kandinsky5.models import attention as k5_attention
+from musubi_tuner.kandinsky5.models import nn as k5_nn
 from musubi_tuner.modules.fp8_optimization_utils import (
     optimize_state_dict_with_fp8,
     apply_fp8_monkey_patch,
@@ -665,6 +667,8 @@ class Kandinsky5NetworkTrainer(NetworkTrainer):
                     return out.to(x.dtype)
 
                 module.forward = _safe_forward.__get__(module, type(module))
+        if getattr(args, "compile", False):
+            model = self.compile_transformer(args, model)
         return model
 
     def compile_transformer(self, args, transformer):
@@ -899,6 +903,7 @@ def kandinsky5_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argumen
     parser.add_argument(
         "--no_nabla_add_sta", dest="nabla_add_sta", action="store_false", help="Disable STA prior when forcing nabla attention"
     )
+
     return parser
 
 
@@ -908,6 +913,10 @@ def main():
 
     args = parser.parse_args()
     args = read_config_from_file(args, parser)
+
+    # Propagate compile flag to Kandinsky modules (defaults to disabled).
+    k5_attention.set_compile_enabled(bool(getattr(args, "compile", False)))
+    k5_nn.set_compile_enabled(bool(getattr(args, "compile", False)))
 
     # defaults for fp8 flags (not defined in common parser)
     if not hasattr(args, "fp8_base"):

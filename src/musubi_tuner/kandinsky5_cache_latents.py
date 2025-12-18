@@ -1,5 +1,5 @@
 import logging
-from typing import List, Optional
+from typing import List
 
 import numpy as np
 import torch
@@ -64,9 +64,7 @@ def encode_and_save_batch(vae, batch: List[ItemInfo]):
         if target_h != height or target_w != width:
             b, c, f, _, _ = inputs.shape
             inputs = inputs.reshape(-1, c, height, width)  # (B*F, C, H, W)
-            inputs = torch.nn.functional.interpolate(
-                inputs, size=(target_h, target_w), mode="bilinear", align_corners=False
-            )
+            inputs = torch.nn.functional.interpolate(inputs, size=(target_h, target_w), mode="bilinear", align_corners=False)
             inputs = inputs.reshape(b, c, f, target_h, target_w)  # restore (B, C, F, H, W)
             height, width = target_h, target_w
 
@@ -164,6 +162,7 @@ def main():
     # Apply vae_dtype if specified
     if args.vae_dtype is not None:
         from musubi_tuner.utils.model_utils import str_to_dtype
+
         vae_dtype = str_to_dtype(args.vae_dtype)
         vae = vae.to(vae_dtype)
 
