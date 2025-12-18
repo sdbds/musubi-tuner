@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 
-def encode_and_save_batch(vae, batch: List[ItemInfo], i2v_mode: str = "first"):
+def encode_and_save_batch(vae, batch: List[ItemInfo]):
     if len(batch) == 0:
         return
 
@@ -111,14 +111,13 @@ def encode_and_save_batch(vae, batch: List[ItemInfo], i2v_mode: str = "first"):
         image_latent = None
         if latent.dim() == 4:
             # C, F, H, W
-            if i2v_mode == "first_last" and latent.shape[1] >= 2:
-                image_latent = torch.cat([latent[:, :1, :, :], latent[:, -1:, :, :]], dim=1).clone()
-            else:
-                image_latent = latent[:, :1, :, :].clone()
+            first = latent[:, :1, :, :]
+            last = latent[:, -1:, :, :] if latent.shape[1] > 1 else first
+            image_latent = torch.cat([first, last], dim=1).clone()
         ctrl_latent = control_latents[idx]
         logger.info(
             f"Saving cache for item {item.item_key} at {item.latent_cache_path}. latents shape: {latent.shape}, "
-            f"image_latent: {None if image_latent is None else image_latent.shape}, "
+            f"image_latent (first+last universal): {None if image_latent is None else image_latent.shape}, "
             f"control_latent: {None if ctrl_latent is None else ctrl_latent.shape}"
             f" (original frame: {resize_info[idx]})"
         )
@@ -136,13 +135,6 @@ def main():
         "--nabla_resize",
         action="store_true",
         help="Resize inputs to the next multiple of 128 for NABLA-compatible latents (H/W divisible by 16 after VAE).",
-    )
-    parser.add_argument(
-        "--i2v_mode",
-        type=str,
-        default="first",
-        choices=["first", "first_last"],
-        help="I2V conditioning mode: first frame only (default) or first+last frame.",
     )
     args = parser.parse_args()
 
@@ -180,7 +172,7 @@ def main():
     logger.info(f"Loaded VAE. dtype: {vae.dtype}, device: {vae.device}")
 
     def encode(batch: List[ItemInfo]):
-        encode_and_save_batch(vae, batch, args.i2v_mode)
+        encode_and_save_batch(vae, batch)
 
     cache_latents.encode_datasets(datasets, encode, args)
 

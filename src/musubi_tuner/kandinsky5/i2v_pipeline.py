@@ -7,7 +7,7 @@ import json
 import logging
 import struct
 from math import sqrt
-from typing import Union, Optional
+from typing import Union, Optional, Sequence
 
 import transformers
 import torch
@@ -43,29 +43,52 @@ def resize_image(image, max_area, divisibility=16):
     return F.resize(image, (new_h, new_w)), k
 
 
-def get_first_frame_from_image(image, vae, device, max_area, divisibility):
+def _to_pil(image):
     if isinstance(image, str):
-        pil_image = Image.open(image).convert("RGB")
-    elif isinstance(image, Image.Image):
-        pil_image = image
+        return Image.open(image).convert("RGB")
+    if isinstance(image, Image.Image):
+        return image
+    raise ValueError(f"unknown image type: {type(image)}")
+
+
+def get_reference_latents(image: Union[str, Image.Image, Sequence], vae, device, max_area, divisibility, i2v_mode: str = "first"):
+    """
+    Returns reference PIL (first element), stacked reference latents [N, H, W, C], and resize scale.
+    Supports single image or list/tuple for first+last conditioning.
+    """
+    if isinstance(image, (list, tuple)):
+        pil_images = [_to_pil(im) for im in image]
     else:
-        raise ValueError(f"unknown image type: {type(image)}")
+        pil_images = [_to_pil(image)]
 
-    image = F.pil_to_tensor(pil_image).unsqueeze(0)
-    image, k = resize_image(image, max_area=max_area, divisibility=divisibility)
-    image = image / 127.5 - 1.0
+    # resize target from the first image to keep spatial shape consistent across references
+    image_tensor = F.pil_to_tensor(pil_images[0]).unsqueeze(0)
+    image_tensor, k = resize_image(image_tensor, max_area=max_area, divisibility=divisibility)
+    target_hw = image_tensor.shape[2:]
 
-    with torch.no_grad():
-        target_dtype = getattr(vae, "dtype", torch.float16)
-        image = image.to(device=device, dtype=target_dtype).transpose(0, 1).unsqueeze(0)
-        try:
-            enc_out = vae.encode(image, opt_tiling=False)
-        except TypeError:
-            enc_out = vae.encode(image)
-        lat_image = enc_out.latent_dist.sample().squeeze(0).permute(1, 2, 3, 0)
-        lat_image = lat_image * vae.config.scaling_factor
+    latents = []
+    target_dtype = getattr(vae, "dtype", torch.float16)
+    for pil in pil_images:
+        tensor = F.pil_to_tensor(pil).unsqueeze(0)
+        tensor = F.resize(tensor, target_hw)
+        tensor = tensor / 127.5 - 1.0
+        with torch.no_grad():
+            tensor = tensor.to(device=device, dtype=target_dtype).transpose(0, 1).unsqueeze(0)
+            try:
+                enc_out = vae.encode(tensor, opt_tiling=False)
+            except TypeError:
+                enc_out = vae.encode(tensor)
+            lat_image = enc_out.latent_dist.sample().squeeze(0).permute(1, 2, 3, 0)
+            lat_image = lat_image * vae.config.scaling_factor
+            latents.append(lat_image)
 
-    return pil_image, lat_image, k
+    latents = torch.stack(latents, dim=0) if len(latents) > 1 else latents[0]
+
+    # If caller requested first_last but only one image provided, duplicate to keep indices valid downstream.
+    if i2v_mode == "first_last" and latents.dim() == 3:
+        latents = torch.stack([latents, latents], dim=0)
+
+    return pil_images[0], latents, k
 
 
 def read_safetensors_json(file_path):
@@ -123,7 +146,7 @@ class Kandinsky5I2VPipeline:
     def __call__(
         self,
         text: str,
-        image: Union[str, Image.Image],
+        image: Union[str, Image.Image, Sequence],
         time_length: int = 5,  # time in seconds 0 if you want generate image
         seed: int = None,
         num_steps: int = None,
@@ -133,6 +156,7 @@ class Kandinsky5I2VPipeline:
         expand_prompts: bool = True,
         save_path: str = None,
         progress: bool = True,
+        i2v_mode: str = "first",
     ):
         num_steps = self.num_steps if num_steps is None else num_steps
         guidance_weight = self.guidance_weight if guidance_weight is None else guidance_weight
@@ -153,7 +177,9 @@ class Kandinsky5I2VPipeline:
 
         if self.offload:
             self.vae = self.vae.to(self.device_map["vae"], non_blocking=True)
-        image, image_lat, k = get_first_frame_from_image(image, self.vae, self.device_map["vae"], self.max_area, self.divisibility)
+        pil_image, image_lat, k = get_reference_latents(
+            image, self.vae, self.device_map["vae"], self.max_area, self.divisibility, i2v_mode=i2v_mode
+        )
         if self.offload:
             self.vae = self.vae.to("cpu", non_blocking=True)
 
@@ -163,7 +189,7 @@ class Kandinsky5I2VPipeline:
             if self.local_dit_rank == 0:
                 if self.offload:
                     self.text_embedder = self.text_embedder.to(self.device_map["text_embedder"])
-                caption = self.text_embedder.embedder.expand_text_prompt(caption, image, device=self.device_map["text_embedder"])
+                caption = self.text_embedder.embedder.expand_text_prompt(caption, pil_image, device=self.device_map["text_embedder"])
                 caption = self.peft_trigger + caption
             if self.world_size > 1:
                 caption = [caption]
@@ -192,6 +218,7 @@ class Kandinsky5I2VPipeline:
             progress=progress,
             offload=self.offload,
             tp_mesh=self.device_mesh,
+            i2v_mode=i2v_mode,
         )
         torch.cuda.empty_cache()
 

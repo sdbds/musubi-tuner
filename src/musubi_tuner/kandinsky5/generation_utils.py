@@ -279,6 +279,7 @@ def generate(
     tp_mesh=None,
     attention_mask=None,
     null_attention_mask=None,
+    first_frame_indices=None,
 ):
     sparse_params = get_sparse_params(conf, {"visual": img}, device)
     timesteps = torch.linspace(1, 0, num_steps + 1, device=device)
@@ -295,9 +296,19 @@ def generate(
             visual_cond = torch.zeros_like(img)
             visual_cond_mask = torch.zeros([*img.shape[:-1], 1], dtype=img.dtype, device=img.device)
             if first_frames is not None:
-                first_frames = first_frames.to(device=visual_cond.device, dtype=visual_cond.dtype)
-                img[:1] = first_frames
-                visual_cond_mask[:1] = 1
+                # Allow either a single frame (shape [..., H, W, C]) or multiple frames stacked on dim 0.
+                ff = first_frames.to(device=visual_cond.device, dtype=visual_cond.dtype)
+                if ff.dim() == img.dim() - 1:  # H, W, C
+                    ff = ff.unsqueeze(0)
+                indices = first_frame_indices or [0]
+                if len(indices) > ff.shape[0]:
+                    # If fewer frames provided than indices, repeat the last available frame.
+                    ff = torch.cat([ff, ff[-1:].repeat(len(indices) - ff.shape[0], 1, 1, 1)], dim=0)
+                for idx, frame_idx in enumerate(indices):
+                    if 0 <= frame_idx < img.shape[0]:
+                        img[frame_idx : frame_idx + 1] = ff[idx]
+                        visual_cond_mask[frame_idx : frame_idx + 1] = 1
+                        visual_cond[frame_idx : frame_idx + 1] = ff[idx]
             model_input = torch.cat([img, visual_cond, visual_cond_mask], dim=-1)
         else:
             model_input = img
@@ -611,6 +622,7 @@ def generate_sample_i2v(
     progress=True,
     offload=False,
     tp_mesh=None,
+    i2v_mode="first",
 ):
     text_embedder.embedder.mode = "i2v"
     bs, duration, height, width, dim = shape
@@ -650,12 +662,22 @@ def generate_sample_i2v(
     if offload:
         dit.to(device, non_blocking=True)
 
-    if tp_mesh:
+    # Prepare conditioning frames and placement indices.
+    first_frames = images
+    first_frame_indices = [0]
+    if i2v_mode == "first_last" and duration > 1 and images is not None:
+        # Expect images shape [F,H,W,C]; if only one provided, duplicate it.
+        if images.dim() == 3:
+            images = images.unsqueeze(0)
+        if images.shape[0] == 1:
+            images = torch.cat([images, images], dim=0)
+        first_frames = images[:2]
+        first_frame_indices = [0, duration - 1]
+
+    if tp_mesh and first_frames is not None and first_frames.dim() > 3:
         tp_rank = tp_mesh["tensor_parallel"].get_local_rank()
         tp_world_size = tp_mesh["tensor_parallel"].size()
-        first_frames = torch.chunk(images, tp_world_size, dim=1)[tp_rank]
-    else:
-        first_frames = images
+        first_frames = torch.chunk(first_frames, tp_world_size, dim=0)[tp_rank]
 
     with torch.no_grad():
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
@@ -678,6 +700,7 @@ def generate_sample_i2v(
                 tp_mesh=tp_mesh,
                 attention_mask=attention_mask,
                 null_attention_mask=null_attention_mask,
+                first_frame_indices=first_frame_indices if first_frames is not None else None,
             )
     if tp_mesh:
         tensor_list = [
@@ -686,9 +709,13 @@ def generate_sample_i2v(
         all_gather(tensor_list, latent_visual.contiguous(), group=tp_mesh.get_group(mesh_dim="tensor_parallel"))
         latent_visual = torch.cat(tensor_list, dim=1)
 
-    if images is not None:
-        images = images.to(device=latent_visual.device, dtype=latent_visual.dtype)
-        latent_visual[:1] = images
+    if first_frames is not None:
+        ff = first_frames.to(device=latent_visual.device, dtype=latent_visual.dtype)
+        if ff.dim() == 3:
+            ff = ff.unsqueeze(0)
+        for idx, frame_idx in enumerate(first_frame_indices):
+            if frame_idx < latent_visual.shape[0]:
+                latent_visual[frame_idx : frame_idx + 1] = ff[min(idx, ff.shape[0] - 1)]
     latent_visual = normalize_first_frame(latent_visual)
 
     if offload:

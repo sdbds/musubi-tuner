@@ -33,7 +33,8 @@ Download the model weights from the [Kandinsky 5.0 Collection](https://huggingfa
 
 ### DiT Model / DiTモデル
 
-This document focuses on **Pro** models.
+This document focuses on **Pro** models. The trainer also works with **Lite** models.
+本ドキュメントでは **Pro** モデルを中心に説明しますが、トレーナーは **Lite** モデルでも動作します。
 
 Download a Pro DiT `.safetensors` checkpoint from the Kandinsky 5.0 Collection (e.g. `kandinsky5pro_t2v_pretrain_5s.safetensors` or `kandinsky5pro_i2v_sft_5s.safetensors`).
 
@@ -121,14 +122,14 @@ Pre-caching is required before training. This involves caching both latents and 
 
 - You must cache **text encoder outputs** with `kandinsky5_cache_text_encoder_outputs.py` before training.
 - `--text_encoder_qwen` / `--text_encoder_clip` are Hugging Face Transformers models: pass a model ID (recommended) or a local HF snapshot directory.
-- For I2V tasks, the latent cache will also store the first-frame latents (`latents_image`) when running `kandinsky5_cache_latents.py`.
+- For I2V tasks, the latent cache stores both first and last frame latents (`latents_image`, always two frames) when running `kandinsky5_cache_latents.py`—one cache works for both first-only and first+last conditioning.
 
 <details>
 <summary>日本語</summary>
 
 - 学習前に、`kandinsky5_cache_text_encoder_outputs.py` による **テキストエンコーダ出力のキャッシュ** が必須です。
 - `--text_encoder_qwen` / `--text_encoder_clip` はHugging Face Transformersのモデルです。モデルID（推奨）またはローカルのHF snapshotディレクトリを指定してください。
-- I2Vタスクでは、`kandinsky5_cache_latents.py` 実行時に最初のフレーム用latent（`latents_image`）もキャッシュされます。
+- I2Vタスクでは、`kandinsky5_cache_latents.py` 実行時に最初と最後のフレームlatent（`latents_image`、常に2フレーム）もキャッシュされます。1回のキャッシュで first / first+last 両方のモードに対応できます。
 
 </details>
 
@@ -239,7 +240,7 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 \
     --scheduler_scale 10.0
 ```
 
-For I2V training, switch the task and checkpoint to an I2V preset (e.g., `k5-pro-i2v-5s-sd` with `kandinsky5pro_i2v_sft_5s.safetensors`). The latent cache already stores the first-frame latents (`latents_image`) when you run `kandinsky5_cache_latents.py`, so no extra flags are needed beyond picking an I2V task.
+For I2V training, switch the task and checkpoint to an I2V preset (e.g., `k5-pro-i2v-5s-sd` with `kandinsky5pro_i2v_sft_5s.safetensors`). The latent cache already stores first and last frame latents (`latents_image`, two frames) when you run `kandinsky5_cache_latents.py`, so the same cache covers both first-only and first+last modes—no extra flags are needed beyond picking an I2V task.
 
 The training settings are experimental. Appropriate learning rates, training steps, timestep distribution, etc. are not yet fully determined. Feedback is welcome.
 
