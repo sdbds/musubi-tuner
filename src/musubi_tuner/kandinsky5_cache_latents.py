@@ -23,7 +23,6 @@ def encode_and_save_batch(vae, batch: List[ItemInfo]):
         return
 
     videos = []
-    controls = []
     resize_info = []
     for item in batch:
         content = item.content
@@ -39,16 +38,6 @@ def encode_and_save_batch(vae, batch: List[ItemInfo]):
             video = video.unsqueeze(0)
         videos.append(video)
         resize_info.append((video.shape[-2], video.shape[-1]))
-
-        if item.control_content is not None:
-            ctrl = item.control_content
-            ctrl = np.stack(ctrl, axis=0) if isinstance(ctrl, list) else ctrl
-            ctrl_tensor = torch.from_numpy(ctrl)
-            if ctrl_tensor.dim() == 3:  # H, W, C -> add temporal dimension
-                ctrl_tensor = ctrl_tensor.unsqueeze(0)
-            controls.append(ctrl_tensor)
-        else:
-            controls.append(None)
 
     inputs = torch.stack(videos, dim=0)  # B, F, H, W, C
     inputs = inputs.to(device=vae.device, dtype=vae.dtype)
@@ -82,29 +71,6 @@ def encode_and_save_batch(vae, batch: List[ItemInfo]):
 
     latents = latents.cpu()
 
-    # encode control latents if present (resize to same target if needed)
-    control_latents = []
-    for ctrl in controls:
-        if ctrl is None:
-            control_latents.append(None)
-            continue
-        ctrl = ctrl.to(device=vae.device, dtype=vae.dtype)
-        if ctrl.dim() == 4:  # F, H, W, C
-            ctrl = ctrl.permute(3, 0, 1, 2).contiguous()  # C, F, H, W
-        if ctrl.shape[-2:] != (height, width):
-            ctrl = torch.nn.functional.interpolate(
-                ctrl.unsqueeze(0), size=(height, width), mode="bilinear", align_corners=False
-            ).squeeze(0)
-        with torch.no_grad():
-            encoded_ctrl = vae.encode(ctrl.unsqueeze(0))
-            if hasattr(encoded_ctrl, "latent_dist"):
-                ctrl_latent = encoded_ctrl.latent_dist.sample().squeeze(0)
-            elif isinstance(encoded_ctrl, tuple):
-                ctrl_latent = encoded_ctrl[0].squeeze(0)
-            else:
-                ctrl_latent = encoded_ctrl.squeeze(0)
-        control_latents.append((ctrl_latent * scaling_factor).cpu())
-
     for idx, (item, latent) in enumerate(zip(batch, latents)):
         image_latent = None
         if latent.dim() == 4:
@@ -112,18 +78,16 @@ def encode_and_save_batch(vae, batch: List[ItemInfo]):
             first = latent[:, :1, :, :]
             last = latent[:, -1:, :, :] if latent.shape[1] > 1 else first
             image_latent = torch.cat([first, last], dim=1).clone()
-        ctrl_latent = control_latents[idx]
         logger.info(
             f"Saving cache for item {item.item_key} at {item.latent_cache_path}. latents shape: {latent.shape}, "
-            f"image_latent (first+last universal): {None if image_latent is None else image_latent.shape}, "
-            f"control_latent: {None if ctrl_latent is None else ctrl_latent.shape}"
+            f"image_latent (first+last universal): {None if image_latent is None else image_latent.shape}"
             f" (original frame: {resize_info[idx]})"
         )
         save_latent_cache_kandinsky5(
             item_info=item,
             latent=latent,
             image_latent=image_latent,
-            control_latent=ctrl_latent,
+            control_latent=None,
         )
 
 

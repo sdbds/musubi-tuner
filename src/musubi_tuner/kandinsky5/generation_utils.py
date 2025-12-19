@@ -459,10 +459,8 @@ def generate_sample(
     g.manual_seed(seed)
     img = torch.randn(bs * duration, height, width, dim, device=device, generator=g, dtype=torch.bfloat16)
 
-    if duration == 1:
-        type_of_content = "image"
-    else:
-        type_of_content = "video"
+    # Use the dedicated image-to-video prompt template for both text and negative text.
+    type_of_content = "image2video"
 
     with torch.no_grad():
         bs_text_embed, text_cu_seqlens, attention_mask = text_embedder.encode([caption], type_of_content=type_of_content)

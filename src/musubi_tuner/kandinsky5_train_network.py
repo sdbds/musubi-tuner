@@ -794,12 +794,6 @@ class Kandinsky5NetworkTrainer(NetworkTrainer):
 
                     x = torch.cat([x, visual_cond, visual_cond_mask], dim=-1)
 
-                    # control: if control/source latents exist, append them channel-wise after cond inputs
-                    if self._control_training and "latents_control" in batch:
-                        ctrl = batch["latents_control"][b].to(accelerator.device, dtype=network_dtype)  # C,F,H,W
-                        ctrl = ctrl.permute(1, 2, 3, 0)  # F,H,W,C
-                        x = torch.cat([ctrl, x], dim=-1)
-
                 # repeat text embeddings and masks per frame (default) or per chunk
                 repeat_units = math.ceil(duration / chunk_len) if chunk_mode else duration
                 if text_embed.dim() == 3:
