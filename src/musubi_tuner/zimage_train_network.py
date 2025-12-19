@@ -136,7 +136,7 @@ class ZImageNetworkTrainer(NetworkTrainer):
         control_video_path=None,
     ):
         """architecture dependent inference"""
-        model: zimage_model.ZImageTransformer2DModel = transformer
+        model: zimage_model.ZImageTransformer2DModel = accelerator.unwrap_model(transformer)
         device = accelerator.device
 
         # Get embeddings
@@ -267,7 +267,7 @@ class ZImageNetworkTrainer(NetworkTrainer):
         timesteps: torch.Tensor,
         network_dtype: torch.dtype,
     ):
-        model: zimage_model.ZImageTransformer2DModel = transformer
+        model: zimage_model.ZImageTransformer2DModel = accelerator.unwrap_model(transformer)
         bsize = latents.shape[0]
 
         # latents: [B, C, H, W]
