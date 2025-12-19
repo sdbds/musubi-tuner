@@ -40,7 +40,10 @@ def _ensure_cache_architecture(item: ItemInfo):
 
 def encode_and_save_batch(text_embedder, batch: list[ItemInfo], device: torch.device):
     prompts = [item.caption for item in batch]
-    embeds, _, attention_mask = text_embedder.encode(prompts)
+    # Keep the cache encoder aligned with training/inference: use video template when the batch contains videos.
+    is_video_batch = any((item.frame_count or 1) > 1 for item in batch)
+    content_type = "video" if is_video_batch else "image"
+    embeds, _, attention_mask = text_embedder.encode(prompts, type_of_content=content_type)
 
     text_embeds = embeds["text_embeds"].to("cpu")
     pooled_embed = embeds["pooled_embed"].to("cpu")

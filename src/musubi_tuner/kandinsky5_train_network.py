@@ -757,16 +757,16 @@ class Kandinsky5NetworkTrainer(NetworkTrainer):
                         assert "latents_image" in batch, (
                             "latents_image not found in batch; run kandinsky5_cache_latents to populate I2V caches"
                         )
-                    cond_lat = batch["latents_image"][b].to(accelerator.device, dtype=network_dtype)  # C,F,H,W
-                    cond_lat = cond_lat.permute(1, 2, 3, 0)  # F,H,W,C
+                        cond_lat = batch["latents_image"][b].to(accelerator.device, dtype=network_dtype)  # C,F,H,W
+                        cond_lat = cond_lat.permute(1, 2, 3, 0)  # F,H,W,C
                     # Align conditioning frames to match video duration.
-                    if self._i2v_mode == "first_last" and cond_lat.shape[0] >= 2 and x.shape[0] > 1:
+                    if cond_lat is not None and self._i2v_mode == "first_last" and cond_lat.shape[0] >= 2 and x.shape[0] > 1:
                         # Place first frame at index 0 and last frame at the final index; zero elsewhere.
                         aligned = torch.zeros((x.shape[0], *cond_lat.shape[1:]), device=cond_lat.device, dtype=cond_lat.dtype)
                         aligned[0] = cond_lat[0]
                         aligned[-1] = cond_lat[-1]
                         cond_lat = aligned
-                    else:
+                    elif cond_lat is not None:
                         # pad/truncate to match duration
                         if cond_lat.shape[0] < x.shape[0]:
                             pad = x.shape[0] - cond_lat.shape[0]

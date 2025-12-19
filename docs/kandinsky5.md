@@ -242,6 +242,8 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 \
 
 For I2V training, switch the task and checkpoint to an I2V preset (e.g., `k5-pro-i2v-5s-sd` with `kandinsky5pro_i2v_sft_5s.safetensors`). The latent cache already stores first and last frame latents (`latents_image`, two frames) when you run `kandinsky5_cache_latents.py`, so the same cache covers both first-only and first+last modes—no extra flags are needed beyond picking an I2V task.
 
+**Note on first+last frame conditioning**: First+last frame training support is experimental. The effectiveness and plausibility of this approach have not yet been thoroughly tested. Feedback and results from community testing are welcome.
+
 The training settings are experimental. Appropriate learning rates, training steps, timestep distribution, etc. are not yet fully determined. Feedback is welcome.
 
 For additional options, use `python kandinsky5_train_network.py --help`.
@@ -334,6 +336,8 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 \
 ```
 
 I2Vの学習を行う場合は、タスクとチェックポイントをI2V向けプリセットに変更してください（例: `k5-pro-i2v-5s-sd` と `kandinsky5pro_i2v_sft_5s.safetensors`）。`kandinsky5_cache_latents.py` でlatentをキャッシュする際に、最初のフレームlatent（`latents_image`）も保存されるため、I2V専用の追加フラグは不要です（I2Vタスクを選ぶだけで動作します）。
+
+**最初と最後のフレーム条件付けについて**: 最初と最後のフレーム学習サポートは実験的なものです。このアプローチの有効性と妥当性はまだ十分にテストされていません。コミュニティからのフィードバックと結果をお待ちしています。
 
 学習設定は実験的なものです。適切な学習率、学習ステップ数、タイムステップの分布などは、まだ完全には決まっていません。フィードバックをお待ちしています。
 
