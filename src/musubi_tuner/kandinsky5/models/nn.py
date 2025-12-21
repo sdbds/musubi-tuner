@@ -194,7 +194,7 @@ class Modulation(nn.Module):
 
 
 class MultiheadSelfAttentionEnc(nn.Module):
-    def __init__(self, num_channels, head_dim, attention_engine="auto", text_token_padding=True):
+    def __init__(self, num_channels, head_dim, attention_engine="auto"):
         super().__init__()
         assert num_channels % head_dim == 0
         self.num_heads = num_channels // head_dim
@@ -208,8 +208,8 @@ class MultiheadSelfAttentionEnc(nn.Module):
         self.out_layer = nn.Linear(num_channels, num_channels, bias=True)
 
         # Prefer flash when requested, but keep an sdpa fallback to handle head-shape edge cases.
-        self.use_flash = attention_engine == "flash" and not text_token_padding
-        self.attn_engine = SelfAttentionEngine("flash" if self.use_flash else ("sdpa" if text_token_padding else attention_engine))
+        self.use_flash = attention_engine == "flash"
+        self.attn_engine = SelfAttentionEngine("flash" if self.use_flash else attention_engine)
         self.sdpa_engine = SelfAttentionEngine("sdpa")
 
     @_maybe_compile()
@@ -356,7 +356,7 @@ class MultiheadSelfAttentionDec(nn.Module):
 
 
 class MultiheadCrossAttention(nn.Module):
-    def __init__(self, num_channels, head_dim, attention_engine="auto", text_token_padding=True):
+    def __init__(self, num_channels, head_dim, attention_engine="auto"):
         super().__init__()
         assert num_channels % head_dim == 0
         self.num_heads = num_channels // head_dim
@@ -369,10 +369,7 @@ class MultiheadCrossAttention(nn.Module):
 
         self.out_layer = nn.Linear(num_channels, num_channels, bias=True)
 
-        if text_token_padding:
-            self.attn_engine = SelfAttentionEngine("sdpa")
-        else:
-            self.attn_engine = SelfAttentionEngine(attention_engine)
+        self.attn_engine = SelfAttentionEngine(attention_engine)
 
     @_maybe_compile()
     def get_qkv(self, x, cond):

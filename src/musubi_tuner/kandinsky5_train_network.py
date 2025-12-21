@@ -111,7 +111,6 @@ class Kandinsky5NetworkTrainer(NetworkTrainer):
             self.visual_cond_prob = min(1.0, max(0.0, self.visual_cond_prob))
         self.default_guidance_scale = self.task_conf.guidance_weight
         # Text token padding is always enabled to mirror the working inference path.
-        self.text_token_padding = True
         self._text_encoder_qwen_path = getattr(args, "text_encoder_qwen", None)
         self._text_encoder_clip_path = getattr(args, "text_encoder_clip", None)
         self._vae_checkpoint_path = getattr(args, "vae", None) or self.task_conf.vae.checkpoint_path
@@ -242,7 +241,6 @@ class Kandinsky5NetworkTrainer(NetworkTrainer):
                     text_embedder_conf,
                     device=accelerator.device,
                     quantized_qwen=False,
-                    text_token_padding=self.text_token_padding,
                 )
                 # default negative prompt if none provided
                 neg_text = neg_prompt if neg_prompt else "low quality, bad quality"
@@ -254,6 +252,26 @@ class Kandinsky5NetworkTrainer(NetworkTrainer):
                 pooled_embed = enc_out["pooled_embed"]
                 null_text_embeds = neg_out["text_embeds"]
                 null_pooled_embed = neg_out["pooled_embed"]
+                if attention_mask is not None:
+                    mask = attention_mask[0] if attention_mask.dim() > 1 else attention_mask
+                    mask = mask.bool().flatten()
+                    if mask.shape[0] != text_embeds.shape[0]:
+                        raise ValueError(
+                            f"attention_mask length {mask.shape[0]} does not match text_embeds length {text_embeds.shape[0]}; "
+                            "please re-cache Kandinsky5 text embeddings"
+                        )
+                    text_embeds = text_embeds[mask]
+                    attention_mask = None
+                if neg_attention_mask is not None:
+                    mask = neg_attention_mask[0] if neg_attention_mask.dim() > 1 else neg_attention_mask
+                    mask = mask.bool().flatten()
+                    if mask.shape[0] != null_text_embeds.shape[0]:
+                        raise ValueError(
+                            f"neg_attention_mask length {mask.shape[0]} does not match null_text_embeds length {null_text_embeds.shape[0]}; "
+                            "please re-cache Kandinsky5 text embeddings"
+                        )
+                    null_text_embeds = null_text_embeds[mask]
+                    neg_attention_mask = None
                 # move encoder off GPU promptly
                 try:
                     text_embedder.to("cpu")
@@ -449,7 +467,6 @@ class Kandinsky5NetworkTrainer(NetworkTrainer):
             text_embedder_conf,
             device=accelerator.device,
             quantized_qwen=False,
-            text_token_padding=self.text_token_padding,
         )
 
         images = generation_utils.generate_sample(
@@ -496,7 +513,21 @@ class Kandinsky5NetworkTrainer(NetworkTrainer):
         conf = self.task_conf.dit_params
         if args.override_dit:
             conf = SimpleNamespace(**json.loads(args.override_dit))
-        return conf.__dict__ if isinstance(conf, SimpleNamespace) else conf.__dict__
+        conf_dict = conf.__dict__ if isinstance(conf, SimpleNamespace) else conf.__dict__
+        # Respect global attention flags for Kandinsky5
+        if getattr(args, "flash_attn", False):
+            conf_dict["attention_engine"] = "flash_attention_2"
+        elif getattr(args, "flash3", False):
+            conf_dict["attention_engine"] = "flash_attention_3"
+        elif getattr(args, "sage_attn", False):
+            conf_dict["attention_engine"] = "sage"
+        elif getattr(args, "xformers", False):
+            conf_dict["attention_engine"] = "xformers"
+        elif getattr(args, "sdpa", False):
+            conf_dict["attention_engine"] = "sdpa"
+        else:
+            conf_dict.setdefault("attention_engine", "auto")
+        return conf_dict
 
     def load_transformer(
         self,
@@ -534,7 +565,7 @@ class Kandinsky5NetworkTrainer(NetworkTrainer):
         if args.fp8_base and not args.fp8_scaled:
             dit_weight_dtype = None
         with init_empty_weights():
-            model = get_dit(self.dit_conf, text_token_padding=self.text_token_padding)
+            model = get_dit(self.dit_conf)
             if dit_weight_dtype is not None:
                 model.to(dit_weight_dtype)
 
@@ -738,8 +769,16 @@ class Kandinsky5NetworkTrainer(NetworkTrainer):
                     attention_mask = attention_mask.reshape(attention_mask.shape[0], -1)
                 else:
                     attention_mask = attention_mask.unsqueeze(0)
-            else:
-                attention_mask = torch.ones((1, text_embed.shape[0]), dtype=torch.bool, device=accelerator.device)
+
+                mask = attention_mask[0] if attention_mask.dim() > 1 else attention_mask
+                mask = mask.bool().flatten()
+                if mask.shape[0] != text_embed.shape[0]:
+                    raise ValueError(
+                        f"attention_mask length {mask.shape[0]} does not match text_embeds length {text_embed.shape[0]}; "
+                        "please re-cache Kandinsky5 text embeddings"
+                    )
+                text_embed = text_embed[mask]
+                attention_mask = None
 
             # latents can be image (C, H, W) or video (C, F, H, W)
             if latent_b.dim() == 4:

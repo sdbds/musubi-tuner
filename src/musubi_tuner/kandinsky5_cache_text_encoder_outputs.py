@@ -43,15 +43,37 @@ def encode_and_save_batch(text_embedder, batch: list[ItemInfo], device: torch.de
     # Keep the cache encoder aligned with training/inference: use video template when the batch contains videos.
     is_video_batch = any((item.frame_count or 1) > 1 for item in batch)
     content_type = "video" if is_video_batch else "image"
-    embeds, _, attention_mask = text_embedder.encode(prompts, type_of_content=content_type)
+    embeds, cu_seqlens, attention_mask = text_embedder.encode(prompts, type_of_content=content_type)
 
     text_embeds = embeds["text_embeds"].to("cpu")
     pooled_embed = embeds["pooled_embed"].to("cpu")
     attention_mask = attention_mask.to("cpu")
 
-    for item, te, pe, am in zip(batch, text_embeds, pooled_embed, attention_mask):
-        _ensure_cache_architecture(item)
-        save_text_encoder_output_cache_kandinsky5(item, te, pe, am)
+    if (
+        text_embeds.dim() == 2
+        and attention_mask.dim() == 2
+        and cu_seqlens is not None
+        and cu_seqlens.numel() == len(batch) + 1
+    ):
+        # Variable-length packed embeds: slice by cu_seqlens per item.
+        for idx, item in enumerate(batch):
+            start = int(cu_seqlens[idx].item())
+            end = int(cu_seqlens[idx + 1].item())
+            te = text_embeds[start:end]
+            pe = pooled_embed[idx]
+            am = attention_mask[idx].bool().flatten()
+            if am.numel() != te.shape[0]:
+                if am.sum().item() == te.shape[0]:
+                    am = am[am]
+                else:
+                    am = torch.ones((te.shape[0],), dtype=torch.bool)
+            _ensure_cache_architecture(item)
+            save_text_encoder_output_cache_kandinsky5(item, te, pe, am)
+    else:
+        # Fallback: per-item tensors already aligned on batch dim.
+        for item, te, pe, am in zip(batch, text_embeds, pooled_embed, attention_mask):
+            _ensure_cache_architecture(item)
+            save_text_encoder_output_cache_kandinsky5(item, te, pe, am)
 
 
 def main():
@@ -84,7 +106,6 @@ def main():
         text_embedder_conf,
         device=device,
         quantized_qwen=args.quantized_qwen,
-        text_token_padding=True,
     )
 
     def encode_for_text_encoder(batch: list[ItemInfo]):

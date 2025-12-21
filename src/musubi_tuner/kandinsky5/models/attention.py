@@ -21,6 +21,11 @@ try:
 except:
     sageattention = None
 
+try:
+    import xformers.ops as xops
+except:
+    xops = None
+
 _ENABLE_COMPILE = False
 
 
@@ -52,9 +57,17 @@ def sage_attn(q, k, v):
     return out
 
 
+@_maybe_compile(mode="max-autotune-no-cudagraphs", dynamic=True)
+def xformers_attn(q, k, v, attn_mask=None):
+    if attn_mask is not None:
+        return xops.memory_efficient_attention(q, k, v, attn_bias=attn_mask)
+    return xops.memory_efficient_attention(q, k, v)
+
+
+
 class SelfAttentionEngine:
     def __init__(self, engine="auto"):
-        assert engine in ["auto", "flash_attention_2", "flash_attention_3", "sage", "sdpa"]
+        assert engine in ["auto", "flash_attention_2", "flash_attention_3", "sage", "sdpa", "xformers"]
         self.attention_fn = None
         self.supports_mask = False
 
@@ -76,6 +89,12 @@ class SelfAttentionEngine:
             self.attention_fn = sage_attn
             self.supports_mask = False
 
+        if engine == "xformers":
+            if xops is None:
+                raise RuntimeError("xformers engine selected, but it can't be imported.")
+            self.attention_fn = xformers_attn
+            self.supports_mask = False
+
         if engine == "sdpa":
             self.attention_fn = sdpa
             self.supports_mask = True
@@ -83,6 +102,9 @@ class SelfAttentionEngine:
         if engine == "auto":
             self.attention_fn = sdpa
             self.supports_mask = True
+            if xops is not None:
+                self.attention_fn = xformers_attn
+                self.supports_mask = False
             if not sageattention is None:
                 self.attention_fn = sage_attn
                 self.supports_mask = False

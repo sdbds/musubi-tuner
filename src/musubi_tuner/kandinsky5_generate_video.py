@@ -53,6 +53,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fp8_scaled", action="store_true")
     parser.add_argument("--fp8_fast", action="store_true")
     parser.add_argument("--disable_numpy_memmap", action="store_true")
+    parser.add_argument("--sdpa", action="store_true", help="use SDPA for visual attention")
+    parser.add_argument("--flash_attn", action="store_true", help="use FlashAttention 2 for visual attention")
+    parser.add_argument("--flash3", action="store_true", help="use FlashAttention 3 for visual attention")
+    parser.add_argument("--sage_attn", action="store_true", help="use SageAttention for visual attention")
+    parser.add_argument("--xformers", action="store_true", help="use xformers for visual attention")
     parser.add_argument("--lora_weight", type=str, nargs="*", default=None, help="LoRA weight path(s) to merge for inference")
     parser.add_argument(
         "--lora_multiplier", type=float, nargs="*", default=None, help="LoRA multiplier(s), align with lora_weight order"
@@ -90,7 +95,6 @@ def main():
     # Build trainer (reuse training loaders)
     trainer = Kandinsky5NetworkTrainer()
     trainer.task_conf = task_conf
-    trainer.text_token_padding = True
     trainer.blocks_to_swap = args.blocks_to_swap
     trainer._text_encoder_qwen_path = args.text_encoder_qwen
     trainer._text_encoder_clip_path = args.text_encoder_clip
@@ -101,7 +105,7 @@ def main():
         qwen=SimpleNamespace(checkpoint_path=qwen_path, max_length=task_conf.text.qwen_max_length),
         clip=SimpleNamespace(checkpoint_path=clip_path, max_length=task_conf.text.clip_max_length),
     )
-    text_embedder = get_text_embedder(text_embedder_conf, device=device, quantized_qwen=False, text_token_padding=True)
+    text_embedder = get_text_embedder(text_embedder_conf, device=device, quantized_qwen=False)
     neg_text = args.negative_prompt or "low quality, bad quality"
     enc_out, _, attention_mask = text_embedder.encode([args.prompt], type_of_content=("video" if frames > 1 else "image"))
     neg_out, _, neg_attention_mask = text_embedder.encode([neg_text], type_of_content=("video" if frames > 1 else "image"))
@@ -113,6 +117,26 @@ def main():
         attention_mask = attention_mask.to("cpu")
     if neg_attention_mask is not None:
         neg_attention_mask = neg_attention_mask.to("cpu")
+    if attention_mask is not None:
+        mask = attention_mask[0] if attention_mask.dim() > 1 else attention_mask
+        mask = mask.bool().flatten()
+        if mask.shape[0] != text_embeds.shape[0]:
+            raise ValueError(
+                f"attention_mask length {mask.shape[0]} does not match text_embeds length {text_embeds.shape[0]}; "
+                "please re-cache Kandinsky5 text embeddings"
+            )
+        text_embeds = text_embeds[mask]
+        attention_mask = None
+    if neg_attention_mask is not None:
+        mask = neg_attention_mask[0] if neg_attention_mask.dim() > 1 else neg_attention_mask
+        mask = mask.bool().flatten()
+        if mask.shape[0] != null_text_embeds.shape[0]:
+            raise ValueError(
+                f"neg_attention_mask length {mask.shape[0]} does not match null_text_embeds length {null_text_embeds.shape[0]}; "
+                "please re-cache Kandinsky5 text embeddings"
+            )
+        null_text_embeds = null_text_embeds[mask]
+        neg_attention_mask = None
     try:
         text_embedder.to("cpu")
     except Exception:
@@ -131,6 +155,11 @@ def main():
             blocks_to_swap=args.blocks_to_swap,
             disable_numpy_memmap=args.disable_numpy_memmap,
             override_dit=None,
+            sdpa=args.sdpa,
+            flash_attn=args.flash_attn,
+            flash3=args.flash3,
+            sage_attn=args.sage_attn,
+            xformers=args.xformers,
         )
         accel_stub = SimpleNamespace(device=device)
         dit = trainer.load_transformer(

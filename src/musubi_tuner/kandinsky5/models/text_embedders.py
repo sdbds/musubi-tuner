@@ -75,7 +75,7 @@ class Qwen2_5_VLTextEmbedder:
         "crop_start": {"video": 129, "image": 41, "image_edit": 55, "image2video": 132},
     }
 
-    def __init__(self, conf, device, quantized_qwen=False, text_token_padding=True):
+    def __init__(self, conf, device, quantized_qwen=False):
         quantization_config = None
         if quantized_qwen:
             quantization_config = BitsAndBytesConfig(
@@ -89,7 +89,6 @@ class Qwen2_5_VLTextEmbedder:
 
         self.processor = AutoProcessor.from_pretrained(conf.checkpoint_path, use_fast=True)
         self.max_length = conf.max_length
-        self.text_token_padding = text_token_padding
 
     def __call__(self, texts, images=None, type_of_content="video"):
         prompt_template = "\n".join(self.PROMPT_TEMPLATE["template"][type_of_content])
@@ -127,27 +126,23 @@ class Qwen2_5_VLTextEmbedder:
                     output_hidden_states=True,
                 )["hidden_states"][-1][:, crop_start:]
         attention_mask = inputs["attention_mask"][:, crop_start:]
-        if self.text_token_padding:
-            seq_length = embeds.shape[1]
-            cu_seqlens = torch.tensor([0, seq_length], dtype=torch.int32)
+        # variable-length across batch: build cu_seqlens and keep per-sample masks
+        if attention_mask.dim() == 1:
+            valid = attention_mask.bool()
+            embeds = embeds[:, valid].squeeze(0)
+            cu_seqlens = torch.tensor([0, valid.sum().item()], dtype=torch.int32)
+            attention_mask = valid.unsqueeze(0)
         else:
-            # variable-length across batch: build cu_seqlens and keep per-sample masks
-            if attention_mask.dim() == 1:
-                valid = attention_mask.bool()
-                embeds = embeds[:, valid].squeeze(0)
-                cu_seqlens = torch.tensor([0, valid.sum().item()], dtype=torch.int32)
-                attention_mask = valid.unsqueeze(0)
-            else:
-                bsz = attention_mask.shape[0]
-                seqlens = attention_mask.sum(1)
-                cu = torch.cumsum(seqlens, dim=0)
-                cu = torch.cat([torch.zeros_like(cu[:1]), cu]).to(dtype=torch.int32)
-                cu_seqlens = cu
-                flat = []
-                for i in range(bsz):
-                    flat.append(embeds[i][attention_mask[i].bool()])
-                embeds = torch.cat(flat, dim=0)
-                attention_mask = attention_mask.to(torch.bool)
+            bsz = attention_mask.shape[0]
+            seqlens = attention_mask.sum(1)
+            cu = torch.cumsum(seqlens, dim=0)
+            cu = torch.cat([torch.zeros_like(cu[:1]), cu]).to(dtype=torch.int32)
+            cu_seqlens = cu
+            flat = []
+            for i in range(bsz):
+                flat.append(embeds[i][attention_mask[i].bool()])
+            embeds = torch.cat(flat, dim=0)
+            attention_mask = attention_mask.to(torch.bool)
         return embeds, cu_seqlens, attention_mask
 
     def expand_text_prompt(self, prompt, image, device="cuda"):
@@ -184,8 +179,8 @@ class Qwen2_5_VLTextEmbedder:
 
 
 class Kandinsky5TextEmbedder:
-    def __init__(self, conf, device="cpu", quantized_qwen=False, text_token_padding=True):
-        self.embedder = Qwen2_5_VLTextEmbedder(conf.qwen, device, quantized_qwen, text_token_padding)
+    def __init__(self, conf, device="cpu", quantized_qwen=False):
+        self.embedder = Qwen2_5_VLTextEmbedder(conf.qwen, device, quantized_qwen)
         self.clip_embedder = ClipTextEmbedder(conf.clip, device)
         self.conf = conf
 
@@ -206,5 +201,5 @@ class Kandinsky5TextEmbedder:
         return self
 
 
-def get_text_embedder(conf, device="cpu", quantized_qwen=False, text_token_padding=True):
-    return Kandinsky5TextEmbedder(conf, device, quantized_qwen, text_token_padding)
+def get_text_embedder(conf, device="cpu", quantized_qwen=False):
+    return Kandinsky5TextEmbedder(conf, device, quantized_qwen)
