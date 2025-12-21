@@ -90,27 +90,32 @@ Hugging Faceの[Kandinsky 5.0 Collection](https://huggingface.co/collections/ai-
 
 </details>
 
-## Available Tasks / 利用可能なタスク
+## List of Kandinsky 5 models / 利用可能なタスク
 
-The `--task` option specifies the model configuration. Available tasks:
+The `--task` option selects a model configuration (architecture, attention type, resolution, and default parameters).
+The DiT checkpoint must be set explicitly via `--dit` (this overrides the task's default checkpoint path).
 
-**Pro models (19B parameters):**
+| # | Task | Checkpoint | Parameters | HF URL |
+|---|---|---|---|---|
+| 1 | k5-pro-t2v-5s-sd | kandinsky5pro_t2v_sft_5s.safetensors | T2V, 5s, 19B, Pro SFT | [kandinskylab/Kandinsky-5.0-T2V-Pro-sft-5s](https://huggingface.co/kandinskylab/Kandinsky-5.0-T2V-Pro-sft-5s) |
+| 2 | k5-pro-t2v-10s-sd | kandinsky5pro_t2v_sft_10s.safetensors | T2V, 10s, 19B, Pro SFT | [kandinskylab/Kandinsky-5.0-T2V-Pro-sft-10s](https://huggingface.co/kandinskylab/Kandinsky-5.0-T2V-Pro-sft-10s) |
+| 3 | k5-pro-i2v-5s-sd | kandinsky5pro_i2v_sft_5s.safetensors | I2V, 5s, 19B, Pro SFT | [kandinskylab/Kandinsky-5.0-I2V-Pro-sft-5s](https://huggingface.co/kandinskylab/Kandinsky-5.0-I2V-Pro-sft-5s) |
+| 4 | k5-pro-t2v-5s-sd | kandinsky5pro_t2v_pretrain_5s.safetensors | T2V, 5s, 19B, Pro Pretrain | [kandinskylab/Kandinsky-5.0-T2V-Pro-pretrain-5s](https://huggingface.co/kandinskylab/Kandinsky-5.0-T2V-Pro-pretrain-5s) |
+| 5 | k5-pro-t2v-10s-sd | kandinsky5pro_t2v_pretrain_10s.safetensors | T2V, 10s, 19B, Pro Pretrain | [kandinskylab/Kandinsky-5.0-T2V-Pro-pretrain-10s](https://huggingface.co/kandinskylab/Kandinsky-5.0-T2V-Pro-pretrain-10s) |
 
-| Task | Description | Resolution |
-|------|-------------|------------|
-| `k5-pro-t2v-5s-sd` | Pro T2V 5s SD | 512 |
-| `k5-pro-t2v-5s-hd` | Pro T2V 5s HD | 1024 |
-| `k5-pro-t2v-10s-sd` | Pro T2V 10s SD | 512 |
-| `k5-pro-t2v-10s-hd` | Pro T2V 10s HD | 1024 |
-| `k5-pro-i2v-5s-sd` | Pro I2V 5s SD | 512 |
-| `k5-pro-i2v-5s-hd` | Pro I2V 5s HD | 1024 |
+[Kandinsky 5.0 Video Lite models](https://huggingface.co/collections/kandinskylab/kandinsky-50-video-lite) are technically supported, but were not extensively tested. Community feedback is welcome.
+
+[Kandinsky 5.0 Image Lite models](https://huggingface.co/collections/kandinskylab/kandinsky-50-image-lite) are not supported, but support can be implemented if they get active support from the community.
 
 <details>
 <summary>日本語</summary>
 
-`--task`オプションでモデル設定を指定します。利用可能なタスクは上記の表を参照してください。
+`--task` オプションでタスク設定（アーキテクチャ、attention、解像度、各種デフォルト値）を選択します。
+DiTのチェックポイントは `--dit` で明示的に指定できます（タスクのデフォルトのパスを上書きします）。
 
-このドキュメントでは **Proモデル (19Bパラメータ)** のみを扱います。
+Kandinsky 5.0 Video Liteモデル（https://huggingface.co/collections/kandinskylab/kandinsky-50-video-lite）は技術的にはサポートされていますが、十分な動作確認はできていません。問題があればフィードバックをお願いします。
+
+Kandinsky 5.0 Image Liteモデル（https://huggingface.co/collections/kandinskylab/kandinsky-50-image-lite）は現在サポートしていませんが、コミュニティからの継続的な要望・協力があれば対応可能です。
 
 </details>
 
@@ -271,7 +276,7 @@ If you're running low on VRAM, use `--blocks_to_swap` to offload some blocks to 
 
 ### Attention / アテンション
 
-Use `--sdpa` for PyTorch's scaled dot product attention. Use `--flash_attn` for FlashAttention. Use `--xformers` for xformers.
+Use `--sdpa`, `--flash_attn`, `--flash3`, `--sage_attn`, or `--xformers` to control the attention backend for Kandinsky5.
 
 ### Kandinsky5-specific Options / Kandinsky5固有オプション
 
@@ -362,7 +367,7 @@ VRAMが足りない場合は、`--blocks_to_swap`を指定して、一部のブ�
 
 **アテンション**
 
-`--sdpa`でPyTorchのscaled dot product attentionを使用します。`--flash_attn`でFlashAttentionを使用します。`--xformers`でxformersを使用します。
+`--sdpa`/`--flash_attn`/`--flash3`/`--sage_attn`/`--xformers`はKandinsky5のattention backendに適用されます。
 
 **Kandinsky5固有オプション**
 
