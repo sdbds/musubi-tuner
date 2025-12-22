@@ -275,7 +275,9 @@ class ZImageTransformerBlock(nn.Module):
             del scale_msa
             x = x + gate_msa * self.attention_norm2(clamp_fp16(attn_out))
             del gate_msa
-            x = x + gate_mlp * self.ffn_norm2(clamp_fp16(self.feed_forward(self.ffn_norm1(x) * scale_mlp, apply_fp16_downscale=True)))
+            x = x + gate_mlp * self.ffn_norm2(
+                clamp_fp16(self.feed_forward(self.ffn_norm1(x) * scale_mlp, apply_fp16_downscale=True))
+            )
             del scale_mlp, gate_mlp
         else:
             attn_out = self.attention(self.attention_norm1(x), freqs_cis=freqs_cis, attn_params=attn_params)
