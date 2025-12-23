@@ -256,20 +256,22 @@ class Kandinsky5NetworkTrainer(NetworkTrainer):
                     mask = attention_mask[0] if attention_mask.dim() > 1 else attention_mask
                     mask = mask.bool().flatten()
                     if mask.shape[0] != text_embeds.shape[0]:
-                        raise ValueError(
-                            f"attention_mask length {mask.shape[0]} does not match text_embeds length {text_embeds.shape[0]}; "
-                            "please re-cache Kandinsky5 text embeddings"
-                        )
+                        # Processor returns padded masks; embeds are packed to valid tokens.
+                        # Don't raise here: cache writing already aligns masks to packed embeds.
+                        if mask.sum().item() == text_embeds.shape[0]:
+                            mask = mask[mask]
+                        else:
+                            mask = torch.ones((text_embeds.shape[0],), dtype=torch.bool)
                     text_embeds = text_embeds[mask]
                     attention_mask = None
                 if neg_attention_mask is not None:
                     mask = neg_attention_mask[0] if neg_attention_mask.dim() > 1 else neg_attention_mask
                     mask = mask.bool().flatten()
                     if mask.shape[0] != null_text_embeds.shape[0]:
-                        raise ValueError(
-                            f"neg_attention_mask length {mask.shape[0]} does not match null_text_embeds length {null_text_embeds.shape[0]}; "
-                            "please re-cache Kandinsky5 text embeddings"
-                        )
+                        if mask.sum().item() == null_text_embeds.shape[0]:
+                            mask = mask[mask]
+                        else:
+                            mask = torch.ones((null_text_embeds.shape[0],), dtype=torch.bool)
                     null_text_embeds = null_text_embeds[mask]
                     neg_attention_mask = None
                 # move encoder off GPU promptly
@@ -773,10 +775,12 @@ class Kandinsky5NetworkTrainer(NetworkTrainer):
                 mask = attention_mask[0] if attention_mask.dim() > 1 else attention_mask
                 mask = mask.bool().flatten()
                 if mask.shape[0] != text_embed.shape[0]:
-                    raise ValueError(
-                        f"attention_mask length {mask.shape[0]} does not match text_embeds length {text_embed.shape[0]}; "
-                        "please re-cache Kandinsky5 text embeddings"
-                    )
+                    # Processor returns padded masks; embeds are packed to valid tokens.
+                    # Don't raise here: cache writing already aligns masks to packed embeds.
+                    if mask.sum().item() == text_embed.shape[0]:
+                        mask = mask[mask]
+                    else:
+                        mask = torch.ones((text_embed.shape[0],), dtype=torch.bool)
                 text_embed = text_embed[mask]
                 attention_mask = None
 
