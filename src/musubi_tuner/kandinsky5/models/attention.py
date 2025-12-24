@@ -64,7 +64,6 @@ def xformers_attn(q, k, v, attn_mask=None):
     return xops.memory_efficient_attention(q, k, v)
 
 
-
 class SelfAttentionEngine:
     def __init__(self, engine="auto"):
         assert engine in ["auto", "flash_attention_2", "flash_attention_3", "sage", "sdpa", "xformers"]
@@ -105,13 +104,13 @@ class SelfAttentionEngine:
             if xops is not None:
                 self.attention_fn = xformers_attn
                 self.supports_mask = False
-            if not sageattention is None:
+            if sageattention is not None:
                 self.attention_fn = sage_attn
                 self.supports_mask = False
-            if not flash_attention_2 is None:
+            if flash_attention_2 is not None:
                 self.attention_fn = flash_attention_2
                 self.supports_mask = False
-            if not flash_attention_3 is None:
+            if flash_attention_3 is not None:
                 self.attention_fn = flash_attention_3
                 self.supports_mask = False
 

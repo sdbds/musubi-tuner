@@ -122,18 +122,12 @@ class DiffusionTransformer3D(nn.Module):
 
         self.text_rope_embeddings = RoPE1D(head_dim)
         self.text_transformer_blocks = nn.ModuleList(
-            [
-                TransformerEncoderBlock(model_dim, time_dim, ff_dim, head_dim, attention_engine)
-                for _ in range(num_text_blocks)
-            ]
+            [TransformerEncoderBlock(model_dim, time_dim, ff_dim, head_dim, attention_engine) for _ in range(num_text_blocks)]
         )
 
         self.visual_rope_embeddings = RoPE3D(axes_dims)
         self.visual_transformer_blocks = nn.ModuleList(
-            [
-                TransformerDecoderBlock(model_dim, time_dim, ff_dim, head_dim, attention_engine)
-                for _ in range(num_visual_blocks)
-            ]
+            [TransformerDecoderBlock(model_dim, time_dim, ff_dim, head_dim, attention_engine) for _ in range(num_visual_blocks)]
         )
 
         self.out_layer = OutLayer(model_dim, time_dim, out_visual_dim, patch_size)

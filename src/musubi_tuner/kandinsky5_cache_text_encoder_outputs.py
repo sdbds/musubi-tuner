@@ -49,12 +49,7 @@ def encode_and_save_batch(text_embedder, batch: list[ItemInfo], device: torch.de
     pooled_embed = embeds["pooled_embed"].to("cpu")
     attention_mask = attention_mask.to("cpu")
 
-    if (
-        text_embeds.dim() == 2
-        and attention_mask.dim() == 2
-        and cu_seqlens is not None
-        and cu_seqlens.numel() == len(batch) + 1
-    ):
+    if text_embeds.dim() == 2 and attention_mask.dim() == 2 and cu_seqlens is not None and cu_seqlens.numel() == len(batch) + 1:
         # Variable-length packed embeds: slice by cu_seqlens per item.
         for idx, item in enumerate(batch):
             start = int(cu_seqlens[idx].item())

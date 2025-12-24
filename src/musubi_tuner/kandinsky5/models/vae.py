@@ -1107,7 +1107,6 @@ def build_vae(conf, vae_dtype=torch.float16):
         # Check if checkpoint_path is a direct file (safetensors or pt)
         if os.path.isfile(conf.checkpoint_path):
             # Load VAE from direct file path
-            from diffusers import ConfigMixin
 
             # Use Flux VAE config
             config = {
