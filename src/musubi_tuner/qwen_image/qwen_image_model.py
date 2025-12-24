@@ -1299,7 +1299,7 @@ def create_model(
     attn_mode: str, split_attn: bool, zero_cond_t: bool, dtype: Optional[torch.dtype], num_layers: Optional[int] = 60
 ) -> QwenImageTransformer2DModel:
     with init_empty_weights():
-        logger.info(f"Creating QwenImageTransformer2DModel")
+        logger.info(f"Creating QwenImageTransformer2DModel. Attn mode: {attn_mode}, split_attn: {split_attn}, zero_cond_t: {zero_cond_t}, num_layers: {num_layers} ")
         """
         {
             "_class_name": "QwenImageTransformer2DModel",
@@ -1345,8 +1345,8 @@ def load_qwen_image_model(
     device: Union[str, torch.device],
     dit_path: str,
     attn_mode: str,
-    zero_cond_t: bool,
     split_attn: bool,
+    zero_cond_t: bool,
     loading_device: Union[str, torch.device],
     dit_weight_dtype: Optional[torch.dtype],
     fp8_scaled: bool = False,
@@ -1363,6 +1363,7 @@ def load_qwen_image_model(
         dit_path (str): Path to the DiT model checkpoint.
         attn_mode (str): Attention mode to use, e.g., "torch", "flash", etc.
         split_attn (bool): Whether to use split attention.
+        zero_cond_t (bool): Whether the model uses zero conditioning for time embeddings.
         loading_device (Union[str, torch.device]): Device to load the model weights on.
         dit_weight_dtype (Optional[torch.dtype]): Data type of the DiT weights.
             If None, it will be loaded as is (same as the state_dict) or scaled for fp8. if not None, model weights will be casted to this dtype.

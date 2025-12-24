@@ -364,8 +364,8 @@ def load_dit_model(
         device,
         args.dit,
         args.attn_mode,
-        args.edit_version == "2511",
         False,
+        args.edit_version == "2511",
         loading_device,
         loading_weight_dtype,
         args.fp8_scaled and not args.lycoris,
@@ -575,7 +575,9 @@ def prepare_text_inputs(
         if not args.is_edit:
             return qwen_image_utils.get_qwen_prompt_embeds(tokenizer, text_encoder, p)
         else:
-            return qwen_image_utils.get_qwen_prompt_embeds_with_image(vl_processor, text_encoder, p, ims, mode=args.edit_version)
+            return qwen_image_utils.get_qwen_prompt_embeds_with_image(
+                vl_processor, text_encoder, p, ims, edit_version=args.edit_version
+            )
 
     logger.info(f"Encoding prompt with Text Encoder. Control images: {len(images) if images is not None else None}")
 
