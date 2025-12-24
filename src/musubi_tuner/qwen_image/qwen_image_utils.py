@@ -382,7 +382,7 @@ def get_qwen_prompt_embeds_with_image(
     vlm: Qwen2_5_VLForConditionalGeneration,
     prompt: Union[str, List[str]],
     image: Union[List[ImageInput], ImageInput] = None,
-    mode: str = "edit",
+    edit_version: str = "original",
 ):
     r"""
     Args:
@@ -390,12 +390,12 @@ def get_qwen_prompt_embeds_with_image(
             prompt to be encoded
         image (`PIL.Image.Image`, `np.ndarray`, `torch.Tensor`):
             image to be encoded
-        mode (`str`, *optional*, defaults to "edit"):
-            mode of the prompt, can be "edit" or "edit-plus"
+        edit_version (`str`, *optional*, defaults to "original"):
+            version of the prompt, can be "original", "2509" or "2511"
     """
-    if mode == "edit":
+    if edit_version == "original":
         prompt_template_encode = "<|im_start|>system\nDescribe the key features of the input image (color, shape, size, texture, objects, background), then explain how the user's text instruction should alter or modify the image. Generate a new image that meets the user's requirements while maintaining consistency with the original input where appropriate.<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{}<|im_end|>\n<|im_start|>assistant\n"
-    elif mode == "edit-plus":
+    elif edit_version == "2509" or edit_version == "2511":
         prompt_template_encode = "<|im_start|>system\nDescribe the key features of the input image (color, shape, size, texture, objects, background), then explain how the user's text instruction should alter or modify the image. Generate a new image that meets the user's requirements while maintaining consistency with the original input where appropriate.<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
     prompt_template_encode_start_idx = 64
     # default_sample_size = 128
@@ -425,14 +425,14 @@ def get_qwen_prompt_embeds_with_image(
     base_img_prompts = [""] * len(prompt)
     if image is not None:
         vl_image_inputs = []  # flat list of images
-        if mode == "edit":
+        if edit_version == "original":
             for i, img in enumerate(image):
                 if img is None or len(img) == 0:
-                    logger.warning(f"No image provided for prompt {i}, but mode is {mode}, this may cause issues.")
+                    logger.warning(f"No image provided for prompt {i}, but version is {edit_version}, this may cause issues.")
                     continue
                 if len(img) > 1:
                     logger.warning(
-                        f"Multiple images {len(img)} provided for prompt {i}, but mode is {mode}, 2nd and later images will be ignored."
+                        f"Multiple images {len(img)} provided for prompt {i}, but version is {edit_version}, 2nd and later images will be ignored."
                     )
                 vl_image_inputs.append(img[0])
         else:

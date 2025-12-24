@@ -1000,6 +1000,12 @@ class QwenImageTransformer2DModel(nn.Module):  # ModelMixin, ConfigMixin, PeftAd
             Whether to use guidance embeddings for guidance-distilled variant of the model.
         axes_dims_rope (`Tuple[int]`, defaults to `(16, 56, 56)`):
             The dimensions to use for the rotary positional embeddings.
+        attn_mode (`str`, defaults to `"torch"`):
+            The attention implementation to use.
+        split_attn (`bool`, defaults to `False`):
+            Whether to split the attention computation to save memory.
+        zero_cond_t (`bool`, defaults to `False`):
+            Whether to use zero conditioning for time embeddings.
     """
 
     # _supports_gradient_checkpointing = True
@@ -1290,7 +1296,7 @@ FP8_OPTIMIZATION_EXCLUDE_KEYS = [
 
 
 def create_model(
-    attn_mode: str, split_attn: bool, dtype: Optional[torch.dtype], num_layers: Optional[int] = 60
+    attn_mode: str, split_attn: bool, zero_cond_t: bool, dtype: Optional[torch.dtype], num_layers: Optional[int] = 60
 ) -> QwenImageTransformer2DModel:
     with init_empty_weights():
         logger.info(f"Creating QwenImageTransformer2DModel")
@@ -1328,6 +1334,7 @@ def create_model(
             axes_dims_rope=(16, 56, 56),
             attn_mode=attn_mode,
             split_attn=split_attn,
+            zero_cond_t=zero_cond_t,
         )
         if dtype is not None:
             model.to(dtype)
@@ -1338,6 +1345,7 @@ def load_qwen_image_model(
     device: Union[str, torch.device],
     dit_path: str,
     attn_mode: str,
+    zero_cond_t: bool,
     split_attn: bool,
     loading_device: Union[str, torch.device],
     dit_weight_dtype: Optional[torch.dtype],
@@ -1370,7 +1378,7 @@ def load_qwen_image_model(
     device = torch.device(device)
     loading_device = torch.device(loading_device)
 
-    model = create_model(attn_mode, split_attn, dit_weight_dtype, num_layers=num_layers)
+    model = create_model(attn_mode, split_attn, zero_cond_t,dit_weight_dtype, num_layers=num_layers)
 
     # load model weights with dynamic fp8 optimization and LoRA merging if needed
     logger.info(f"Loading DiT model from {dit_path}, device={loading_device}")
@@ -1387,10 +1395,14 @@ def load_qwen_image_model(
         disable_numpy_memmap=disable_numpy_memmap,
     )
 
-    # remove "model.diffusion_model." prefix: 1.3B model has this prefix
+    # remove "model.diffusion_model."
     for key in list(sd.keys()):
         if key.startswith("model.diffusion_model."):
             sd[key[22:]] = sd.pop(key)
+
+    if "__index_timestep_zero__" in sd: # ComfyUI flag for edit-2511
+        assert zero_cond_t, "Found __index_timestep_zero__ in state_dict, the model must be '2511' variant."
+        sd.pop("__index_timestep_zero__")
 
     if fp8_scaled:
         apply_fp8_monkey_patch(model, sd, use_scaled_mm=False)
