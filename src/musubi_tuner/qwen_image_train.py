@@ -67,6 +67,7 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
                 dit_path,
                 attn_mode,
                 split_attn,
+                args.edit_version == "2511",
                 loading_device,
                 dit_weight_dtype,
                 args.fp8_scaled,
@@ -90,7 +91,9 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
             logger.info(f"Block index map: {block_index_map}")
 
         # create model
-        model = qwen_image_model.create_model(attn_mode, split_attn, dit_weight_dtype, num_layers=total_num_blocks)
+        model = qwen_image_model.create_model(
+            attn_mode, split_attn, args.edit_version == "2511", dit_weight_dtype, num_layers=total_num_blocks
+        )
 
         # load weights from disk
         logger.info(f"Loading weights from {dit_path}")
@@ -116,6 +119,13 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
 
                     state_dict[state_dict_key] = f.get_tensor(key, device=loading_device, dtype=dit_weight_dtype)
             synchronize_device(loading_device)
+
+        # Add after line 121 (after synchronize_device)
+        if "__index_timestep_zero__" in state_dict:  # ComfyUI flag for edit-2511
+            assert args.edit_version == "2511", (
+                "Found __index_timestep_zero__ in state_dict, the model must be '2511' variant. Use --edit_version 2511"
+            )
+            state_dict.pop("__index_timestep_zero__")
 
         info = model.load_state_dict(state_dict, strict=True, assign=True)
         logger.info(f"Loaded DiT model from {dit_path}, info={info}")
