@@ -173,6 +173,7 @@ def build_metadata(
             arch = ARCH_QWEN_IMAGE_EDIT
         elif custom_arch == CUSTOM_ARCH_QWEN_IMAGE_EDIT_PLUS:
             arch = ARCH_QWEN_IMAGE_EDIT_PLUS
+            custom_arch = None  # clear custom_arch to avoid override later
         elif custom_arch == CUSTOM_ARCH_QWEN_IMAGE_EDIT_2511:
             arch = ARCH_QWEN_IMAGE_EDIT_2511
             custom_arch = None  # clear custom_arch to avoid override later
