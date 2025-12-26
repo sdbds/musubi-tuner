@@ -1489,8 +1489,16 @@ def resolve_model_version_args(args: argparse.Namespace) -> str:
         args.model_version = "edit"
     else:
         args.model_version = "original"  # Not specified, use original (non-edit) model
+
+    valid_model_versions = {"original", "edit", "edit-2509", "edit-2511"}
+    if args.model_version not in valid_model_versions:
+        valid_str = "', '".join(sorted(valid_model_versions))
+        raise ValueError(
+            f"Invalid model_version '{args.model_version}'. "
+            f"Valid options are: '{valid_str}'."
+        )
+
     args.is_edit = args.model_version in {"edit", "edit-2509", "edit-2511"}
-    assert args.is_edit or args.model_version == "original", f"Unknown model_version: {args.model_version}"
     return args.model_version
 
 
