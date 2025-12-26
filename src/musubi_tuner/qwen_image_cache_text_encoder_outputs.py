@@ -29,7 +29,7 @@ def encode_and_save_batch(
     tokenizer: Qwen2Tokenizer,
     text_encoder: Qwen2_5_VLForConditionalGeneration,
     vl_processor: Optional[Qwen2VLProcessor],
-    edit_version: Optional[str],
+    model_version: Optional[str],
     batch: list[ItemInfo],
     device: torch.device,
     accelerator: Optional[accelerate.Accelerator],
@@ -80,7 +80,7 @@ def encode_and_save_batch(
                     embed, mask = qwen_image_utils.get_qwen_prompt_embeds(tokenizer, text_encoder, prompts)
                 else:
                     embed, mask = qwen_image_utils.get_qwen_prompt_embeds_with_image(
-                        vl_processor, text_encoder, prompts, images, edit_version=edit_version
+                        vl_processor, text_encoder, prompts, images, model_version=model_version
                     )
                 if embed.dtype == torch.float8_e4m3fn:  # T5 returns bf16, but QwenVL-2.5 returns fp8
                     embed = embed.to(torch.bfloat16)
@@ -90,7 +90,7 @@ def encode_and_save_batch(
                 embed, mask = qwen_image_utils.get_qwen_prompt_embeds(tokenizer, text_encoder, prompts)
             else:
                 embed, mask = qwen_image_utils.get_qwen_prompt_embeds_with_image(
-                    vl_processor, text_encoder, prompts, images, edit_version=edit_version
+                    vl_processor, text_encoder, prompts, images, model_version=model_version
                 )
 
     # save prompt cache
@@ -105,14 +105,7 @@ def main():
     parser = qwen_image_setup_parser(parser)
 
     args = parser.parse_args()
-
-    if args.edit:
-        args.edit_version = "original"
-    elif args.edit_plus:
-        args.edit_version = "2509"
-    elif args.edit_version is not None:
-        args.edit_version = args.edit_version.lower()
-    args.is_edit = args.edit_version is not None
+    qwen_image_utils.resolve_model_version_args(args)
 
     device = args.device if args.device is not None else "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(device)
@@ -154,7 +147,7 @@ def main():
 
     def encode_for_text_encoder(batch: list[ItemInfo]):
         nonlocal tokenizer, text_encoder, vl_processor, device, accelerator, args
-        encode_and_save_batch(tokenizer, text_encoder, vl_processor, args.edit_version, batch, device, accelerator)
+        encode_and_save_batch(tokenizer, text_encoder, vl_processor, args.model_version, batch, device, accelerator)
 
     cache_text_encoder_outputs.process_text_encoder_batches(
         args.num_workers,
@@ -177,17 +170,7 @@ def main():
 def qwen_image_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--text_encoder", type=str, default=None, required=True, help="Text Encoder (Qwen2.5-VL) checkpoint path")
     parser.add_argument("--fp8_vl", action="store_true", help="use fp8 for Text Encoder model")
-    parser.add_argument(
-        "--edit",
-        action="store_true",
-        help="cache Text Encoder outputs for Qwen-Image-Edit original, recommended `--edit_version original` instead",
-    )
-    parser.add_argument(
-        "--edit_plus", action="store_true", help="cache for Qwen-Image-Edit-2509, recommended `--edit_version 2509` instead"
-    )
-    parser.add_argument(
-        "--edit_version", type=str, default=None, help="training for Qwen-Image-Edit-XXXX version (e.g. original, 2509 or 2511)"
-    )
+    qwen_image_utils.add_model_version_args(parser)
     return parser
 
 

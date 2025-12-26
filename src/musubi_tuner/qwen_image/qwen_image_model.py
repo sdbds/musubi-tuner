@@ -859,35 +859,32 @@ class QwenImageTransformerBlock(nn.Module):
 
         self.zero_cond_t = zero_cond_t
 
-    def _modulate(self, x, mod_params, index: Optional[torch.Tensor] = None):
+    def _modulate(self, x, mod_params, timestep_zero_index: Optional[int] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         """Apply modulation to input tensor"""
         # x: [b, l, d], shift/scale/gate: [b, d] (or [2*b, d] when `zero_cond_t=True`)
         shift, scale, gate = mod_params.chunk(3, dim=-1)
 
-        if index is not None:
+        if timestep_zero_index is not None:
             actual_batch = shift.size(0) // 2
-            shift_0, shift_1 = shift[:actual_batch], shift[actual_batch:]
-            scale_0, scale_1 = scale[:actual_batch], scale[actual_batch:]
-            gate_0, gate_1 = gate[:actual_batch], gate[actual_batch:]
+            shift_base, shift_ext = shift[:actual_batch], shift[actual_batch:]
+            scale_base, scale_ext = scale[:actual_batch], scale[actual_batch:]
+            gate_base, gate_ext = gate[:actual_batch], gate[actual_batch:]
 
-            index_expanded = index.unsqueeze(-1)
+            shift_base = shift_base.unsqueeze(1)
+            shift_ext = shift_ext.unsqueeze(1)
+            scale_base = scale_base.unsqueeze(1)
+            scale_ext = scale_ext.unsqueeze(1)
+            gate_base = gate_base.unsqueeze(1)
+            gate_ext = gate_ext.unsqueeze(1)
 
-            shift_0_exp = shift_0.unsqueeze(1)
-            shift_1_exp = shift_1.unsqueeze(1)
-            scale_0_exp = scale_0.unsqueeze(1)
-            scale_1_exp = scale_1.unsqueeze(1)
-            gate_0_exp = gate_0.unsqueeze(1)
-            gate_1_exp = gate_1.unsqueeze(1)
-
-            shift_result = torch.where(index_expanded == 0, shift_0_exp, shift_1_exp)
-            scale_result = torch.where(index_expanded == 0, scale_0_exp, scale_1_exp)
-            gate_result = torch.where(index_expanded == 0, gate_0_exp, gate_1_exp)
+            return torch.cat(
+                [x[:, :timestep_zero_index] * (1 + scale_base) + shift_base, x[:, timestep_zero_index:] * (1 + scale_ext) + shift_ext], dim=1
+            ), torch.cat([gate_base.expand(-1, timestep_zero_index, -1), gate_ext.expand(-1, x.size(1) - timestep_zero_index, -1)], dim=1)
         else:
             shift_result = shift.unsqueeze(1)
             scale_result = scale.unsqueeze(1)
             gate_result = gate.unsqueeze(1)
-
-        return x * (1 + scale_result) + shift_result, gate_result
+            return x * (1 + scale_result) + shift_result, gate_result
 
     def forward(
         self,
@@ -898,7 +895,7 @@ class QwenImageTransformerBlock(nn.Module):
         image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         txt_seq_lens: Optional[torch.Tensor] = None,
         joint_attention_kwargs: Optional[Dict[str, Any]] = None,
-        modulate_index: Optional[torch.Tensor] = None,
+        timestep_zero_index: Optional[int] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Get modulation parameters for both streams
         img_mod_params = self.img_mod(temb)  # [B, 6*dim]
@@ -914,7 +911,7 @@ class QwenImageTransformerBlock(nn.Module):
 
         # Process image stream - norm1 + modulation
         img_normed = self.img_norm1(hidden_states)
-        img_modulated, img_gate1 = self._modulate(img_normed, img_mod1, modulate_index)
+        img_modulated, img_gate1 = self._modulate(img_normed, img_mod1, timestep_zero_index)
         del img_normed, img_mod1
 
         # Process text stream - norm1 + modulation
@@ -951,7 +948,7 @@ class QwenImageTransformerBlock(nn.Module):
 
         # Process image stream - norm2 + MLP
         img_normed2 = self.img_norm2(hidden_states)
-        img_modulated2, img_gate2 = self._modulate(img_normed2, img_mod2, modulate_index)
+        img_modulated2, img_gate2 = self._modulate(img_normed2, img_mod2, timestep_zero_index)
         del img_normed2, img_mod2
         img_mlp_output = self.img_mlp(img_modulated2)
         del img_modulated2
@@ -1198,25 +1195,19 @@ class QwenImageTransformer2DModel(nn.Module):  # ModelMixin, ConfigMixin, PeftAd
 
             timestep = torch.cat([timestep, timestep * 0], dim=0)
 
-            modulate_index_list = []
-            for sample in img_shapes:
-                if isinstance(sample, (tuple, list)) and len(sample) == 3 and all(isinstance(x, numbers.Integral) for x in sample):
-                    base_len = int(prod(sample))
-                    extra_len = 0
-                else:
-                    if not (isinstance(sample, (tuple, list)) and len(sample) >= 1):
-                        raise ValueError("Invalid `img_shapes` entry for `zero_cond_t=True`.")
-                    base = sample[0]
-                    if not (isinstance(base, (tuple, list)) and len(base) == 3):
-                        raise ValueError("Invalid `img_shapes` entry for `zero_cond_t=True`.")
-                    base_len = int(prod(base))
-                    extra_len = int(sum(prod(s) for s in sample[1:]))
-
-                modulate_index_list.append([0] * base_len + [1] * extra_len)
-
-            modulate_index = torch.tensor(modulate_index_list, device=timestep.device, dtype=torch.int)
+            sample = img_shapes[0]  # img_shapes always has single entry for musubi tuner
+            if isinstance(sample, (tuple, list)) and len(sample) == 3 and all(isinstance(x, numbers.Integral) for x in sample):
+                base_len = int(prod(sample))
+            else:
+                if not (isinstance(sample, (tuple, list)) and len(sample) >= 1):
+                    raise ValueError("Invalid `img_shapes` entry for `zero_cond_t=True`.")
+                base = sample[0]
+                if not (isinstance(base, (tuple, list)) and len(base) == 3):
+                    raise ValueError("Invalid `img_shapes` entry for `zero_cond_t=True`.")
+                base_len = int(prod(base))
+            timestep_zero_index = base_len
         else:
-            modulate_index = None
+            timestep_zero_index = None
 
         encoder_hidden_states = self.txt_norm(encoder_hidden_states)
         encoder_hidden_states = self.txt_in(encoder_hidden_states)
@@ -1250,7 +1241,7 @@ class QwenImageTransformer2DModel(nn.Module):  # ModelMixin, ConfigMixin, PeftAd
                     image_rotary_emb,
                     txt_seq_lens,
                     attention_kwargs,
-                    modulate_index,
+                    timestep_zero_index,
                 )
 
             else:
@@ -1262,7 +1253,7 @@ class QwenImageTransformer2DModel(nn.Module):  # ModelMixin, ConfigMixin, PeftAd
                     image_rotary_emb=image_rotary_emb,
                     txt_seq_lens=txt_seq_lens,
                     joint_attention_kwargs=attention_kwargs,
-                    modulate_index=modulate_index,
+                    timestep_zero_index=timestep_zero_index,
                 )
 
             if self.blocks_to_swap:
