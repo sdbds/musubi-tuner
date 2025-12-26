@@ -1493,10 +1493,7 @@ def resolve_model_version_args(args: argparse.Namespace) -> str:
     valid_model_versions = {"original", "edit", "edit-2509", "edit-2511"}
     if args.model_version not in valid_model_versions:
         valid_str = "', '".join(sorted(valid_model_versions))
-        raise ValueError(
-            f"Invalid model_version '{args.model_version}'. "
-            f"Valid options are: '{valid_str}'."
-        )
+        raise ValueError(f"Invalid model_version '{args.model_version}'. Valid options are: '{valid_str}'.")
 
     args.is_edit = args.model_version in {"edit", "edit-2509", "edit-2511"}
     return args.model_version
