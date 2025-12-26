@@ -1370,7 +1370,7 @@ def load_qwen_image_model(
     device = torch.device(device)
     loading_device = torch.device(loading_device)
 
-    model = create_model(attn_mode, split_attn, zero_cond_t,dit_weight_dtype, num_layers=num_layers)
+    model = create_model(attn_mode, split_attn, zero_cond_t, dit_weight_dtype, num_layers=num_layers)
 
     # load model weights with dynamic fp8 optimization and LoRA merging if needed
     logger.info(f"Loading DiT model from {dit_path}, device={loading_device}")
