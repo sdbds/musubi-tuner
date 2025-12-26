@@ -81,7 +81,7 @@ When specifying the model version in various scripts, use the following options:
 |Qwen-Image-Edit-2509|`--model_version edit-2509`| |
 |Qwen-Image-Edit-2511|`--model_version edit-2511`| |
 
-Note that the`--edit` (for Qwen-Image-Edit) and `--edit_plus` (for Qwen-Image-Edit-2509) flags are also available for backward compatibility.
+Note that the `--edit` (for Qwen-Image-Edit) and `--edit_plus` (for Qwen-Image-Edit-2509) flags are also available for backward compatibility.
 
 <details>
 <summary>日本語</summary>
