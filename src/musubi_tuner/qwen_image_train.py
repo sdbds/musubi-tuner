@@ -17,7 +17,7 @@ from musubi_tuner import qwen_image_train_network
 from musubi_tuner.dataset import config_utils
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
 from musubi_tuner.modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
-from musubi_tuner.qwen_image import qwen_image_model
+from musubi_tuner.qwen_image import qwen_image_model, qwen_image_utils
 from musubi_tuner.hv_train_network import (
     SS_METADATA_KEY_BASE_MODEL_VERSION,
     SS_METADATA_MINIMUM_KEYS,
@@ -67,7 +67,7 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
                 dit_path,
                 attn_mode,
                 split_attn,
-                args.edit_version == "2511",
+                args.model_version == "edit-2511",
                 loading_device,
                 dit_weight_dtype,
                 args.fp8_scaled,
@@ -92,7 +92,7 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
 
         # create model
         model = qwen_image_model.create_model(
-            attn_mode, split_attn, args.edit_version == "2511", dit_weight_dtype, num_layers=total_num_blocks
+            attn_mode, split_attn, args.model_version == "edit-2511", dit_weight_dtype, num_layers=total_num_blocks
         )
 
         # load weights from disk
@@ -122,8 +122,8 @@ class QwenImageTrainer(QwenImageNetworkTrainer):
 
         # Add after line 121 (after synchronize_device)
         if "__index_timestep_zero__" in state_dict:  # ComfyUI flag for edit-2511
-            assert args.edit_version == "2511", (
-                "Found __index_timestep_zero__ in state_dict, the model must be '2511' variant. Use --edit_version 2511"
+            assert args.model_version == "edit-2511", (
+                "Found __index_timestep_zero__ in state_dict, the model must be '2511' variant. Use --model_version edit-2511"
             )
             state_dict.pop("__index_timestep_zero__")
 
@@ -780,6 +780,8 @@ def main():
         logger.warning("FP8 training is not supported for fine-tuning. Set --fp8-base or --fp8-scaled to False.")
         args.fp8_base = False
         args.fp8_scaled = False
+
+    qwen_image_utils.resolve_model_version_args(args)
 
     trainer = QwenImageTrainer()
     trainer.train(args)

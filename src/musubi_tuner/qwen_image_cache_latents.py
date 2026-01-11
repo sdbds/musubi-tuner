@@ -103,17 +103,7 @@ def encode_and_save_batch(vae: qwen_image_autoencoder_kl.AutoencoderKLQwenImage,
 
 
 def qwen_image_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-    parser.add_argument(
-        "--edit",
-        action="store_true",
-        help="cache Text Encoder outputs for Qwen-Image-Edit original, recommended `--edit_version original` instead",
-    )
-    parser.add_argument(
-        "--edit_plus", action="store_true", help="cache for Qwen-Image-Edit-2509, recommended `--edit_version 2509` instead"
-    )
-    parser.add_argument(
-        "--edit_version", type=str, default=None, help="training for Qwen-Image-Edit-XXXX version (e.g. original, 2509 or 2511)"
-    )
+    qwen_image_utils.add_model_version_args(parser)
     return parser
 
 
@@ -123,14 +113,7 @@ def main():
     parser = qwen_image_setup_parser(parser)
 
     args = parser.parse_args()
-
-    if args.edit:
-        args.edit_version = "original"
-    elif args.edit_plus:
-        args.edit_version = "2509"
-    elif args.edit_version is not None:
-        args.edit_version = args.edit_version.lower()
-    args.is_edit = args.edit_version is not None
+    qwen_image_utils.resolve_model_version_args(args)
 
     if args.disable_cudnn_backend:
         logger.info("Disabling cuDNN PyTorch backend.")

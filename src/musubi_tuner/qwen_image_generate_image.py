@@ -57,15 +57,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--disable_numpy_memmap", action="store_true", help="Disable numpy memmap when loading safetensors. Default is False."
     )
-    parser.add_argument(
-        "--edit", action="store_true", help="Enable Qwen-Image-Edit original, recommend `--edit_version original` instead"
-    )
-    parser.add_argument(
-        "--edit_plus", action="store_true", help="Enable Qwen-Image-Edit-2509 (plus), recommend `--edit_version 2509` instead"
-    )
-    parser.add_argument(
-        "--edit_version", type=str, default=None, help="Enable Qwen-Image-Edit-XXXX version (e.g. original, 2509 or 2511)"
-    )
+    qwen_image_utils.add_model_version_args(parser)
     parser.add_argument("--vae", type=str, default=None, help="VAE directory or path")
     parser.add_argument("--vae_enable_tiling", action="store_true", help="Enable tiling for VAE decoding. Default is False.")
     parser.add_argument("--text_encoder", type=str, required=True, help="Text Encoder 1 (Qwen2.5-VL) directory or path")
@@ -198,19 +190,7 @@ def parse_args() -> argparse.Namespace:
     )
 
     args = parser.parse_args()
-
-    if args.edit:
-        args.edit_version = "original"
-    elif args.edit_plus:
-        args.edit_version = "2509"
-    elif args.edit_version is not None:
-        args.edit_version = args.edit_version.lower()
-
-    if args.edit_version is not None:
-        logger.info(f"Using Qwen-Image-Edit version: {args.edit_version}")
-        args.is_edit = True
-    else:
-        args.is_edit = False
+    qwen_image_utils.resolve_model_version_args(args)
 
     # Validate arguments
     if args.from_file and args.interactive:
@@ -370,7 +350,7 @@ def load_dit_model(
         args.dit,
         args.attn_mode,
         False,
-        args.edit_version == "2511",
+        args.model_version == "edit-2511",
         loading_device,
         loading_weight_dtype,
         args.fp8_scaled and not args.lycoris,
@@ -587,7 +567,7 @@ def prepare_text_inputs(
             return qwen_image_utils.get_qwen_prompt_embeds(tokenizer, text_encoder, p)
         else:
             return qwen_image_utils.get_qwen_prompt_embeds_with_image(
-                vl_processor, text_encoder, p, ims, edit_version=args.edit_version
+                vl_processor, text_encoder, p, ims, model_version=args.model_version
             )
 
     logger.info(f"Encoding prompt with Text Encoder. Control images: {len(images) if images is not None else None}")
