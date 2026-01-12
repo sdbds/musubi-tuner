@@ -190,12 +190,6 @@ def main():
     device = args.device if hasattr(args, "device") and args.device else ("cuda" if torch.cuda.is_available() else "cpu")
     device = torch.device(device)
 
-    if args.i2v:
-        assert args.image_encoder is not None, "--i2v requires --image_encoder to be set."
-    elif args.image_encoder is not None:
-        logger.info("--image_encoder is set but --i2v is not set. Enabling --i2v.")
-        args.i2v = True
-
     # Load dataset config
     blueprint_generator = BlueprintGenerator(ConfigSanitizer())
     logger.info(f"Load dataset config from {args.dataset_config}")
@@ -204,6 +198,21 @@ def main():
     train_dataset_group = config_utils.generate_dataset_group_by_blueprint(blueprint.dataset_group)
 
     datasets = train_dataset_group.datasets
+
+    has_control_dataset = any(
+        (hasattr(ds, "has_control") and bool(ds.has_control))
+        or (hasattr(ds, "control_directory") and ds.control_directory is not None)
+        for ds in datasets
+    )
+    if not args.i2v and has_control_dataset:
+        logger.info("Dataset config has control data. Enabling --i2v.")
+        args.i2v = True
+
+    if args.i2v:
+        assert args.image_encoder is not None, "--i2v requires --image_encoder to be set."
+    elif args.image_encoder is not None:
+        logger.info("--image_encoder is set but --i2v is not set. Enabling --i2v.")
+        args.i2v = True
 
     if args.debug_mode is not None:
         cache_latents.show_datasets(
