@@ -727,9 +727,7 @@ class ZImageTransformer2DModel(nn.Module):
         ori_pos_ids = self.create_coordinate_grid(size=pos_grid_size, start=pos_start, device=device).flatten(0, 2)
         if pad_len > 0:
             pad_pos_ids = (
-                self.create_coordinate_grid(size=(1, 1, 1), start=(0, 0, 0), device=device)
-                .flatten(0, 2)
-                .repeat(pad_len, 1)
+                self.create_coordinate_grid(size=(1, 1, 1), start=(0, 0, 0), device=device).flatten(0, 2).repeat(pad_len, 1)
             )
             pos_ids = torch.cat([ori_pos_ids, pad_pos_ids], dim=0)
             padded_feat = torch.cat([feat, feat[-1:].repeat(pad_len, 1)], dim=0)
@@ -968,9 +966,7 @@ class ZImageTransformer2DModel(nn.Module):
                 else:
                     unified.append(torch.cat([cap[i][:cap_len], x[i][:x_len]]))
                     unified_freqs.append(torch.cat([cap_freqs[i][:cap_len], x_freqs[i][:x_len]]))
-                    unified_noise_mask.append(
-                        torch.tensor(cap_noise_mask[i] + x_noise_mask[i], dtype=torch.long, device=device)
-                    )
+                    unified_noise_mask.append(torch.tensor(cap_noise_mask[i] + x_noise_mask[i], dtype=torch.long, device=device))
             else:
                 unified.append(torch.cat([x[i][:x_len], cap[i][:cap_len]]))
                 unified_freqs.append(torch.cat([x_freqs[i][:x_len], cap_freqs[i][:cap_len]]))
@@ -994,7 +990,9 @@ class ZImageTransformer2DModel(nn.Module):
 
         noise_mask_tensor = None
         if omni_mode:
-            noise_mask_tensor = torch.nn.utils.rnn.pad_sequence(unified_noise_mask, batch_first=True, padding_value=0)[:, : unified.shape[1]]
+            noise_mask_tensor = torch.nn.utils.rnn.pad_sequence(unified_noise_mask, batch_first=True, padding_value=0)[
+                :, : unified.shape[1]
+            ]
 
         return unified, unified_freqs, attn_params, noise_mask_tensor
 
