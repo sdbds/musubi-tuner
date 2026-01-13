@@ -1251,9 +1251,10 @@ def create_model(
     split_attn: bool,
     dtype: Optional[torch.dtype],
     siglip_feat_dim: Optional[int] = None,
+    use_default_siglip_feat_dim: bool = True,
     use_16bit_for_attention: bool = False,
 ) -> ZImageTransformer2DModel:
-    if siglip_feat_dim is None:
+    if use_default_siglip_feat_dim and siglip_feat_dim is None:
         siglip_feat_dim = getattr(zimage_config, "DEFAULT_TRANSFORMER_SIGLIP_FEAT_DIM", None)
     with init_empty_weights():
         logger.info("Creating ZImageTransformer2DModel")
@@ -1385,6 +1386,7 @@ def load_zimage_model(
         split_attn,
         dit_weight_dtype,
         siglip_feat_dim=siglip_feat_dim,
+        use_default_siglip_feat_dim=False,
         use_16bit_for_attention=use_16bit_for_attention,
     )
 
