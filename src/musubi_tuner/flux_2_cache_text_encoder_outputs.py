@@ -1,7 +1,6 @@
 import argparse
 
 import torch
-from transformers import Mistral3ForConditionalGeneration, Mistral3Config, AutoProcessor
 
 from musubi_tuner.dataset import config_utils
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
@@ -12,7 +11,6 @@ from musubi_tuner.dataset.image_video_dataset import (
     save_text_encoder_output_cache_flux_2,
 )
 
-from musubi_tuner.flux_2 import flux2_models
 from musubi_tuner.flux_2 import flux2_utils
 import musubi_tuner.cache_text_encoder_outputs as cache_text_encoder_outputs
 import logging
@@ -71,7 +69,11 @@ def main():
     # Load Mistral 3 text encoder
     m3_dtype = torch.float8e4m3fn if args.fp8_m3 else torch.bfloat16
     text_embedder = flux2_utils.load_textembedder(
-        args.model_version, args.text_encoder, dtype=m3_dtype, device=device, disable_mmap=True,
+        args.model_version,
+        args.text_encoder,
+        dtype=m3_dtype,
+        device=device,
+        disable_mmap=True,
     )
 
     # Encode with Mistral 3 text encoder

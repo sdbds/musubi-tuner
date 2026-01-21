@@ -5,7 +5,6 @@ from typing import Optional
 
 from accelerate import Accelerator
 from einops import rearrange
-from tqdm import tqdm
 from PIL import Image
 
 from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_FLUX_2, ARCHITECTURE_FLUX_2_FULL
@@ -140,8 +139,10 @@ class Flux2NetworkTrainer(NetworkTrainer):
         # Initialize latents
         packed_latent_height, packed_latent_width = height // 16, width // 16
         randn = torch.randn(
-            (1, 128, packed_latent_height, packed_latent_width), # [1, 128, 52, 78]
-            generator=generator, dtype=torch.bfloat16, device="cuda",
+            (1, 128, packed_latent_height, packed_latent_width),  # [1, 128, 52, 78]
+            generator=generator,
+            dtype=torch.bfloat16,
+            device="cuda",
         )
         x, x_ids = flux2_utils.batched_prc_img(randn)  # [1, 4056, 128], [1, 4056, 4]
 
@@ -340,9 +341,7 @@ class Flux2NetworkTrainer(NetworkTrainer):
         model_pred = model_pred[:, : noisy_model_input.shape[1]]  # [1, 4096, 128]
 
         # unpack height/width latents
-        model_pred = rearrange(
-            model_pred, "b (h w) c -> b c h w", h=packed_latent_height, w=packed_latent_width
-        )
+        model_pred = rearrange(model_pred, "b (h w) c -> b c h w", h=packed_latent_height, w=packed_latent_width)
 
         # flow matching loss
         target = noise - latents

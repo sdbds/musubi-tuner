@@ -1,11 +1,9 @@
 import argparse
 import json
-import einops
 import torch
 import torchvision
 import math
 
-import numpy as np
 
 from accelerate import init_empty_weights
 from einops import rearrange
@@ -15,21 +13,17 @@ from torch import Tensor
 from torch import nn
 from transformers import (
     AutoModelForCausalLM,
-    AutoProcessor,
     AutoTokenizer,
     Mistral3ForConditionalGeneration,
-    pipeline,
     Mistral3Config,
-    AutoProcessor
+    AutoProcessor,
 )
 from tqdm import tqdm
 
 from .flux2_models import Flux2, Flux2Params, Klein4BParams, Klein9BParams
 
 from musubi_tuner.flux_2 import flux2_models
-from musubi_tuner.utils import image_utils
 from musubi_tuner.utils.safetensors_utils import load_split_weights
-from musubi_tuner.utils.train_utils import get_lin_function
 
 import logging
 
@@ -82,12 +76,15 @@ FLUX2_MODEL_INFO = {
     },
 }
 
+
 def add_model_version_args(parser: argparse.ArgumentParser):
     parser.add_argument(
-        "--model_version", type=str, default="flux.2-dev",
-        choices=list(FLUX2_MODEL_INFO.keys()), help="model version",
+        "--model_version",
+        type=str,
+        default="flux.2-dev",
+        choices=list(FLUX2_MODEL_INFO.keys()),
+        help="model version",
     )
-
 
 
 def is_fp8(dt):
@@ -99,9 +96,7 @@ def compress_time(t_ids: Tensor) -> Tensor:
     t_ids_max = torch.max(t_ids)
     t_remap = torch.zeros((t_ids_max + 1,), device=t_ids.device, dtype=t_ids.dtype)
     t_unique_sorted_ids = torch.unique(t_ids, sorted=True)
-    t_remap[t_unique_sorted_ids] = torch.arange(
-        len(t_unique_sorted_ids), device=t_ids.device, dtype=t_ids.dtype
-    )
+    t_remap[t_unique_sorted_ids] = torch.arange(len(t_unique_sorted_ids), device=t_ids.device, dtype=t_ids.dtype)
     t_ids_compressed = t_remap[t_ids]
     return t_ids_compressed
 
@@ -175,7 +170,6 @@ def encode_image_refs(ae, img_ctx: list[Image.Image]):
     return ref_tokens.to(torch.bfloat16), ref_ids
 
 
-
 def prc_txt(x: Tensor, t_coord: Tensor | None = None) -> tuple[Tensor, Tensor]:
     _l, _ = x.shape  # noqa: F841
 
@@ -242,9 +236,7 @@ batched_prc_img = batched_wrapper(prc_img)
 batched_prc_txt = batched_wrapper(prc_txt)
 
 
-def center_crop_to_multiple_of_x(
-    img: Image.Image | list[Image.Image], x: int
-) -> Image.Image | list[Image.Image]:
+def center_crop_to_multiple_of_x(img: Image.Image | list[Image.Image], x: int) -> Image.Image | list[Image.Image]:
     if isinstance(img, list):
         return [center_crop_to_multiple_of_x(_img, x) for _img in img]  # type: ignore
 
@@ -372,9 +364,7 @@ def denoise(
         img_input = img
         img_input_ids = img_ids
         if img_cond_seq is not None:
-            assert (
-                img_cond_seq_ids is not None
-            ), "You need to provide either both or neither of the sequence conditioning"
+            assert img_cond_seq_ids is not None, "You need to provide either both or neither of the sequence conditioning"
             img_input = torch.cat((img_input, img_cond_seq), dim=1)
             img_input_ids = torch.cat((img_input_ids, img_cond_seq_ids), dim=1)
         pred = model(
@@ -549,7 +539,6 @@ def load_ae(
 
 
 class Mistral3Embedder(nn.Module):
-
     def __init__(
         self,
         ckpt_path: str,
@@ -558,7 +547,6 @@ class Mistral3Embedder(nn.Module):
         disable_mmap: bool = False,
         state_dict: Optional[dict] = None,
     ) -> tuple[AutoProcessor, Mistral3ForConditionalGeneration]:
-
         super().__init__()
 
         M3_CONFIG_JSON = """
@@ -637,7 +625,7 @@ class Mistral3Embedder(nn.Module):
         if dtype is not None:
             if is_fp8(dtype):
                 logger.info(f"prepare Mistral 3 for fp8: set to {dtype}")
-                raise NotImplemented(f"Mistral 3 {dtype}")  # TODO
+                raise NotImplementedError(f"Mistral 3 {dtype}")  # TODO
             else:
                 logger.info(f"Setting Mistral 3 to dtype: {dtype}")
                 self.mistral3.to(dtype)
@@ -692,9 +680,7 @@ class Mistral3Embedder(nn.Module):
         return rearrange(out, "b c l d -> b l (c d)")
 
     @staticmethod
-    def _validate_and_process_images(
-        img: list[list[Image.Image]] | list[Image.Image]
-    ) -> list[list[Image.Image]]:
+    def _validate_and_process_images(img: list[list[Image.Image]] | list[Image.Image]) -> list[list[Image.Image]]:
         # Simple validation: ensure it's a list of PIL images or list of lists of PIL images
         if not img:
             return []
@@ -777,6 +763,7 @@ class Mistral3Embedder(nn.Module):
                 )
 
             return messages
+
 
 class Qwen3Embedder(nn.Module):
     def __init__(
@@ -885,5 +872,10 @@ def load_textembedder(
     else:
         variant = FLUX2_MODEL_INFO[model_version]["qwen_variant"]
         return Qwen3Embedder(
-            f"Qwen/Qwen3-{variant}-FP8", ckpt_path, dtype, device, disable_mmap, state_dict,
+            f"Qwen/Qwen3-{variant}-FP8",
+            ckpt_path,
+            dtype,
+            device,
+            disable_mmap,
+            state_dict,
         )
