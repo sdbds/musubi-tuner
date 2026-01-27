@@ -19,6 +19,7 @@ from musubi_tuner.dataset.image_video_dataset import (
     ARCHITECTURE_FLUX_2_DEV,
     ARCHITECTURE_FLUX_2_KLEIN_4B,
     ARCHITECTURE_FLUX_2_KLEIN_9B,
+    ARCHITECTURE_LONGCAT,
     ARCHITECTURE_KANDINSKY5,
     ARCHITECTURE_Z_IMAGE,
 )
@@ -83,6 +84,7 @@ ARCH_QWEN_IMAGE_EDIT = "Qwen-Image-Edit"
 ARCH_QWEN_IMAGE_EDIT_PLUS = "Qwen-Image-Edit-Plus"
 ARCH_QWEN_IMAGE_EDIT_2511 = "Qwen-Image-Edit-2511"
 CUSTOM_ARCH_QWEN_IMAGE_EDIT_PLUS = "@@Qwen-Image-Edit-Plus@@"  # special custom architecture name for Qwen-Image-Edit-Plus
+CUSTOM_ARCH_LONGCAT = "LongCat-Video"
 CUSTOM_ARCH_QWEN_IMAGE_EDIT_2511 = "@@Qwen-Image-Edit-2511@@"  # special custom architecture name for Qwen-Image-Edit-2511
 ARCH_QWEN_IMAGE_LAYERED = "Qwen-Image-Layered"
 ARCH_KANDINSKY5 = "Kandinsky-5"
@@ -98,6 +100,7 @@ IMPL_FLUX_KONTEXT = "https://github.com/black-forest-labs/flux"
 IMPL_FLUX_2 = "https://github.com/black-forest-labs/flux2"
 IMPL_QWEN_IMAGE = "https://github.com/QwenLM/Qwen-Image"
 IMPL_QWEN_IMAGE_EDIT = IMPL_QWEN_IMAGE
+IMPL_LONGCAT = "https://github.com/meituan-longcat/LongCat-Video"
 IMPL_QWEN_IMAGE_LAYERED = "https://github.com/QwenLM/Qwen-Image-Layered"
 IMPL_KANDINSKY5 = "https://github.com/kandinskylab/kandinsky-5"
 IMPL_HUNYUAN_VIDEO_1_5 = "https://github.com/Tencent-Hunyuan/HunyuanVideo-1.5"
@@ -201,6 +204,9 @@ def build_metadata(
             custom_arch = None  # clear custom_arch to avoid override later
         else:
             arch = ARCH_QWEN_IMAGE_EDIT  # override with custom_arch later
+    elif architecture == ARCHITECTURE_LONGCAT:
+        arch = CUSTOM_ARCH_LONGCAT
+        impl = IMPL_LONGCAT
     elif architecture == ARCHITECTURE_QWEN_IMAGE_LAYERED:
         arch = ARCH_QWEN_IMAGE_LAYERED
         impl = IMPL_QWEN_IMAGE_LAYERED

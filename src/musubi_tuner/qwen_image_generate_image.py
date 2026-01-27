@@ -104,7 +104,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="path to mask image for Qwen-Image or Qwen-Image-Edit, white for inpainting region",
     )
-    parser.add_argument("--resize_control_to_image_size", action="store_true", help="resize control image to match image size")
+    parser.add_argument(
+        "--resize_control_to_image_size",
+        action="store_true",
+        help="resize control image to match image size, image for VLM is not resized",
+    )
+    parser.add_argument("--no_control_for_vlm", action="store_true", help="do not use control image for VLM")
     parser.add_argument(
         "--resize_control_to_official_size",
         action="store_true",
@@ -472,8 +477,14 @@ def prepare_image_inputs(
 
         for path in args.control_image_path:
             control_image_tensor, control_image_np, _ = qwen_image_utils.preprocess_control_image(
-                path, args.resize_control_to_official_size, (width, height) if args.resize_control_to_image_size else None
+                path,
+                args.resize_control_to_official_size,
+                resize_size=(width, height) if args.resize_control_to_image_size else None,
+                cond_resize_size=None,  # use default size for VLM
             )
+            print(f"Control image shape for VAE: {control_image_tensor.shape}, for VLM: {control_image_np.shape}")
+            if args.no_control_for_vlm:
+                control_image_np = None
             if not args.is_layered:
                 # drop alpha channel for non-layered model
                 control_image_tensor = control_image_tensor[:, :3]
