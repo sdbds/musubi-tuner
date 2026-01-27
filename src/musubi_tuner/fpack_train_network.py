@@ -31,6 +31,8 @@ from musubi_tuner.hv_train_network import (
 
 import logging
 
+from musubi_tuner.utils import model_utils
+
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
@@ -501,8 +503,19 @@ class FramePackNetworkTrainer(NetworkTrainer):
     ):
         logger.info(f"Loading DiT model from {dit_path}")
         device = accelerator.device
-        model = load_packed_model(device, dit_path, attn_mode, loading_device, args.fp8_scaled, split_attn)
+        model = load_packed_model(
+            device, dit_path, attn_mode, loading_device, args.fp8_scaled, split_attn, disable_numpy_memmap=args.disable_numpy_memmap
+        )
         return model
+
+    def compile_transformer(self, args, transformer):
+        transformer: HunyuanVideoTransformer3DModelPacked = transformer
+        return model_utils.compile_transformer(
+            args,
+            transformer,
+            [transformer.transformer_blocks, transformer.single_transformer_blocks],
+            disable_linear=self.blocks_to_swap > 0,
+        )
 
     def scale_shift_latents(self, latents):
         # FramePack VAE includes scaling
@@ -594,7 +607,7 @@ def framepack_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argument
     parser.add_argument(
         "--vae_spatial_tile_sample_min_size", type=int, default=None, help="spatial tile sample min size for VAE, default 256"
     )
-    parser.add_argument("--image_encoder", type=str, required=True, help="Image encoder (CLIP) checkpoint path or directory")
+    parser.add_argument("--image_encoder", type=str, default=None, help="Image encoder (CLIP) checkpoint path or directory")
     parser.add_argument("--latent_window_size", type=int, default=9, help="FramePack latent window size (default 9)")
     parser.add_argument("--bulk_decode", action="store_true", help="decode all frames at once in sample generation")
     parser.add_argument("--f1", action="store_true", help="Use F1 sampling method for sample generation")

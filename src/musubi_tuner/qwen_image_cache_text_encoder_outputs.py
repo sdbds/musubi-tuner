@@ -12,6 +12,7 @@ from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitize
 from musubi_tuner.dataset.image_video_dataset import (
     ARCHITECTURE_QWEN_IMAGE,
     ARCHITECTURE_QWEN_IMAGE_EDIT,
+    ARCHITECTURE_QWEN_IMAGE_LAYERED,
     ItemInfo,
     save_text_encoder_output_cache_qwen_image,
 )
@@ -29,7 +30,7 @@ def encode_and_save_batch(
     tokenizer: Qwen2Tokenizer,
     text_encoder: Qwen2_5_VLForConditionalGeneration,
     vl_processor: Optional[Qwen2VLProcessor],
-    mode: Optional[str],
+    model_version: Optional[str],
     batch: list[ItemInfo],
     device: torch.device,
     accelerator: Optional[accelerate.Accelerator],
@@ -42,10 +43,12 @@ def encode_and_save_batch(
     if is_edit:
         images = []
         for item in batch:
-            # item.control_content: list of images (H, W, C), optional
-            assert item.control_content is not None and len(item.control_content) > 0, (
-                f"Item {item.item_key} must have control content for Qwen-Image-Edit"
-            )
+            # item.control_content: list of images (H, W, C), optional (but should be provided for Qwen-Image-Edit)
+            if item.control_content is None or len(item.control_content) == 0:
+                # all item should have same number of control images
+                logger.warning(f"Item {item.item_key} has no control content for Qwen-Image-Edit, saving without control images.")
+                continue
+
             # item.control_content, list of np.ndarray, 0-255
             control_content = []
             for cc in item.control_content:
@@ -59,33 +62,36 @@ def encode_and_save_batch(
                 control_content.append(cc)
 
             images.append(control_content)  # vl_processor accepts PIL.Image and np.ndarray
+
+        if len(images) == 0:
+            images = None
     else:
         images = None
 
     for i, item in enumerate(batch):
         print(
-            f"Item {i}: {item.item_key}, prompt: {item.caption}, control images: {[im.shape for im in images[i]] if images is not None else None}"
+            f"Item {i}: {item.item_key}, prompt: {item.caption}, control images: {[im.shape for im in images[i] if im is not None] if images is not None else None}"
         )
 
     # encode prompt
     with torch.no_grad():
         if accelerator is not None:
             with accelerator.autocast():
-                if not is_edit:
+                if images is None:  # no control images
                     embed, mask = qwen_image_utils.get_qwen_prompt_embeds(tokenizer, text_encoder, prompts)
                 else:
                     embed, mask = qwen_image_utils.get_qwen_prompt_embeds_with_image(
-                        vl_processor, text_encoder, prompts, images, mode=mode
+                        vl_processor, text_encoder, prompts, images, model_version=model_version
                     )
                 if embed.dtype == torch.float8_e4m3fn:  # T5 returns bf16, but QwenVL-2.5 returns fp8
                     embed = embed.to(torch.bfloat16)
 
         else:
-            if not is_edit:
+            if images is None:  # no control images
                 embed, mask = qwen_image_utils.get_qwen_prompt_embeds(tokenizer, text_encoder, prompts)
             else:
                 embed, mask = qwen_image_utils.get_qwen_prompt_embeds_with_image(
-                    vl_processor, text_encoder, prompts, images, mode=mode
+                    vl_processor, text_encoder, prompts, images, model_version=model_version
                 )
 
     # save prompt cache
@@ -100,8 +106,7 @@ def main():
     parser = qwen_image_setup_parser(parser)
 
     args = parser.parse_args()
-    is_edit = args.edit or args.edit_plus
-    mode = None if not is_edit else ("edit" if args.edit else "edit-plus")
+    qwen_image_utils.resolve_model_version_args(args)
 
     device = args.device if args.device is not None else "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(device)
@@ -110,7 +115,12 @@ def main():
     blueprint_generator = BlueprintGenerator(ConfigSanitizer())
     logger.info(f"Load dataset config from {args.dataset_config}")
     user_config = config_utils.load_user_config(args.dataset_config)
-    architecture = ARCHITECTURE_QWEN_IMAGE_EDIT if is_edit else ARCHITECTURE_QWEN_IMAGE
+    if args.is_edit:
+        architecture = ARCHITECTURE_QWEN_IMAGE_EDIT
+    elif args.is_layered:
+        architecture = ARCHITECTURE_QWEN_IMAGE_LAYERED
+    else:
+        architecture = ARCHITECTURE_QWEN_IMAGE
     blueprint = blueprint_generator.generate(user_config, args, architecture=architecture)
     train_dataset_group = config_utils.generate_dataset_group_by_blueprint(blueprint.dataset_group)
 
@@ -132,7 +142,7 @@ def main():
     )
 
     # Load Qwen2VLProcessor
-    if is_edit:
+    if args.is_edit:
         logger.info("Loading Qwen2.5-VL Processor for Edit")
         vl_processor = qwen_image_utils.load_vl_processor()
     else:
@@ -142,8 +152,8 @@ def main():
     logger.info("Encoding with Qwen2.5-VL")
 
     def encode_for_text_encoder(batch: list[ItemInfo]):
-        nonlocal tokenizer, text_encoder, vl_processor, device, accelerator, mode
-        encode_and_save_batch(tokenizer, text_encoder, vl_processor, mode, batch, device, accelerator)
+        nonlocal tokenizer, text_encoder, vl_processor, device, accelerator, args
+        encode_and_save_batch(tokenizer, text_encoder, vl_processor, args.model_version, batch, device, accelerator)
 
     cache_text_encoder_outputs.process_text_encoder_batches(
         args.num_workers,
@@ -153,7 +163,7 @@ def main():
         all_cache_files_for_dataset,
         all_cache_paths_for_dataset,
         encode_for_text_encoder,
-        requires_content=is_edit,
+        requires_content=args.is_edit,
     )
     del text_encoder
 
@@ -166,9 +176,7 @@ def main():
 def qwen_image_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--text_encoder", type=str, default=None, required=True, help="Text Encoder (Qwen2.5-VL) checkpoint path")
     parser.add_argument("--fp8_vl", action="store_true", help="use fp8 for Text Encoder model")
-    parser.add_argument("--edit", action="store_true", help="cache Text Encoder outputs for Qwen-Image-Edit")
-    parser.add_argument("--edit_plus", action="store_true", help="cache for Qwen-Image-Edit-2509 (with multiple control images)")
-
+    qwen_image_utils.add_model_version_args(parser)
     return parser
 
 

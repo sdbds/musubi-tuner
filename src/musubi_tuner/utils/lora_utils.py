@@ -14,7 +14,12 @@ logging.basicConfig(level=logging.INFO)
 
 
 from musubi_tuner.modules.fp8_optimization_utils import load_safetensors_with_fp8_optimization
-from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen
+from musubi_tuner.utils.safetensors_utils import (
+    MemoryEfficientSafeOpen,
+    TensorWeightAdapter,
+    WeightTransformHooks,
+    get_split_weight_filenames,
+)
 
 
 def filter_lora_state_dict(
@@ -47,7 +52,7 @@ def filter_lora_state_dict(
 
 def load_safetensors_with_lora_and_fp8(
     model_files: Union[str, List[str]],
-    lora_weights_list: Optional[Dict[str, torch.Tensor]],
+    lora_weights_list: Optional[List[Dict[str, torch.Tensor]]],
     lora_multipliers: Optional[List[float]],
     fp8_optimization: bool,
     calc_device: torch.device,
@@ -55,19 +60,23 @@ def load_safetensors_with_lora_and_fp8(
     dit_weight_dtype: Optional[torch.dtype] = None,
     target_keys: Optional[List[str]] = None,
     exclude_keys: Optional[List[str]] = None,
+    disable_numpy_memmap: bool = False,
+    weight_transform_hooks: Optional[WeightTransformHooks] = None,
 ) -> dict[str, torch.Tensor]:
     """
     Merge LoRA weights into the state dict of a model with fp8 optimization if needed.
 
     Args:
         model_files (Union[str, List[str]]): Path to the model file or list of paths. If the path matches a pattern like `00001-of-00004`, it will load all files with the same prefix.
-        lora_weights_list (Optional[Dict[str, torch.Tensor]]): Dictionary of LoRA weight tensors to load.
+        lora_weights_list (Optional[List[Dict[str, torch.Tensor]]]): List of dictionaries of LoRA weight tensors to load.
         lora_multipliers (Optional[List[float]]): List of multipliers for LoRA weights.
         fp8_optimization (bool): Whether to apply FP8 optimization.
         calc_device (torch.device): Device to calculate on.
         move_to_device (bool): Whether to move tensors to the calculation device after loading.
         target_keys (Optional[List[str]]): Keys to target for optimization.
         exclude_keys (Optional[List[str]]): Keys to exclude from optimization.
+        disable_numpy_memmap (bool): Whether to disable numpy memmap when loading safetensors.
+        weight_transform_hooks (Optional[WeightTransformHooks]): Hooks for transforming weights during loading.
     """
 
     # if the file name ends with 00001-of-00004 etc, we need to load the files with the same prefix
@@ -76,19 +85,9 @@ def load_safetensors_with_lora_and_fp8(
 
     extended_model_files = []
     for model_file in model_files:
-        basename = os.path.basename(model_file)
-        match = re.match(r"^(.*?)(\d+)-of-(\d+)\.safetensors$", basename)
-        if match:
-            prefix = basename[: match.start(2)]
-            count = int(match.group(3))
-            state_dict = {}
-            for i in range(count):
-                filename = f"{prefix}{i + 1:05d}-of-{count:05d}.safetensors"
-                filepath = os.path.join(os.path.dirname(model_file), filename)
-                if os.path.exists(filepath):
-                    extended_model_files.append(filepath)
-                else:
-                    raise FileNotFoundError(f"File {filepath} not found")
+        split_filenames = get_split_weight_filenames(model_file)
+        if split_filenames is not None:
+            extended_model_files.extend(split_filenames)
         else:
             extended_model_files.append(model_file)
     model_files = extended_model_files
@@ -200,6 +199,8 @@ def load_safetensors_with_lora_and_fp8(
         target_keys,
         exclude_keys,
         weight_hook=weight_hook,
+        disable_numpy_memmap=disable_numpy_memmap,
+        weight_transform_hooks=weight_transform_hooks,
     )
 
     for lora_weight_keys in list_of_lora_weight_keys:
@@ -221,6 +222,8 @@ def load_safetensors_with_fp8_optimization_and_hook(
     target_keys: Optional[List[str]] = None,
     exclude_keys: Optional[List[str]] = None,
     weight_hook: callable = None,
+    disable_numpy_memmap: bool = False,
+    weight_transform_hooks: Optional[WeightTransformHooks] = None,
 ) -> dict[str, torch.Tensor]:
     """
     Load state dict from safetensors files and merge LoRA weights into the state dict with fp8 optimization if needed.
@@ -231,7 +234,14 @@ def load_safetensors_with_fp8_optimization_and_hook(
         )
         # dit_weight_dtype is not used because we use fp8 optimization
         state_dict = load_safetensors_with_fp8_optimization(
-            model_files, calc_device, target_keys, exclude_keys, move_to_device=move_to_device, weight_hook=weight_hook
+            model_files,
+            calc_device,
+            target_keys,
+            exclude_keys,
+            move_to_device=move_to_device,
+            weight_hook=weight_hook,
+            disable_numpy_memmap=disable_numpy_memmap,
+            weight_transform_hooks=weight_transform_hooks,
         )
     else:
         logger.info(
@@ -239,7 +249,8 @@ def load_safetensors_with_fp8_optimization_and_hook(
         )
         state_dict = {}
         for model_file in model_files:
-            with MemoryEfficientSafeOpen(model_file) as f:
+            with MemoryEfficientSafeOpen(model_file, disable_numpy_memmap=disable_numpy_memmap) as original_f:
+                f = TensorWeightAdapter(weight_transform_hooks, original_f) if weight_transform_hooks is not None else original_f
                 for key in tqdm(f.keys(), desc=f"Loading {os.path.basename(model_file)}", leave=False):
                     if weight_hook is None and move_to_device:
                         value = f.get_tensor(key, device=calc_device, dtype=dit_weight_dtype)

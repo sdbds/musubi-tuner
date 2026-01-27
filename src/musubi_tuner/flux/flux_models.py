@@ -709,12 +709,11 @@ class DoubleStreamBlock(nn.Module):
         txt_attn, img_attn = attn[:, : txt.shape[1]], attn[:, txt.shape[1] :]
 
         # calculate the img blocks
-        img = img + img_mod1.gate * self.img_attn.proj(img_attn)
-        img = img + img_mod2.gate * self.img_mlp((1 + img_mod2.scale) * self.img_norm2(img) + img_mod2.shift)
-
+        img = torch.addcmul(img, img_mod1.gate, self.img_attn.proj(img_attn))
+        img = torch.addcmul(img, img_mod2.gate, self.img_mlp((1 + img_mod2.scale) * self.img_norm2(img) + img_mod2.shift))
         # calculate the txt blocks
-        txt = txt + txt_mod1.gate * self.txt_attn.proj(txt_attn)
-        txt = txt + txt_mod2.gate * self.txt_mlp((1 + txt_mod2.scale) * self.txt_norm2(txt) + txt_mod2.shift)
+        txt = torch.addcmul(txt, txt_mod1.gate, self.txt_attn.proj(txt_attn))
+        txt = torch.addcmul(txt, txt_mod2.gate, self.txt_mlp((1 + txt_mod2.scale) * self.txt_norm2(txt) + txt_mod2.shift))
         return img, txt
 
     def forward(
@@ -790,7 +789,7 @@ class SingleStreamBlock(nn.Module):
 
         # compute activation in mlp stream, cat again and run second linear layer
         output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))
-        return x + mod.gate * output
+        return torch.addcmul(x, mod.gate, output)
 
     def forward(self, x: Tensor, vec: Tensor, pe: Tensor, control_lengths: Optional[list[int]] = None) -> Tensor:
         if self.training and self.gradient_checkpointing:
@@ -954,7 +953,7 @@ class Flux(nn.Module):
 
         print("FLUX: Gradient checkpointing disabled.")
 
-    def enable_block_swap(self, num_blocks: int, device: torch.device, supports_backward: bool):
+    def enable_block_swap(self, num_blocks: int, device: torch.device, supports_backward: bool, use_pinned_memory: bool = False):
         self.blocks_to_swap = num_blocks
         double_blocks_to_swap = num_blocks // 2
         single_blocks_to_swap = (num_blocks - double_blocks_to_swap) * 2 + 1
@@ -965,10 +964,10 @@ class Flux(nn.Module):
         )
 
         self.offloader_double = ModelOffloader(
-            "double", self.double_blocks, self.num_double_blocks, double_blocks_to_swap, supports_backward, device  # , debug=True
+            "double", self.double_blocks, self.num_double_blocks, double_blocks_to_swap, supports_backward, device, use_pinned_memory  # , debug=True
         )
         self.offloader_single = ModelOffloader(
-            "single", self.single_blocks, self.num_single_blocks, single_blocks_to_swap, supports_backward, device  # , debug=True
+            "single", self.single_blocks, self.num_single_blocks, single_blocks_to_swap, supports_backward, device, use_pinned_memory  # , debug=True
         )
         print(
             f"FLUX: Block swap enabled. Swapping {num_blocks} blocks, double blocks: {double_blocks_to_swap}, single blocks: {single_blocks_to_swap}."

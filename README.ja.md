@@ -38,7 +38,7 @@
 
 ## はじめに
 
-このリポジトリは、HunyuanVideo、Wan2.1/2.2、FramePack、FLUX.1 Kontext、Qwen-ImageのLoRA学習用のコマンドラインツールです。このリポジトリは非公式であり、公式のHunyuanVideo、Wan2.1/2.2、FramePack、FLUX.1 Kontext、Qwen-Imageのリポジトリとは関係ありません。
+このリポジトリは、HunyuanVideo、Wan2.1/2.2、FramePack、FLUX.1 Kontext、FLUX.2 dev/klein、Qwen-Image、Z-ImageのLoRA学習用のコマンドラインツールです。このリポジトリは非公式であり、それらの公式リポジトリとは関係ありません。
 
 *リポジトリは開発中です。*
 
@@ -58,47 +58,38 @@
 
 GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
-- 2025/10/13
-    - Qwen-Image-Edit、2509の推論スクリプトで、ピクセル単位での生成画像の一貫性を向上するReference Consistency Mask (RCM)機能を追加しました。[PR #643]
-    (https://github.com/kohya-ss/musubi-tuner/pull/643)
-        - RCMは、生成画像が制御画像と比較してわずかな位置ずれを起こす問題を解決します。詳細は[Qwen-Imageのドキュメント](./docs/qwen_image.md#inpainting-and-reference-consistency-mask-rcm)を参照してください。
-    - あわせて同PRにて `--resize_control_to_image_size` オプションが指定されていない場合でも、コントロール画像が出力画像と同じサイズにリサイズされてしまう不具合を修正しました。**生成画像が変化する可能性がありますので、オプションを確認してください。** 
-    - FramePackの1フレーム推論で、`--one_frame_auto_resize`オプションを追加しました。[PR #646](https://github.com/kohya-ss/musubi-tuner/pull/646)
-        - 生成画像の解像度を自動的に調整します。`--one_frame_inference`を指定した場合にのみ有効です。詳細は[FramePackの1フレーム推論のドキュメント](./docs/framepack_1f.md#one-single-frame-inference--1フレーム推論)を参照してください。
+- 2026/01/24
+    - FLUX.2 [klein]のLoRA学習が動かなかったのを修正しました。またFLUX.2に関する各種の不具合修正、機能追加を行いました。[PR #858](https://github.com/kohya-ss/musubi-tuner/pull/858)
+        - `--model_version`の指定は`flux.2-dev`や`flux.2-klein-4b`等から、`dev`や`klein-4b`等に変更されました。
+        - fp8最適化なども動作します。詳細は[ドキュメント](./docs/flux_2.md)を参照してください。
+        - klein 9B、devモデル、および複数枚の制御画像を用いた学習は十分にテストされていないため、不具合があればIssueで報告してください。
 
-- 2025/10/05
-    - エポックの切替をcollate_fnからDataLoaderの取得ループ開始前に変更しました。[PR #601](https://github.com/kohya-ss/musubi-tuner/pull/601)
-    - これまでの実装ではエポックの最初のデータ取得後に、ARBバケットがシャッフルされます。そのため、エポックの最初のデータは前エポックのARBソート順で取得されます。これによりエポック内でデータの重複や欠落が起きていました。
-    - 各DataSetでは`__getitem__`で共有エポックの変化を検知した直後にARBバケットをシャッフルします。これにより先頭サンプルから新しい順序で取得され、重複・欠落は解消されます。
-    - シャッフルタイミングが前倒しになったため、同一シードでも旧実装と同一のサンプル順序にはなりません
-    - **学習全体への影響**
-        - この修正はエポック境界における先頭サンプルの取り違いを解消するものです。複数エポックで見れば、各サンプルは最終的に欠落・重複なく使用されるため、学習全体に与える影響は軽微です。変更点は「エポック内の消費順序の整合性」を高めるものであり、長期的な学習挙動は同条件では実質的に変わりません（※極端に少ないエポック数や早期打ち切りの場合は順序による差異が観測される可能性があります）。
+- 2026/01/21
+    - FLUX.2 [dev]/[klein]のLoRA学習に対応しました。[PR #841](https://github.com/kohya-ss/musubi-tuner/pull/841) https://www.scenario.com のchristopher5106氏に深く感謝します。
+        - 詳細は[ドキュメント](./docs/flux_2.md)を参照してください。
 
-    - [高度な設定のドキュメント](./docs/advanced_config.md#using-configuration-files-to-specify-training-options--設定ファイルを使用した学習オプションの指定)に、学習時のオプションを設定ファイルで指定する方法を追加しました。[PR #630](https://github.com/kohya-ss/musubi-tuner/pull/630)
-    - ドキュメント構成を整理しました。データセット設定に関するドキュメントを`docs/dataset_config.md`に移動しました。
+- 2026/01/17
+    - Z-ImageのComfyUI向けのLoRA変換について、互換性向上のため `convert_lora.py` を使用するように変更しました。[PR #851](https://github.com/kohya-ss/musubi-tuner/pull/851)
+        - 以前の `convert_z_image_lora_to_comfy.py` も引き続き使用可能ですが、nunchakuで正しく動作しない可能性があります。
+        - 詳細は[ドキュメント](./docs/zimage.md#converting-lora-weights-to-diffusers-format-for-comfyui--lora重みをcomfyuiで使用可能なdiffusers形式に変換する)を参照してください。
+        - [Issue #847](https://github.com/kohya-ss/musubi-tuner/issues/847) で解決策を提供してくださったfai-9氏に感謝します。
+    - Qwen-Image-LayeredのLoRA学習で、元画像を学習対象から除外するオプション `--remove_first_image_from_target` を追加しました。[PR #852](https://github.com/kohya-ss/musubi-tuner/pull/852)
+        - 詳細は[ドキュメント](./docs/qwen_image.md#lora-training--lora学習)を参照してください。
 
-- 2025/10/03
-    - 各学習スクリプトで用いられているblock swap機構を改善し、Windows環境における共有GPUメモリの使用量を大きく削減しました。[PR #585](https://github.com/kohya-ss/musubi-tuner/pull/585)
-        - block swapのoffload先を共有GPUメモリからCPUメモリに変更しました。これによりトータルでのメモリ使用量は変わりませんが、共有GPUメモリの使用量が大幅に削減されます。
-        - たとえば32GBのメインメモリでは、offloadできるのは16GBまででしたが、今回の変更により「32GB-他の使用量」までoffloadできるようになります。
-        - 学習速度はわずかに低下します。技術的詳細は[PR #585](https://github.com/kohya-ss/musubi-tuner/pull/585)を参照してください。
+- 2026/01/11
+    - Qwen-Image-LayeredのLoRA学習に対応しました。[PR #816](https://github.com/kohya-ss/musubi-tuner/pull/816)
+        - 詳細は[ドキュメント](./docs/qwen_image.md)を参照してください。
+        - キャッシュ作成、学習、推論の各スクリプトで、`--model_version` オプションに `layered` を指定してください。
 
-- 2025/09/30
-    - Qwen-Image-Edit-2509のLoRA学習で複数枚の制御画像を正しく取り扱えない不具合を修正しました。[PR #612](https://github.com/kohya-ss/musubi-tuner/pull/612)
+- 2025/12/27
+    - Qwen-Image-Edit-2511に対応しました。[PR #808](https://github.com/kohya-ss/musubi-tuner/pull/808)
+        - チェックポイントやオプションの詳細など、詳細は[ドキュメント](./docs/qwen_image.md)を参照してください。
+        - キャッシュ作成、学習、推論の各スクリプトで、`--model_version` オプションに `edit-2511` を指定してください。
 
-- 2025/09/28
-    - [Qwen-Image-Edit-2509](https://github.com/QwenLM/Qwen-Image)の学習、推論に対応しました。[PR #590](https://github.com/kohya-ss/musubi-tuner/pull/590) 詳細は[Qwen-Imageのドキュメント](./docs/qwen_image.md)を参照してください。
-        - 複数枚の制御画像を同時に使用できます。Qwen-Image-Edit-2509公式では3枚までですが、Musubi Tunerでは任意の枚数を指定できます（正しく動作するのは3枚までです）。
-        - DiTモデルの重みが異なるほか、キャッシュ、学習、推論の各スクリプトに、`--edit_plus`オプションが追加されています。
-
-- 2025/09/24
-    - Wan2.2のLoRA学習および推論スクリプトに`--force_v2_1_time_embedding`オプションを追加しました。[PR #586](https://github.com/kohya-ss/musubi-tuner/pull/586) このオプションを指定することでVRAM使用量を削減できます。詳細は[Wanのドキュメント](./docs/wan.md#training--学習)を参照してください。
-    
-- 2025/09/23
-    - `--fp8_scaled`オプションを指定した時の量子化方法を、per-tensorからblock-wise scalingに変更しました。[PR #575](https://github.com/kohya-ss/musubi-tuner/pull/575) [Discussion #564](https://github.com/kohya-ss/musubi-tuner/discussions/564)も参照してください。
-        - これによりFP8量子化の精度が向上し、各モデル（HunyuanVideoを除く）学習の安定、推論精度の向上が期待できます。学習、推論速度はわずかに低下します。
-        - Qwen-ImageのLoRA学習では、量子化対象モジュールの見直しにより、学習に必要なVRAMが5GB程度削減されます。
-        - 詳細は[高度な設定のドキュメント](./docs/advanced_config.md#fp8-weight-optimization-for-models--モデルの重みのfp8への最適化)を参照してください。
+- 2025/12/25
+    - Kandinsky 5のLoRA学習に対応しました。[PR #774](https://github.com/kohya-ss/musubi-tuner/pull/774) AkaneTendo25氏に深く感謝します。
+        - 詳細は[ドキュメント](./docs/kandinsky5.md)を参照してください。
+        - **重みの指定が一部、Hugging FaceのID形式になっています。近日中に（他のモデルと同様の）*.safetensorsの直接指定方式に変更予定ですのでご注意ください。**
 
 ### リリースについて
 
@@ -114,8 +105,8 @@ Musubi Tunerの解説記事執筆や、関連ツールの開発に取り組ん�
 
 **セットアップ手順:**
 
-1.  プロジェクトのルートに `CLAUDE.md` や `GEMINI.md` ファイルを作成します。
-2.  `CLAUDE.md` に以下の行を追加して、リポジトリが推奨するプロンプトをインポートします（現在、両者はほぼ同じ内容です）：
+1.  プロジェクトのルートに `CLAUDE.md` や `GEMINI.md`、`AGENTS.md` ファイルを作成します。
+2.  `CLAUDE.md` 等に以下の行を追加して、リポジトリが推奨するプロンプトをインポートします（現在、両者はほぼ同じ内容です）：
 
     ```markdown
     @./.ai/claude.prompt.md
@@ -127,9 +118,11 @@ Musubi Tunerの解説記事執筆や、関連ツールの開発に取り組ん�
     @./.ai/gemini.prompt.md
     ```
 
+    他のエージェント向けの設定ファイルでもそれぞれの方法でインポートしてください。
+
 3.  インポートした行の後に、必要な指示を適宜追加してください（例：`Always respond in Japanese.`）。
 
-このアプローチにより、共有されたプロジェクトのコンテキストを活用しつつ、エージェントに与える指示を各ユーザーが自由に制御できます。`CLAUDE.md` と `GEMINI.md` はすでに `.gitignore` に記載されているため、リポジトリにコミットされることはありません。
+このアプローチにより、共有されたプロジェクトのコンテキストを活用しつつ、エージェントに与える指示を各ユーザーが自由に制御できます。`CLAUDE.md`、`GEMINI.md` および `AGENTS.md` （またClaude用の `.mcp.json`）はすでに `.gitignore` に記載されているため、リポジトリにコミットされることはありません。
 
 ## 概要
 
@@ -157,12 +150,17 @@ Musubi Tunerの解説記事執筆や、関連ツールの開発に取り組ん�
 - [FramePack (1フレーム推論)](./docs/framepack_1f.md)
 - [FLUX.1 Kontext](./docs/flux_kontext.md)
 - [Qwen-Image](./docs/qwen_image.md)
+- [Z-Image](./docs/zimage.md)
+- [HunyuanVideo 1.5](./docs/hunyuan_video_1_5.md)
+- [Kandinsky 5](./docs/kandinsky5.md)
+- [FLUX.2](./docs/flux_2.md)
 
 **共通設定・その他:**
 - [データセット設定](./docs/dataset_config.md)
 - [高度な設定](./docs/advanced_config.md)
 - [学習中のサンプル生成](./docs/sampling_during_training.md)
 - [ツールとユーティリティ](./docs/tools.md)
+- [torch.compileの使用方法](./docs/torch_compile.md)
 
 ## インストール
 

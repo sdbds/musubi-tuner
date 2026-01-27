@@ -41,9 +41,9 @@
 
 ## Introduction
 
-This repository provides scripts for training LoRA (Low-Rank Adaptation) models with HunyuanVideo, Wan2.1/2.2, FramePack, FLUX.1 Kontext, and Qwen-Image architectures. 
+This repository provides scripts for training LoRA (Low-Rank Adaptation) models with HunyuanVideo, Wan2.1/2.2, FramePack, FLUX.1 Kontext, FLUX.2 dev/klein, Qwen-Image, and Z-Image architectures. 
 
-This repository is unofficial and not affiliated with the official HunyuanVideo/Wan2.1/2.2/FramePack/FLUX.1 Kontext/Qwen-Image repositories.
+This repository is unofficial and not affiliated with the official repositories of these architectures.
 
 *This repository is under development.*
 
@@ -63,46 +63,38 @@ If you find this project helpful, please consider supporting its development via
 
 GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
-- October 13, 2025
-    - Added Reference Consistency Mask (RCM) feature to Qwen-Image-Edit, 2509 inference script to improve pixel-level consistency of generated images. See [PR #643](https://github.com/kohya-ss/musubi-tuner/pull/643)
-        - RCM addresses the issue of slight positional drift in generated images compared to the control image. For details, refer to the [Qwen-Image documentation](./docs/qwen_image.md#inpainting-and-reference-consistency-mask-rcm).
-    - Fixed a bug where the control image was being resized to match the output image size even when the `--resize_control_to_image_size` option was not specified. **This may change the generated images, so please check your options.**
-    - FramePack 1-frame inference now includes the `--one_frame_auto_resize` option. [PR #646](https://github.com/kohya-ss/musubi-tuner/pull/646)
-        - Automatically adjusts the resolution of the generated image. This option is only effective when `--one_frame_inference` is specified. For details, refer to the [FramePack 1-frame inference documentation](./docs/framepack_1f.md#one-single-frame-inference--1フレーム推論).
-        
-- October 5, 2025
-    - Changed the epoch switching from `collate_fn` to before the start of the DataLoader fetching loop. See [PR #601](https://github.com/kohya-ss/musubi-tuner/pull/601) for more details.
-    - In the previous implementation, the ARB buckets were shuffled after fetching the first data of the epoch. Therefore, the first data of the epoch was fetched in the ARB sorted order of the previous epoch. This caused duplication and omission of data within the epoch.
-    - Each DataSet now shuffles the ARB buckets immediately after detecting a change in the shared epoch in `__getitem__`. This ensures that data is fetched in the new order from the beginning, eliminating duplication and omission.
-    - Since the shuffle timing has been moved forward, the sample order will not be the same as the old implementation even with the same seed.
-    - **Impact on overall training**:
-        - This fix addresses the issue of incorrect fetching of the first sample at epoch boundaries. Since each sample is ultimately used without omission or duplication over multiple epochs, the overall impact on training is minimal. The change primarily enhances "consistency in consumption order within an epoch," and the long-term training behavior remains practically unchanged under the same conditions (※ there may be observable differences in cases of extremely few epochs or early stopping).
+- January 24, 2026
+    - Fixed an issue where LoRA training for FLUX.2 [klein] did not work. Also made various bug fixes and feature additions related to FLUX.2. See [PR #858](https://github.com/kohya-ss/musubi-tuner/pull/858).
+        - The `--model_version` specification has changed from `flux.2-dev` or `flux.2-klein-4b` to `dev` or `klein-4b`, etc.
+        - fp8 optimization and other features also work. Please refer to the [documentation](./docs/flux_2.md) for details.
+        - Since klein 9B, dev models, and training with multiple control images have not been sufficiently tested, please report any issues via Issue.
 
-    - Added a method to specify training options in a configuration file in the [Advanced Configuration documentation](./docs/advanced_config.md#using-configuration-files-to-specify-training-options--設定ファイルを使用した学習オプションの指定). See [PR #630](https://github.com/kohya-ss/musubi-tuner/pull/630).
-    - Restructured the documentation. Moved dataset configuration-related documentation to `docs/dataset_config.md`.
+- January 21, 2026
+    - Added support for LoRA training of FLUX.2 [dev]/[klein]. See [PR #841](https://github.com/kohya-ss/musubi-tuner/pull/841). Many thanks to christopher5106 from https://www.scenario.com for this contribution.
+        - Please refer to the [documentation](./docs/flux_2.md) for details.
 
-- October 3, 2025
-    - Improved the block swap mechanism used in each training script to significantly reduce shared GPU memory usage in Windows environments. See [PR #585](https://github.com/kohya-ss/musubi-tuner/pull/585)
-        - Changed the block swap offload destination from shared GPU memory to CPU memory. This does not change the total memory usage but significantly reduces shared GPU memory usage.
-        - For example, with 32GB of main memory, previously only up to 16GB could be offloaded, but with this change, it can be offloaded up to "32GB - other usage".
-        - Training speed may decrease slightly. For technical details, see [PR #585](https://github.com/kohya-ss/musubi-tuner/pull/585).
+- January 17, 2026
+    - Changed to use `convert_lora.py` for converting Z-Image LoRA for ComfyUI to improve compatibility. See [PR #851](https://github.com/kohya-ss/musubi-tuner/pull/851).
+        - The previous `convert_z_image_lora_to_comfy.py` can still be used, but the converted weights may not work correctly with nunchaku.
+        - Please refer to the [documentation](./docs/zimage.md#converting-lora-weights-to-diffusers-format-for-comfyui--lora重みをcomfyuiで使用可能なdiffusers形式に変換する) for details.
+        - Many thanks to fai-9 for providing the solution in [Issue #847](https://github.com/kohya-ss/musubi-tuner/issues/847).
+    - Added `--remove_first_image_from_target` option for LoRA training of Qwen-Image-Layered. See [PR #852](https://github.com/kohya-ss/musubi-tuner/pull/852).
+        - Please refer to the [documentation](./docs/qwen_image.md#lora-training--lora学習) for details.
 
-- September 30, 2025
-    - Fixed a bug in Qwen-Image-Edit-2509 LoRA training that prevented handling multiple control images correctly. See [PR #612](https://github.com/kohya-ss/musubi-tuner/pull/612)
+- January 11, 2026
+    - Added support for LoRA training of Qwen-Image-Layered. See [PR #816](https://github.com/kohya-ss/musubi-tuner/pull/816).
+        - Please refer to the [documentation](./docs/qwen_image.md) for details.
+        - In the caching, training, and inference scripts, specify `--model_version` option as `layered`.
 
-- September 28, 2025
-    - Support for training and inference of [Qwen-Image-Edit-2509](https://github.com/QwenLM/Qwen-Image) has been added. See [PR #590](https://github.com/kohya-ss/musubi-tuner/pull/590) for details. Please refer to the [Qwen-Image documentation](./docs/qwen_image.md) for more information.
-        - Multiple control images can be used simultaneously. While the official Qwen-Image-Edit-2509 supports up to 3 images, Musubi Tuner allows specifying any number of images (though correct operation is confirmed only up to 3).
-        - Different weights for the DiT model are required, and the `--edit_plus` option has been added to the caching, training, and inference scripts.
+- December 27, 2025
+    - Added support for Qwen-Image-Edit-2511. See [PR #808](https://github.com/kohya-ss/musubi-tuner/pull/808).
+        - Please refer to the [documentation](./docs/qwen_image.md) for details such as checkpoints and options.
+        - In the caching, training, and inference scripts, specify `--model_version` option as `edit-2511`.
 
-- September 24, 2025
-    - Added `--force_v2_1_time_embedding` option to Wan2.2 LoRA training and inference scripts. See [PR #586](https://github.com/kohya-ss/musubi-tuner/pull/586) This option can reduce VRAM usage. See [Wan documentation](./docs/wan.md#training--学習) for details.
-    
-- September 23, 2025
-    - The method of quantization when the `--fp8_scaled` option is specified has been changed from per-tensor to block-wise scaling. See [PR #575](https://github.com/kohya-ss/musubi-tuner/pull/575) [Discussion #564](https://github.com/kohya-ss/musubi-tuner/discussions/564) for more details.
-        - This improves the accuracy of FP8 quantization, leading to more stable training and improved inference accuracy for each model (except HunyuanVideo). Training and inference speed may decrease slightly.
-        - For LoRA training of Qwen-Image, the required VRAM for training is reduced by about 5GB due to a review of the quantized modules.
-        - See [Advanced Configuration documentation](./docs/advanced_config.md#fp8-weight-optimization-for-models--モデルの重みのfp8への最適化) for details.
+- December 25, 2025
+    - Added support for LoRA training of Kandinsky 5. See [PR #774](https://github.com/kohya-ss/musubi-tuner/pull/774). Many thanks to AkaneTendo25 for this contribution.
+        - Please refer to the [documentation](./docs/kandinsky5.md) for details.
+        - **Note that some weight specifications are in Hugging Face ID format. We plan to change to direct *.safetensors specification like other models soon, so please be aware.**
 
 ### Releases
 
@@ -118,7 +110,7 @@ To use them, you need to opt-in by creating your own configuration file in the p
 
 **Quick Setup:**
 
-1.  Create a `CLAUDE.md` and/or `GEMINI.md` file in the project root.
+1.  Create a `CLAUDE.md`, `GEMINI.md`, and/or `AGENTS.md` file in the project root.
 2.  Add the following line to your `CLAUDE.md` to import the repository's recommended prompt (currently they are the almost same):
 
     ```markdown
@@ -131,9 +123,11 @@ To use them, you need to opt-in by creating your own configuration file in the p
     @./.ai/gemini.prompt.md
     ```
 
-3.  You can now add your own personal instructions below the import line (e.g., `Always respond in Japanese.`).
+    You may be also import the prompt depending on the agent you are using with the custom prompt file such as `AGENTS.md`.
 
-This approach ensures that you have full control over the instructions given to your agent while benefiting from the shared project context. Your `CLAUDE.md` and `GEMINI.md` are already listed in `.gitignore`, so it won't be committed to the repository.
+3.  You can now add your own personal instructions below the import line (e.g., `Always include a short summary of the change before diving into details.`).
+
+This approach ensures that you have full control over the instructions given to your agent while benefiting from the shared project context. Your `CLAUDE.md`, `GEMINI.md` and `AGENTS.md` (as well as Claude's `.mcp.json`) are already listed in `.gitignore`, so they won't be committed to the repository.
 
 ## Overview
 
@@ -161,12 +155,17 @@ For detailed information on specific architectures, configurations, and advanced
 - [FramePack (Single Frame)](./docs/framepack_1f.md)
 - [FLUX.1 Kontext](./docs/flux_kontext.md)
 - [Qwen-Image](./docs/qwen_image.md)
+- [Z-Image](./docs/zimage.md)
+- [HunyuanVideo 1.5](./docs/hunyuan_video_1_5.md)
+- [Kandinsky 5](./docs/kandinsky5.md)
+- [FLUX.2](./docs/flux_2.md)
 
 **Common Configuration & Usage:**
 - [Dataset Configuration](./docs/dataset_config.md)
 - [Advanced Configuration](./docs/advanced_config.md)
 - [Sampling during Training](./docs/sampling_during_training.md)
 - [Tools and Utilities](./docs/tools.md)
+- [Using torch.compile](./docs/torch_compile.md)
 
 ## Installation
 
@@ -314,6 +313,8 @@ We welcome contributions! Please see [CONTRIBUTING.md](./CONTRIBUTING.md) for de
 ## License
 
 Code under the `hunyuan_model` directory is modified from [HunyuanVideo](https://github.com/Tencent/HunyuanVideo) and follows their license.
+
+Code under the `hunyuan_video_1_5` directory is modified from [HunyuanVideo 1.5](https://github.com/Tencent-Hunyuan/HunyuanVideo-1.5) and follows their license.
 
 Code under the `wan` directory is modified from [Wan2.1](https://github.com/Wan-Video/Wan2.1). The license is under the Apache License 2.0.
 

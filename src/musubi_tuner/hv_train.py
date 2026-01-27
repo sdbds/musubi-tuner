@@ -974,13 +974,14 @@ class FineTuningTrainer:
                 ARCHITECTURE_HUNYUAN_VIDEO,
                 time.time(),
                 title,
-                None,
+                args.metadata_reso,
                 args.metadata_author,
                 args.metadata_description,
                 args.metadata_license,
                 args.metadata_tags,
                 timesteps=md_timesteps,
                 is_lora=False,
+                custom_arch=args.metadata_arch,
             )
 
             save_file(unwrapped_nw.state_dict(), ckpt_file, sai_metadata)
@@ -1004,7 +1005,11 @@ class FineTuningTrainer:
         # training loop
 
         # log device and dtype for each model
-        logger.info(f"DiT dtype: {transformer.dtype}, device: {transformer.device}")
+        unwrapped_transformer = accelerator.unwrap_model(transformer)
+        first_param = next(iter(unwrapped_transformer.parameters()), None)
+        logger.info(
+            f"DiT dtype: {first_param.dtype if first_param is not None else None}, device: {first_param.device if first_param is not None else accelerator.device}"
+        )
 
         clean_memory_on_device(accelerator.device)
 
@@ -1213,7 +1218,6 @@ def setup_parser() -> argparse.ArgumentParser:
         "--dataset_config",
         type=pathlib.Path,
         default=None,
-        required=True,
         help="config file for dataset / データセットの設定ファイル",
     )
 
@@ -1442,7 +1446,7 @@ def setup_parser() -> argparse.ArgumentParser:
     )
 
     # model settings
-    parser.add_argument("--dit", type=str, required=True, help="DiT checkpoint path / DiTのチェックポイントのパス")
+    parser.add_argument("--dit", type=str, default=None, help="DiT checkpoint path / DiTのチェックポイントのパス")
     parser.add_argument("--dit_dtype", type=str, default=None, help="data type for DiT, default is bfloat16")
     parser.add_argument("--dit_in_channels", type=int, default=16, help="input channels for DiT, default is 16, skyreels I2V is 32")
     parser.add_argument("--vae", type=str, help="VAE checkpoint path / VAEのチェックポイントのパス")
@@ -1543,7 +1547,6 @@ def setup_parser() -> argparse.ArgumentParser:
         "--output_name",
         type=str,
         default=None,
-        required=True,
         help="base name of trained model file / 学習後のモデルの拡張子を除くファイル名",
     )
     parser.add_argument("--resume", type=str, default=None, help="saved state to resume training / 学習再開するモデルのstate")

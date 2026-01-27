@@ -101,7 +101,7 @@ If you have installed using pip:
 python src/musubi_tuner/cache_latents.py --dataset_config path/to/toml --vae path/to/ckpts/hunyuan-video-t2v-720p/vae/pytorch_model.pt --vae_chunk_size 32 --vae_tiling
 ```
 
-If you have installed with `uv`, you can use `uv run --extra cu124` to run the script. If CUDA 12.8 is supported, `uv run --extra cu128` is also available. Other scripts can be run in the same way. (Note that the installation with `uv` is experimental. Feedback is welcome. If you encounter any issues, please use the pip-based installation.)
+If you have installed with `uv`, you can use `uv run --extra cu124` to run the script. If CUDA 12.8 or 13.0 is supported, `uv run --extra cu128` or `uv run --extra cu130` is also available. Other scripts can be run in the same way. (Note that the installation with `uv` is experimental. Feedback is welcome. If you encounter any issues, please use the pip-based installation.)
 
 ```bash
 uv run --extra cu124 src/musubi_tuner/cache_latents.py --dataset_config path/to/toml --vae path/to/ckpts/hunyuan-video-t2v-720p/vae/pytorch_model.pt --vae_chunk_size 32 --vae_tiling
@@ -130,7 +130,7 @@ latentの事前キャッシュは必須です。以下のコマンドを使用�
 python src/musubi_tuner/cache_latents.py --dataset_config path/to/toml --vae path/to/ckpts/hunyuan-video-t2v-720p/vae/pytorch_model.pt --vae_chunk_size 32 --vae_tiling
 ```
 
-uvでインストールした場合は、`uv run --extra cu124 python src/musubi_tuner/cache_latents.py ...`のように、`uv run --extra cu124`を先頭につけてください。CUDA 12.8に対応している場合は、`uv run --extra cu128`も利用可能です。以下のコマンドも同様です。
+uvでインストールした場合は、`uv run --extra cu124 python src/musubi_tuner/cache_latents.py ...`のように、`uv run --extra cu124`を先頭につけてください。CUDA 12.8や13.0に対応している場合は、`uv run --extra cu128`や`uv run --extra cu130`も利用可能です。以下のコマンドも同様です。
 
 その他のオプションは`python src/musubi_tuner/cache_latents.py --help`で確認できます。
 
@@ -233,6 +233,8 @@ If you're running low on VRAM, use `--blocks_to_swap` to offload some blocks to 
 
 (The idea of block swap is based on the implementation by 2kpr. Thanks again to 2kpr.)
 
+`--use_pinned_memory_for_block_swap` can be used to enable pinned memory for block swapping. This may improve performance when swapping blocks between CPU and GPU. However, it may increase shared VRAM usage on Windows systems. Use this option based on your system configuration (e.g., available system RAM and VRAM). In some environments, not specifying this option may result in faster performance.
+
 `--gradient_checkpointing_cpu_offload` can be used to offload activations to CPU when using gradient checkpointing. This can further reduce VRAM usage, but may slow down training. This option is especially useful when the latent resolution (or video length) is high and VRAM is limited. This option must be used together with `--gradient_checkpointing`. See [PR #537](https://github.com/kohya-ss/musubi-tuner/pull/537) for more details.
 
 ### Attention
@@ -289,6 +291,10 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/mus
 VRAMが足りない場合は、`--blocks_to_swap`を指定して、一部のブロックをCPUにオフロードしてください。最大36が指定できます。
 
 （block swapのアイデアは2kpr氏の実装に基づくものです。2kpr氏にあらためて感謝します。）
+
+`--use_pinned_memory_for_block_swap`を指定すると、block swapにピン留めメモリを使用します。CPUとGPU間でブロックをスワップする際のパフォーマンスが向上する可能性があります。ただし、Windows環境では共有VRAM使用量が増加する可能性があります。システム構成（利用可能なシステムRAMやVRAMなど）に応じて、このオプションを使用してください。環境によっては指定しないほうが高速になる場合もあります。
+
+`--gradient_checkpointing_cpu_offload`を指定すると、gradient checkpointing使用時にアクティベーションをCPUにオフロードします。これによりVRAM使用量をさらに削減できますが、学習が遅くなる可能性があります。latent解像度（または動画長）が高く、VRAMが限られている場合に特に有用です。このオプションは`--gradient_checkpointing`と併用する必要があります。詳細は[PR #537](https://github.com/Dao-AILab/flash-attention/pull/537)を参照してください。
 
 **Attention**
 
@@ -410,7 +416,7 @@ By specifying `--video_path`, video2video inference is possible. Specify a video
 
 Note that video2video inference is experimental.
 
-`--compile` option enables PyTorch's compile feature (experimental). Requires triton. On Windows, also requires Visual C++ build tools installed and PyTorch>=2.6.0 (Visual C++ build tools is also required). You can pass arguments to the compiler with `--compile_args`.
+`--compile` option enables PyTorch's compile feature (experimental). Requires triton. On Windows, also requires Visual C++ build tools installed and PyTorch>=2.6.0 (Visual C++ build tools is also required). See [the torch.compile documentation](torch_compile.md) for details.
 
 The `--compile` option takes a long time to run the first time, but speeds up on subsequent runs.
 
@@ -456,7 +462,7 @@ VRAMが足りない場合は、`--blocks_to_swap`を指定して、一部のブ�
 
 なおvideo2video推論の処理は実験的なものです。
 
-`--compile`オプションでPyTorchのコンパイル機能を有効にします（実験的機能）。tritonのインストールが必要です。また、WindowsではVisual C++ build toolsが必要で、かつPyTorch>=2.6.0でのみ動作します。`--compile_args`でコンパイル時の引数を渡すことができます。
+`--compile`オプションでPyTorchのコンパイル機能を有効にします（実験的機能）。tritonのインストールが必要です。また、WindowsではVisual C++ build toolsが必要で、かつPyTorch>=2.6.0でのみ動作します。詳細は[torch.compileのドキュメント](torch_compile.md)を参照してください。
 
 `--compile`は初回実行時にかなりの時間がかかりますが、2回目以降は高速化されます。
 

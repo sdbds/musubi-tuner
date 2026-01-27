@@ -1,6 +1,6 @@
 [project]
 name = "musubi-tuner"
-version = "0.2.13"
+version = "0.2.15"
 description = "Musubi Tuner by kohya_ss"
 readme = "README.md"
 requires-python = ">=3.10, <3.13"
@@ -35,12 +35,20 @@ cu128 = [
     "torch>=2.7.1",
     "torchvision>=0.22.1",
 ]
+cu130 = [
+    "torch>=2.9.1",
+    "torchvision>=0.24.1",
+]
+gui = [
+    "gradio>=4.0.0, <6.0.0",
+]
 
 [tool.uv]
 conflicts = [
   [
     { extra = "cu124" },
     { extra = "cu128" },
+    { extra = "cu130" },
   ],
 ]
 
@@ -61,10 +69,12 @@ build-backend = "hatchling.build"
 torch = [
   { index = "pytorch-cu124", extra = "cu124" },
   { index = "pytorch-cu128", extra = "cu128" },
+  { index = "pytorch-cu130", extra = "cu130" },
 ]
 torchvision = [
   { index = "pytorch-cu124", extra = "cu124" },
   { index = "pytorch-cu128", extra = "cu128" },
+  { index = "pytorch-cu130", extra = "cu130" },
 ]
 
 [[tool.uv.index]]
@@ -75,6 +85,11 @@ explicit = true
 [[tool.uv.index]]
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
 [tool.ruff]
@@ -108,8 +123,6 @@ extend-exclude = [
   "src/musubi_tuner/hunyuan_model/pipeline_hunyuan_video.py",
   "src/musubi_tuner/modules/scheduling_flow_match_discrete.py",
   "src/musubi_tuner/modules/unet_causal_3d_blocks.py",
-  "src/musubi_tuner/qwen_image/qwen_image_autoencoder_kl.py",
-  "src/musubi_tuner/qwen_image/qwen_image_model.py",
   "src/musubi_tuner/wan/configs/__init__.py",
   "src/musubi_tuner/wan/configs/shared_config.py",
   "src/musubi_tuner/wan/configs/wan_i2v_14B.py",
@@ -153,8 +166,6 @@ docstring-code-line-length = "dynamic"
 "src/musubi_tuner/hunyuan_model/pipeline_hunyuan_video.py" = ["ALL"]
 "src/musubi_tuner/modules/scheduling_flow_match_discrete.py" = ["ALL"]
 "src/musubi_tuner/modules/unet_causal_3d_blocks.py" = ["ALL"]
-"src/musubi_tuner/qwen_image/qwen_image_autoencoder_kl.py" = ["ALL"]
-"src/musubi_tuner/qwen_image/qwen_image_model.py" = ["ALL"]
 "src/musubi_tuner/wan/configs/__init__.py" = ["ALL"]
 "src/musubi_tuner/wan/configs/shared_config.py" = ["ALL"]
 "src/musubi_tuner/wan/configs/wan_i2v_14B.py" = ["ALL"]
