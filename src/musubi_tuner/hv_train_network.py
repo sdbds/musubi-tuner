@@ -417,13 +417,13 @@ class NetworkTrainer:
 
             logs[f"lr/{lr_desc}"] = lr
 
-            if args.optimizer_type.lower().startswith("DAdapt".lower()) or args.optimizer_type.lower().endswith("Prodigy".lower()):
+            if args.optimizer_type.lower().startswith("dadapt") or "prodigy" in args.optimizer_type.lower():
                 # tracking d*lr value
                 logs[f"lr/d*lr/{lr_desc}"] = (
                     lr_scheduler.optimizers[-1].param_groups[i]["d"] * lr_scheduler.optimizers[-1].param_groups[i]["lr"]
                 )
 
-            if args.optimizer_type.lower().endswith("ProdigyPlusScheduleFree".lower()) and optimizer is not None:
+            if args.optimizer_type.lower().endswith("prodigyplusschedulefree") and optimizer is not None:
                 # tracking d*lr value of unet.
                 logs[f"lr/d*lr/{lr_desc}"] = optimizer.param_groups[i]["d"] * optimizer.param_groups[i]["lr"]
                 if "effective_lr" in optimizer.param_groups[i]:
