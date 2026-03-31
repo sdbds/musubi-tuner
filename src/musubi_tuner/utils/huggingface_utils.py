@@ -1,6 +1,7 @@
 import threading
-from typing import Union, BinaryIO
+from typing import Union, BinaryIO, Optional
 from huggingface_hub import HfApi
+from huggingface_hub.constants import HF_HUB_CACHE
 from pathlib import Path
 import argparse
 import os
@@ -12,6 +13,49 @@ logging.basicConfig(level=logging.INFO)
 
 def fire_in_thread(f, *args, **kwargs):
     threading.Thread(target=f, args=args, kwargs=kwargs).start()
+
+
+def resolve_local_pretrained_path(repo_id_or_path: Union[str, Path], subfolder: Optional[str] = None) -> tuple[str, Optional[str]]:
+    """
+    Resolve a cached Hugging Face snapshot path without contacting the Hub.
+    Falls back to the original identifier when no local cache is available.
+    """
+    local_path = Path(repo_id_or_path)
+    if local_path.exists():
+        resolved = local_path / subfolder if subfolder else local_path
+        return str(resolved), None
+
+    repo_id = str(repo_id_or_path)
+    if "/" not in repo_id:
+        return repo_id, subfolder
+
+    repo_dir = Path(HF_HUB_CACHE) / f"models--{repo_id.replace('/', '--')}"
+    snapshots_dir = repo_dir / "snapshots"
+    ref_main = repo_dir / "refs" / "main"
+
+    revisions: list[str] = []
+    if ref_main.exists():
+        revision = ref_main.read_text(encoding="utf-8").strip()
+        if revision:
+            revisions.append(revision)
+
+    if snapshots_dir.exists():
+        snapshot_dirs = sorted((p for p in snapshots_dir.iterdir() if p.is_dir()), key=lambda p: p.stat().st_mtime, reverse=True)
+        revisions.extend([p.name for p in snapshot_dirs])
+
+    seen: set[str] = set()
+    for revision in revisions:
+        if revision in seen:
+            continue
+        seen.add(revision)
+
+        snapshot_path = snapshots_dir / revision
+        candidate = snapshot_path / subfolder if subfolder else snapshot_path
+        if candidate.exists():
+            logger.info(f"Resolved {repo_id} to local cache: {candidate}")
+            return str(candidate), None
+
+    return repo_id, subfolder
 
 
 def exists_repo(repo_id: str, repo_type: str, revision: str = "main", token: str = None):

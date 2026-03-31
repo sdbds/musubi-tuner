@@ -32,6 +32,7 @@ from musubi_tuner.dataset.image_video_dataset import (
 )
 from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch
 from musubi_tuner.utils import image_utils
+from musubi_tuner.utils.huggingface_utils import resolve_local_pretrained_path
 from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
 from musubi_tuner.zimage.zimage_utils import load_qwen3
 
@@ -601,8 +602,14 @@ class Mistral3Embedder(nn.Module):
                 logger.info(f"Setting Mistral 3 to dtype: {dtype}")
                 self.mistral3.to(dtype)
 
-        # Load tokenizer
-        self.tokenizer = AutoProcessor.from_pretrained(M3_TOKENIZER_ID, use_fast=False)
+        # Prefer a cached snapshot path so transformers never needs to probe the Hub.
+        tokenizer_path, tokenizer_subfolder = resolve_local_pretrained_path(M3_TOKENIZER_ID)
+        self.tokenizer = AutoProcessor.from_pretrained(
+            tokenizer_path,
+            subfolder=tokenizer_subfolder,
+            use_fast=False,
+            local_files_only=True,
+        )
 
     @property
     def dtype(self):

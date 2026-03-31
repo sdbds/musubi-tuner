@@ -8,6 +8,7 @@ import torch
 from transformers import Qwen3Config, Qwen3ForCausalLM, Qwen2Tokenizer
 from accelerate import init_empty_weights
 
+from musubi_tuner.utils.huggingface_utils import resolve_local_pretrained_path
 from musubi_tuner.utils.safetensors_utils import load_split_weights
 from musubi_tuner.zimage import zimage_config
 
@@ -156,8 +157,9 @@ def load_qwen3(
     if tokenizer_id is None:
         tokenizer_id = ZIMAGE_ID
         subfolder = "tokenizer"
-    logger.info(f"Loading tokenizer from {tokenizer_id}")
-    tokenizer = Qwen2Tokenizer.from_pretrained(tokenizer_id, subfolder=subfolder)
+    tokenizer_path, tokenizer_subfolder = resolve_local_pretrained_path(tokenizer_id, subfolder=subfolder)
+    logger.info(f"Loading tokenizer from {tokenizer_path} (local cache only)")
+    tokenizer = Qwen2Tokenizer.from_pretrained(tokenizer_path, subfolder=tokenizer_subfolder, local_files_only=True)
     return tokenizer, qwen3
 
 
