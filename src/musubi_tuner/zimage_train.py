@@ -37,6 +37,7 @@ from musubi_tuner.soar_train_utils import (
     add_soar_arguments,
     compute_loss_weighting_from_sigma,
     compute_per_sample_loss,
+    is_continuous_timestep_sampling,
     is_soar_enabled,
     run_soar_auxiliary_pass,
     validate_soar_args,
@@ -593,6 +594,7 @@ class ZImageTrainer(ZImageNetworkTrainer):
                             points_per_path=args.soar_trajectory_length,
                             noise_scheduler=noise_scheduler,
                             num_sampling_steps=args.soar_num_sampling_steps,
+                            continuous_timesteps=is_continuous_timestep_sampling(args.timestep_sampling),
                             sigma_upper_ratio=args.soar_sigma_upper_ratio,
                         )
                         aux_count_expected = float(len(aux_points) * latents.shape[0])

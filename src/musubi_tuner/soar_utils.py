@@ -103,6 +103,7 @@ def single_step_aux_points(
     points_per_path: int,
     noise_scheduler,
     num_sampling_steps: int,
+    continuous_timesteps: bool = True,
     sigma_upper_ratio: float = 1.5,
     sigma_upper: Optional[torch.Tensor] = None,
 ) -> list[dict[str, torch.Tensor]]:
@@ -132,7 +133,11 @@ def single_step_aux_points(
 
     points: list[dict[str, torch.Tensor]] = []
     for z_t_prime, sigma_t_prime_1d in aux_pairs:
-        timesteps_t_prime = sigma_to_training_timestep(sigma_t_prime_1d, noise_scheduler)
+        if continuous_timesteps:
+            timesteps_t_prime = sigma_to_training_timestep(sigma_t_prime_1d, noise_scheduler)
+        else:
+            t_t_prime = sigma_to_t(sigma_t_prime_1d, noise_scheduler)
+            _, timesteps_t_prime = t_to_sigma_timestep(t_t_prime, noise_scheduler)
         points.append(
             {
                 "latents": z_t_prime.detach(),

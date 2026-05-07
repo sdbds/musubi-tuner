@@ -142,6 +142,47 @@ class TestSoarUtils(unittest.TestCase):
         self.assertEqual(point["sigmas"].dtype, torch.float32)
         self.assertEqual(point["timesteps"].dtype, torch.float32)
 
+    def test_single_step_aux_points_can_emit_discrete_scheduler_timesteps(self):
+        scheduler = DummyNoiseScheduler()
+        z_t0 = torch.zeros(1, 4, 2, 2)
+        v_standard = torch.ones_like(z_t0) * 0.5
+        z_noise = torch.ones_like(z_t0)
+
+        points = single_step_aux_points(
+            z_t0=z_t0,
+            sigma_t0=torch.tensor([0.5], dtype=torch.float32),
+            v_standard=v_standard,
+            z_noise=z_noise,
+            points_per_path=4,
+            noise_scheduler=scheduler,
+            num_sampling_steps=40,
+            continuous_timesteps=False,
+        )
+
+        schedule_timesteps = scheduler.timesteps.to(dtype=torch.float32)
+        for point in points:
+            self.assertTrue(torch.all(torch.isin(point["timesteps"], schedule_timesteps)))
+
+    def test_single_step_aux_points_continuous_timesteps_match_training_offset(self):
+        scheduler = DummyNoiseScheduler()
+        z_t0 = torch.zeros(1, 4, 2, 2)
+        v_standard = torch.ones_like(z_t0) * 0.5
+        z_noise = torch.ones_like(z_t0)
+
+        points = single_step_aux_points(
+            z_t0=z_t0,
+            sigma_t0=torch.tensor([0.5], dtype=torch.float32),
+            v_standard=v_standard,
+            z_noise=z_noise,
+            points_per_path=4,
+            noise_scheduler=scheduler,
+            num_sampling_steps=40,
+            continuous_timesteps=True,
+        )
+
+        for point in points:
+            self.assertTrue(torch.allclose(point["timesteps"], sigma_to_training_timestep(point["sigmas"], scheduler)))
+
     def test_single_step_aux_points_bounds_default_sigma_upper_by_ratio(self):
         scheduler = DummyNoiseScheduler()
         z_t0 = torch.zeros(1, 4, 2, 2)
