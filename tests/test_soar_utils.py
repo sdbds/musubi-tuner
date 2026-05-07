@@ -163,6 +163,30 @@ class TestSoarUtils(unittest.TestCase):
         for point in points:
             self.assertTrue(torch.all(point["sigmas"] <= sigma_t0 * 1.5))
 
+    def test_single_step_aux_points_interpolates_toward_noise_at_sigma_one(self):
+        scheduler = DummyNoiseScheduler()
+        z_t0 = torch.zeros(1, 1, 1, 1)
+        v_standard = torch.zeros_like(z_t0)
+        z_noise = torch.ones_like(z_t0)
+        sigma_t0 = torch.tensor([0.2], dtype=torch.float32)
+
+        points = single_step_aux_points(
+            z_t0=z_t0,
+            sigma_t0=sigma_t0,
+            v_standard=v_standard,
+            z_noise=z_noise,
+            points_per_path=1,
+            noise_scheduler=scheduler,
+            num_sampling_steps=40,
+            sigma_upper=torch.tensor([0.3], dtype=torch.float32),
+        )
+
+        aux_sigma = points[0]["sigmas"].view(1, 1, 1, 1)
+        sigma_t1 = (sigma_t0 - 1.0 / 40.0).view(1, 1, 1, 1)
+        expected_alpha = (aux_sigma - sigma_t1) / (1.0 - sigma_t1)
+        self.assertTrue(torch.allclose(points[0]["latents"], expected_alpha))
+        self.assertTrue(torch.all(points[0]["latents"] < 0.2))
+
 
 if __name__ == "__main__":
     unittest.main()

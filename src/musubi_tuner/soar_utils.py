@@ -56,6 +56,7 @@ def build_single_step_ode_aux_points(
     sigma_start: torch.Tensor,
     sigma_end: torch.Tensor,
     trajectory_length: int,
+    interpolation_sigma_end: Optional[torch.Tensor] = None,
     generator: Optional[torch.Generator] = None,
 ) -> list[tuple[torch.Tensor, torch.Tensor]]:
     if trajectory_length < 1:
@@ -68,10 +69,16 @@ def build_single_step_ode_aux_points(
     batch_size = start_state.shape[0]
     sigma_start = _coerce_batch_scalar("sigma_start", sigma_start, batch_size, start_state.device)
     sigma_end = _coerce_batch_scalar("sigma_end", sigma_end, batch_size, start_state.device)
+    if interpolation_sigma_end is None:
+        interpolation_sigma_end = sigma_end
+    interpolation_sigma_end = _coerce_batch_scalar(
+        "interpolation_sigma_end", interpolation_sigma_end, batch_size, start_state.device
+    )
 
     points: list[tuple[torch.Tensor, torch.Tensor]] = []
     sigma_span = sigma_end - sigma_start
-    safe_denominator = torch.where(sigma_span == 0, torch.ones_like(sigma_span), sigma_span)
+    interpolation_span = interpolation_sigma_end - sigma_start
+    safe_denominator = torch.where(interpolation_span == 0, torch.ones_like(interpolation_span), interpolation_span)
     start_state_fp32 = start_state.float()
     end_state_fp32 = end_state.float()
 
@@ -119,6 +126,7 @@ def single_step_aux_points(
         end_state=z_noise,
         sigma_start=sigma_t1_1d,
         sigma_end=sigma_upper,
+        interpolation_sigma_end=torch.ones_like(sigma_t1_1d),
         trajectory_length=points_per_path,
     )
 
