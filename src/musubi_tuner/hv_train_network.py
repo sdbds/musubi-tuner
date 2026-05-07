@@ -42,11 +42,13 @@ from musubi_tuner.hunyuan_model.vae import load_vae, VAE_VER
 import musubi_tuner.hunyuan_model.vae as vae_module
 from musubi_tuner.modules.lr_schedulers import RexLR
 from musubi_tuner.modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
-from musubi_tuner.soar_utils import sigma_to_t, single_step_aux_points
+from musubi_tuner.soar_utils import single_step_aux_points
 from musubi_tuner.soar_train_utils import (
     compute_loss_weighting_from_sigma,
     compute_per_sample_loss,
     default_flow_matching_target,
+    get_sigmas_from_continuous_timesteps,
+    is_continuous_timestep_sampling,
     is_soar_enabled,
     run_soar_auxiliary_pass,
     validate_soar_args,
@@ -346,6 +348,12 @@ def get_sigmas(noise_scheduler, timesteps, device, n_dim=4, dtype=torch.float32)
     while len(sigma.shape) < n_dim:
         sigma = sigma.unsqueeze(-1)
     return sigma
+
+
+def get_sigmas_for_timestep_sampling(noise_scheduler, timesteps, timestep_sampling, device, n_dim=4, dtype=torch.float32):
+    if is_continuous_timestep_sampling(timestep_sampling):
+        return get_sigmas_from_continuous_timesteps(noise_scheduler, timesteps, device, n_dim=n_dim, dtype=dtype)
+    return get_sigmas(noise_scheduler, timesteps, device, n_dim=n_dim, dtype=dtype)
 
 
 def compute_loss_weighting_for_sd3(weighting_scheme: str, noise_scheduler, timesteps, device, dtype):
@@ -2080,6 +2088,7 @@ class NetworkTrainer:
                     "ss_soar_lambda_aux": args.soar_lambda_aux,
                     "ss_soar_trajectory_length": args.soar_trajectory_length,
                     "ss_soar_num_sampling_steps": args.soar_num_sampling_steps,
+                    "ss_soar_sigma_upper_ratio": args.soar_sigma_upper_ratio,
                 }
             )
 
@@ -2253,21 +2262,28 @@ class NetworkTrainer:
                     aux_count = 0.0
 
                     if use_soar:
-                        sigma_t0 = get_sigmas(noise_scheduler, timesteps, accelerator.device, n_dim=latents.ndim, dtype=torch.float32)
+                        sigma_t0 = get_sigmas_for_timestep_sampling(
+                            noise_scheduler,
+                            timesteps,
+                            args.timestep_sampling,
+                            accelerator.device,
+                            n_dim=latents.ndim,
+                            dtype=torch.float32,
+                        )
                         weighting = compute_loss_weighting_from_sigma(args.weighting_scheme, sigma_t0, model_pred.ndim)
                         loss_main_per_sample = compute_per_sample_loss(model_pred.to(network_dtype), target, weighting)
                         loss_main_sum = loss_main_per_sample.sum()
 
                         sigma_t0_1d = sigma_t0.reshape(sigma_t0.shape[0], -1)[:, 0].detach()
-                        t0 = sigma_to_t(sigma_t0_1d, noise_scheduler)
                         aux_points = single_step_aux_points(
                             z_t0=noisy_model_input.detach(),
-                            t0=t0.detach(),
+                            sigma_t0=sigma_t0_1d.detach(),
                             v_standard=self.soar_velocity_to_standard(model_pred).detach(),
                             z_noise=noise.detach(),
                             points_per_path=args.soar_trajectory_length,
                             noise_scheduler=noise_scheduler,
                             num_sampling_steps=args.soar_num_sampling_steps,
+                            sigma_upper_ratio=args.soar_sigma_upper_ratio,
                         )
                         aux_count_expected = float(len(aux_points) * latents.shape[0])
                         total_count = max(float(latents.shape[0]) + args.soar_lambda_aux * aux_count_expected, 1.0)
@@ -2297,7 +2313,14 @@ class NetworkTrainer:
                         loss_aux_avg = (loss_aux_sum / aux_count) if aux_count > 0 else loss_aux_avg
                         loss = (loss_main_sum.detach() + args.soar_lambda_aux * loss_aux_sum) / total_count
                     else:
-                        sigma_t0 = get_sigmas(noise_scheduler, timesteps, accelerator.device, n_dim=model_pred.ndim, dtype=torch.float32)
+                        sigma_t0 = get_sigmas_for_timestep_sampling(
+                            noise_scheduler,
+                            timesteps,
+                            args.timestep_sampling,
+                            accelerator.device,
+                            n_dim=model_pred.ndim,
+                            dtype=torch.float32,
+                        )
                         weighting = compute_loss_weighting_from_sigma(args.weighting_scheme, sigma_t0, model_pred.ndim)
                         loss = torch.nn.functional.mse_loss(model_pred.to(network_dtype), target, reduction="none")
 

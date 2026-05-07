@@ -10,6 +10,7 @@ from musubi_tuner.soar_utils import (  # noqa: E402
     build_single_step_ode_aux_points,
     per_point_aux_scale,
     sigma_to_t,
+    sigma_to_training_timestep,
     single_step_aux_points,
     t_to_sigma_timestep,
 )
@@ -103,7 +104,7 @@ class TestSoarUtils(unittest.TestCase):
 
         points = single_step_aux_points(
             z_t0=z_t0,
-            t0=t0,
+            sigma_t0=t0,
             v_standard=v_standard,
             z_noise=z_noise,
             points_per_path=2,
@@ -116,6 +117,7 @@ class TestSoarUtils(unittest.TestCase):
             self.assertEqual(point["latents"].shape, z_t0.shape)
             self.assertEqual(point["sigmas"].shape, torch.Size([2]))
             self.assertEqual(point["timesteps"].shape, torch.Size([2]))
+            self.assertTrue(torch.allclose(point["timesteps"], sigma_to_training_timestep(point["sigmas"], scheduler)))
 
     def test_single_step_aux_points_keeps_scheduler_math_in_float32(self):
         scheduler = DummyNoiseScheduler()
@@ -126,7 +128,7 @@ class TestSoarUtils(unittest.TestCase):
 
         points = single_step_aux_points(
             z_t0=z_t0,
-            t0=t0,
+            sigma_t0=t0,
             v_standard=v_standard,
             z_noise=z_noise,
             points_per_path=1,
@@ -139,6 +141,27 @@ class TestSoarUtils(unittest.TestCase):
         self.assertEqual(point["latents"].dtype, z_t0.dtype)
         self.assertEqual(point["sigmas"].dtype, torch.float32)
         self.assertEqual(point["timesteps"].dtype, torch.float32)
+
+    def test_single_step_aux_points_bounds_default_sigma_upper_by_ratio(self):
+        scheduler = DummyNoiseScheduler()
+        z_t0 = torch.zeros(1, 4, 2, 2)
+        v_standard = torch.ones_like(z_t0) * 0.5
+        z_noise = torch.ones_like(z_t0)
+        sigma_t0 = torch.tensor([0.2], dtype=torch.float32)
+
+        torch.manual_seed(1234)
+        points = single_step_aux_points(
+            z_t0=z_t0,
+            sigma_t0=sigma_t0,
+            v_standard=v_standard,
+            z_noise=z_noise,
+            points_per_path=8,
+            noise_scheduler=scheduler,
+            num_sampling_steps=40,
+        )
+
+        for point in points:
+            self.assertTrue(torch.all(point["sigmas"] <= sigma_t0 * 1.5))
 
 
 if __name__ == "__main__":

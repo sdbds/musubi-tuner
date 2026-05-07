@@ -299,6 +299,7 @@ accelerate launch --num_cpu_threads_per_process 1 src/musubi_tuner/zimage_train.
 - `--soar_lambda_aux` (default: `1.0`)
 - `--soar_trajectory_length` (default: `6`)
 - `--soar_num_sampling_steps` (default: `40`)
+- `--soar_sigma_upper_ratio` (default: `1.5`)
 
 Recommended smoke test:
 
@@ -321,6 +322,7 @@ Current limitations:
 - `--soar_lambda_aux`（デフォルト: `1.0`）
 - `--soar_trajectory_length`（デフォルト: `6`）
 - `--soar_num_sampling_steps`（デフォルト: `40`）
+- `--soar_sigma_upper_ratio`（デフォルト: `1.5`）
 
 初回のスモークテストでは、次のように補助点数だけを最小化するのが安全です。
 

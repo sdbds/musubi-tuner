@@ -193,6 +193,7 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/mus
 - `--soar_lambda_aux` (default: `1.0`)
 - `--soar_trajectory_length` (default: `6`)
 - `--soar_num_sampling_steps` (default: `40`)
+- `--soar_sigma_upper_ratio` (default: `1.5`)
 
 For a first smoke test, use a single auxiliary point:
 
@@ -239,6 +240,7 @@ FLUX.2の学習は専用のスクリプト`flux_2_train_network.py`を使用し�
 - `--soar_lambda_aux`（デフォルト: `1.0`）
 - `--soar_trajectory_length`（デフォルト: `6`）
 - `--soar_num_sampling_steps`（デフォルト: `40`）
+- `--soar_sigma_upper_ratio`（デフォルト: `1.5`）
 
 初回のスモークテストでは、補助点数を最小化してください。
 

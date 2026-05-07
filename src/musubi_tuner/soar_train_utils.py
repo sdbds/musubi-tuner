@@ -12,6 +12,18 @@ from accelerate import Accelerator
 SoarTargetFn = Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]
 SoarPredictFn = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 
+CONTINUOUS_TIMESTEP_SAMPLINGS = {
+    "uniform",
+    "sigmoid",
+    "shift",
+    "flux_shift",
+    "qwen_shift",
+    "logsnr",
+    "qinglong_flux",
+    "qinglong_qwen",
+    "flux2_shift",
+}
+
 
 def _parser_has_option(parser: argparse.ArgumentParser, option: str) -> bool:
     return any(option in action.option_strings for action in parser._actions)
@@ -35,6 +47,12 @@ def add_soar_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentPars
         default=40,
         help="Sampler step count used to define the single-step rollout distance",
     )
+    parser.add_argument(
+        "--soar_sigma_upper_ratio",
+        type=float,
+        default=1.5,
+        help="Upper sigma ratio for SOAR auxiliary interpolation, clamped to 1.0",
+    )
     return parser
 
 
@@ -49,6 +67,8 @@ def validate_soar_args(args: argparse.Namespace, *, allow_fused_backward: bool =
         raise ValueError("--soar_trajectory_length must be at least 1")
     if args.soar_num_sampling_steps < 2:
         raise ValueError("--soar_num_sampling_steps must be at least 2")
+    if getattr(args, "soar_sigma_upper_ratio", 1.5) < 1.0:
+        raise ValueError("--soar_sigma_upper_ratio must be at least 1.0")
 
 
 def is_soar_enabled(args: argparse.Namespace) -> bool:
@@ -80,6 +100,20 @@ def compute_loss_weighting_from_sigma(
     while weighting.ndim < target_ndim:
         weighting = weighting.unsqueeze(-1)
     return weighting
+
+
+def is_continuous_timestep_sampling(timestep_sampling: str) -> bool:
+    return timestep_sampling in CONTINUOUS_TIMESTEP_SAMPLINGS
+
+
+def get_sigmas_from_continuous_timesteps(noise_scheduler, timesteps, device, n_dim=4, dtype=torch.float32):
+    scheduler_config = getattr(noise_scheduler, "config", None)
+    num_train_timesteps = getattr(scheduler_config, "num_train_timesteps", len(noise_scheduler.timesteps))
+    sigma = ((timesteps.to(device=device, dtype=torch.float32) - 1.0) / float(num_train_timesteps)).clamp(0.0, 1.0)
+    sigma = sigma.to(dtype=dtype).flatten()
+    while len(sigma.shape) < n_dim:
+        sigma = sigma.unsqueeze(-1)
+    return sigma
 
 
 def compute_per_sample_loss(

@@ -19,6 +19,7 @@ class TestZImageSoarArgs(unittest.TestCase):
         self.assertEqual(args.soar_lambda_aux, 1.0)
         self.assertEqual(args.soar_trajectory_length, 6)
         self.assertEqual(args.soar_num_sampling_steps, 40)
+        self.assertEqual(args.soar_sigma_upper_ratio, 1.5)
 
     def test_validate_soar_rejects_fused_backward(self):
         args = Namespace(
@@ -27,6 +28,7 @@ class TestZImageSoarArgs(unittest.TestCase):
             soar_lambda_aux=1.0,
             soar_trajectory_length=6,
             soar_num_sampling_steps=40,
+            soar_sigma_upper_ratio=1.5,
         )
         with self.assertRaises(ValueError):
             zimage_train.validate_soar_args(args)
@@ -38,6 +40,7 @@ class TestZImageSoarArgs(unittest.TestCase):
             soar_lambda_aux=1.0,
             soar_trajectory_length=0,
             soar_num_sampling_steps=40,
+            soar_sigma_upper_ratio=1.5,
         )
         with self.assertRaises(ValueError):
             zimage_train.validate_soar_args(args)

@@ -30,14 +30,49 @@ class TestSoarTrainUtils(unittest.TestCase):
         self.assertEqual(args.soar_lambda_aux, 1.0)
         self.assertEqual(args.soar_trajectory_length, 6)
         self.assertEqual(args.soar_num_sampling_steps, 40)
+        self.assertEqual(args.soar_sigma_upper_ratio, 1.5)
 
     def test_validate_soar_rejects_invalid_values(self):
         with self.assertRaises(ValueError):
-            validate_soar_args(Namespace(soar=True, soar_lambda_aux=-1.0, soar_trajectory_length=6, soar_num_sampling_steps=40))
+            validate_soar_args(
+                Namespace(
+                    soar=True,
+                    soar_lambda_aux=-1.0,
+                    soar_trajectory_length=6,
+                    soar_num_sampling_steps=40,
+                    soar_sigma_upper_ratio=1.5,
+                )
+            )
         with self.assertRaises(ValueError):
-            validate_soar_args(Namespace(soar=True, soar_lambda_aux=1.0, soar_trajectory_length=0, soar_num_sampling_steps=40))
+            validate_soar_args(
+                Namespace(
+                    soar=True,
+                    soar_lambda_aux=1.0,
+                    soar_trajectory_length=0,
+                    soar_num_sampling_steps=40,
+                    soar_sigma_upper_ratio=1.5,
+                )
+            )
         with self.assertRaises(ValueError):
-            validate_soar_args(Namespace(soar=True, soar_lambda_aux=1.0, soar_trajectory_length=6, soar_num_sampling_steps=1))
+            validate_soar_args(
+                Namespace(
+                    soar=True,
+                    soar_lambda_aux=1.0,
+                    soar_trajectory_length=6,
+                    soar_num_sampling_steps=1,
+                    soar_sigma_upper_ratio=1.5,
+                )
+            )
+        with self.assertRaises(ValueError):
+            validate_soar_args(
+                Namespace(
+                    soar=True,
+                    soar_lambda_aux=1.0,
+                    soar_trajectory_length=6,
+                    soar_num_sampling_steps=40,
+                    soar_sigma_upper_ratio=0.9,
+                )
+            )
 
     def test_is_soar_enabled_respects_zero_lambda(self):
         self.assertFalse(is_soar_enabled(Namespace(soar=True, soar_lambda_aux=0.0, soar_trajectory_length=6)))

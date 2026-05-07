@@ -135,6 +135,7 @@ def import_zimage_train_module():
         clean_memory_on_device=lambda *args, **kwargs: None,
         compute_loss_weighting_for_sd3=lambda *args, **kwargs: None,
         get_sigmas=lambda *args, **kwargs: None,
+        get_sigmas_for_timestep_sampling=lambda *args, **kwargs: None,
         prepare_accelerator=lambda *args, **kwargs: None,
         setup_parser_common=lambda: argparse.ArgumentParser(),
         read_config_from_file=lambda args, parser: args,

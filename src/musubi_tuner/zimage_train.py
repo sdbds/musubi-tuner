@@ -23,7 +23,7 @@ from musubi_tuner.hv_train_network import (
     SS_METADATA_MINIMUM_KEYS,
     collator_class,
     clean_memory_on_device,
-    get_sigmas,
+    get_sigmas_for_timestep_sampling,
     prepare_accelerator,
     setup_parser_common,
     read_config_from_file,
@@ -32,7 +32,7 @@ from musubi_tuner.hv_train_network import (
 )
 import logging
 
-from musubi_tuner.soar_utils import sigma_to_t, single_step_aux_points
+from musubi_tuner.soar_utils import single_step_aux_points
 from musubi_tuner.soar_train_utils import (
     add_soar_arguments,
     compute_loss_weighting_from_sigma,
@@ -390,6 +390,7 @@ class ZImageTrainer(ZImageNetworkTrainer):
             "ss_soar_lambda_aux": args.soar_lambda_aux,
             "ss_soar_trajectory_length": args.soar_trajectory_length,
             "ss_soar_num_sampling_steps": args.soar_num_sampling_steps,
+            "ss_soar_sigma_upper_ratio": args.soar_sigma_upper_ratio,
         }
 
         datasets_metadata = []
@@ -572,20 +573,27 @@ class ZImageTrainer(ZImageNetworkTrainer):
                     aux_count = 0.0
 
                     if use_soar:
-                        sigma_t0 = get_sigmas(noise_scheduler, timesteps, accelerator.device, n_dim=latents.ndim, dtype=torch.float32)
+                        sigma_t0 = get_sigmas_for_timestep_sampling(
+                            noise_scheduler,
+                            timesteps,
+                            args.timestep_sampling,
+                            accelerator.device,
+                            n_dim=latents.ndim,
+                            dtype=torch.float32,
+                        )
                         weighting = _compute_zimage_loss_weighting_from_sigma(args.weighting_scheme, sigma_t0, model_pred.ndim)
                         loss_main_per_sample = _compute_per_sample_zimage_loss(model_pred, target, weighting)
                         loss_main_sum = loss_main_per_sample.sum()
                         sigma_t0_1d = sigma_t0.reshape(sigma_t0.shape[0], -1)[:, 0].detach()
-                        t0 = sigma_to_t(sigma_t0_1d, noise_scheduler)
                         aux_points = single_step_aux_points(
                             z_t0=noisy_model_input.detach(),
-                            t0=t0.detach(),
+                            sigma_t0=sigma_t0_1d.detach(),
                             v_standard=(-model_pred).detach(),
                             z_noise=noise.detach(),
                             points_per_path=args.soar_trajectory_length,
                             noise_scheduler=noise_scheduler,
                             num_sampling_steps=args.soar_num_sampling_steps,
+                            sigma_upper_ratio=args.soar_sigma_upper_ratio,
                         )
                         aux_count_expected = float(len(aux_points) * latents.shape[0])
                         total_count = max(float(latents.shape[0]) + args.soar_lambda_aux * aux_count_expected, 1.0)
@@ -614,7 +622,14 @@ class ZImageTrainer(ZImageNetworkTrainer):
                         loss_aux_avg = (loss_aux_sum / aux_count) if aux_count > 0 else loss_aux_avg
                         loss = (loss_main_sum.detach() + args.soar_lambda_aux * loss_aux_sum) / total_count
                     else:
-                        sigma_t0 = get_sigmas(noise_scheduler, timesteps, accelerator.device, n_dim=latents.ndim, dtype=torch.float32)
+                        sigma_t0 = get_sigmas_for_timestep_sampling(
+                            noise_scheduler,
+                            timesteps,
+                            args.timestep_sampling,
+                            accelerator.device,
+                            n_dim=latents.ndim,
+                            dtype=torch.float32,
+                        )
                         weighting = _compute_zimage_loss_weighting_from_sigma(args.weighting_scheme, sigma_t0, model_pred.ndim)
                         loss = torch.nn.functional.mse_loss(model_pred.to(dit_dtype), target.to(dit_dtype), reduction="none")
                         if weighting is not None:

@@ -42,6 +42,13 @@ def sigma_to_t(sigma: torch.Tensor, noise_scheduler) -> torch.Tensor:
     return 1.0 - indices.float() / num_steps
 
 
+def sigma_to_training_timestep(sigma: torch.Tensor, noise_scheduler, timestep_offset: float = 1.0) -> torch.Tensor:
+    sigma = torch.as_tensor(sigma, dtype=torch.float32, device=sigma.device)
+    scheduler_config = getattr(noise_scheduler, "config", None)
+    num_train_timesteps = getattr(scheduler_config, "num_train_timesteps", len(noise_scheduler.timesteps))
+    return sigma * float(num_train_timesteps) + float(timestep_offset)
+
+
 def build_single_step_ode_aux_points(
     *,
     start_state: torch.Tensor,
@@ -83,12 +90,13 @@ def build_single_step_ode_aux_points(
 def single_step_aux_points(
     *,
     z_t0: torch.Tensor,
-    t0: torch.Tensor,
+    sigma_t0: torch.Tensor,
     v_standard: torch.Tensor,
     z_noise: torch.Tensor,
     points_per_path: int,
     noise_scheduler,
     num_sampling_steps: int,
+    sigma_upper_ratio: float = 1.5,
     sigma_upper: Optional[torch.Tensor] = None,
 ) -> list[dict[str, torch.Tensor]]:
     if points_per_path < 1:
@@ -96,12 +104,11 @@ def single_step_aux_points(
     if num_sampling_steps < 1:
         raise ValueError("num_sampling_steps must be at least 1")
 
-    sigma_t0_1d, _ = t_to_sigma_timestep(t0, noise_scheduler)
-    t1 = (t0.detach() - 1.0 / float(num_sampling_steps)).clamp_min(0.0)
-    sigma_t1_1d, _ = t_to_sigma_timestep(t1, noise_scheduler)
+    sigma_t0_1d = _coerce_batch_scalar("sigma_t0", sigma_t0, z_t0.shape[0], z_t0.device).clamp(0.0, 1.0)
+    sigma_t1_1d = (sigma_t0_1d.detach() - 1.0 / float(num_sampling_steps)).clamp_min(0.0)
 
     if sigma_upper is None:
-        sigma_upper = torch.ones_like(sigma_t0_1d)
+        sigma_upper = (sigma_t0_1d * float(sigma_upper_ratio)).clamp(max=1.0)
 
     sigma_t0 = sigma_t0_1d.view(-1, *([1] * (z_t0.ndim - 1)))
     sigma_t1 = sigma_t1_1d.view(-1, *([1] * (z_t0.ndim - 1)))
@@ -117,8 +124,7 @@ def single_step_aux_points(
 
     points: list[dict[str, torch.Tensor]] = []
     for z_t_prime, sigma_t_prime_1d in aux_pairs:
-        t_t_prime = sigma_to_t(sigma_t_prime_1d, noise_scheduler)
-        _, timesteps_t_prime = t_to_sigma_timestep(t_t_prime, noise_scheduler)
+        timesteps_t_prime = sigma_to_training_timestep(sigma_t_prime_1d, noise_scheduler)
         points.append(
             {
                 "latents": z_t_prime.detach(),
