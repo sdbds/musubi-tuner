@@ -22,8 +22,8 @@ from musubi_tuner.hv_train_network import (
     SS_METADATA_KEY_BASE_MODEL_VERSION,
     SS_METADATA_MINIMUM_KEYS,
     collator_class,
-    compute_loss_weighting_for_sd3,
     clean_memory_on_device,
+    get_sigmas,
     prepare_accelerator,
     setup_parser_common,
     read_config_from_file,
@@ -32,12 +32,46 @@ from musubi_tuner.hv_train_network import (
 )
 import logging
 
+from musubi_tuner.soar_utils import sigma_to_t, single_step_aux_points
+from musubi_tuner.soar_train_utils import (
+    add_soar_arguments,
+    compute_loss_weighting_from_sigma,
+    compute_per_sample_loss,
+    is_soar_enabled,
+    run_soar_auxiliary_pass,
+    validate_soar_args,
+    zimage_flow_matching_target,
+)
 from musubi_tuner.zimage_train_network import ZImageNetworkTrainer
 from musubi_tuner.utils import huggingface_utils, model_utils, sai_model_spec, train_utils
 from musubi_tuner.utils.safetensors_utils import mem_eff_save_file
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
+
+
+_compute_zimage_loss_weighting_from_sigma = compute_loss_weighting_from_sigma
+_compute_per_sample_zimage_loss = compute_per_sample_loss
+
+
+def _run_soar_auxiliary_pass(
+    *,
+    args: argparse.Namespace,
+    accelerator: Accelerator,
+    predict_velocity_fn,
+    clean_latents: torch.Tensor,
+    aux_points: list[dict[str, torch.Tensor]],
+    total_count: float,
+) -> tuple[torch.Tensor, float]:
+    return run_soar_auxiliary_pass(
+        args=args,
+        accelerator=accelerator,
+        predict_velocity_fn=predict_velocity_fn,
+        target_fn=zimage_flow_matching_target,
+        clean_latents=clean_latents,
+        aux_points=aux_points,
+        total_count=total_count,
+    )
 
 
 class ZImageTrainer(ZImageNetworkTrainer):
@@ -101,6 +135,7 @@ class ZImageTrainer(ZImageNetworkTrainer):
 
         # check model specific arguments
         self.handle_model_specific_args(args)
+        validate_soar_args(args)
 
         # ZImageNetrworkTrainer set args.dit_dtype as mixed precision, override it here to support float32/bfloat16 (full_bf16)
         args.dit_dtype = "bfloat16" if args.full_bf16 else "float32"
@@ -351,6 +386,10 @@ class ZImageTrainer(ZImageNetworkTrainer):
             "ss_timestep_sampling": args.timestep_sampling,
             "ss_sigmoid_scale": args.sigmoid_scale,
             "ss_discrete_flow_shift": args.discrete_flow_shift,
+            "ss_soar": bool(args.soar),
+            "ss_soar_lambda_aux": args.soar_lambda_aux,
+            "ss_soar_trajectory_length": args.soar_trajectory_length,
+            "ss_soar_num_sampling_steps": args.soar_num_sampling_steps,
         }
 
         datasets_metadata = []
@@ -523,21 +562,66 @@ class ZImageTrainer(ZImageNetworkTrainer):
                         args, noise, latents, batch["timesteps"], noise_scheduler, accelerator.device, dit_dtype
                     )
 
-                    weighting = compute_loss_weighting_for_sd3(
-                        args.weighting_scheme, noise_scheduler, timesteps, accelerator.device, dit_dtype
-                    )
-
                     model_pred, target = self.call_dit(
                         args, accelerator, transformer, latents, batch, noise, noisy_model_input, timesteps, dit_dtype
                     )
-                    loss = torch.nn.functional.mse_loss(model_pred.to(dit_dtype), target.to(dit_dtype), reduction="none")
+                    use_soar = is_soar_enabled(args)
 
-                    if weighting is not None:
-                        loss = loss * weighting
+                    loss_aux_sum = torch.tensor(0.0, device=latents.device, dtype=torch.float32)
+                    loss_aux_avg = torch.tensor(0.0, device=latents.device, dtype=torch.float32)
+                    aux_count = 0.0
 
-                    loss = loss.mean()  # mean loss over all elements in batch
+                    if use_soar:
+                        sigma_t0 = get_sigmas(noise_scheduler, timesteps, accelerator.device, n_dim=latents.ndim, dtype=torch.float32)
+                        weighting = _compute_zimage_loss_weighting_from_sigma(args.weighting_scheme, sigma_t0, model_pred.ndim)
+                        loss_main_per_sample = _compute_per_sample_zimage_loss(model_pred, target, weighting)
+                        loss_main_sum = loss_main_per_sample.sum()
+                        sigma_t0_1d = sigma_t0.reshape(sigma_t0.shape[0], -1)[:, 0].detach()
+                        t0 = sigma_to_t(sigma_t0_1d, noise_scheduler)
+                        aux_points = single_step_aux_points(
+                            z_t0=noisy_model_input.detach(),
+                            t0=t0.detach(),
+                            v_standard=(-model_pred).detach(),
+                            z_noise=noise.detach(),
+                            points_per_path=args.soar_trajectory_length,
+                            noise_scheduler=noise_scheduler,
+                            num_sampling_steps=args.soar_num_sampling_steps,
+                        )
+                        aux_count_expected = float(len(aux_points) * latents.shape[0])
+                        total_count = max(float(latents.shape[0]) + args.soar_lambda_aux * aux_count_expected, 1.0)
+                        accelerator.backward(loss_main_sum / total_count)
 
-                    accelerator.backward(loss)
+                        def predict_aux_velocity(aux_latents: torch.Tensor, aux_timesteps: torch.Tensor):
+                            return self.predict_velocity(
+                                args,
+                                accelerator,
+                                transformer,
+                                batch,
+                                aux_latents,
+                                aux_timesteps,
+                                dit_dtype,
+                            )
+
+                        loss_aux_sum, aux_count = _run_soar_auxiliary_pass(
+                            args=args,
+                            accelerator=accelerator,
+                            predict_velocity_fn=predict_aux_velocity,
+                            clean_latents=latents,
+                            aux_points=aux_points,
+                            total_count=total_count,
+                        )
+                        loss_main_avg = loss_main_per_sample.mean().detach()
+                        loss_aux_avg = (loss_aux_sum / aux_count) if aux_count > 0 else loss_aux_avg
+                        loss = (loss_main_sum.detach() + args.soar_lambda_aux * loss_aux_sum) / total_count
+                    else:
+                        sigma_t0 = get_sigmas(noise_scheduler, timesteps, accelerator.device, n_dim=latents.ndim, dtype=torch.float32)
+                        weighting = _compute_zimage_loss_weighting_from_sigma(args.weighting_scheme, sigma_t0, model_pred.ndim)
+                        loss = torch.nn.functional.mse_loss(model_pred.to(dit_dtype), target.to(dit_dtype), reduction="none")
+                        if weighting is not None:
+                            loss = loss * weighting
+                        loss = loss.mean()
+                        accelerator.backward(loss)
+                        loss_main_avg = loss.detach()
 
                     if not args.fused_backward_pass:
                         if accelerator.sync_gradients and args.max_grad_norm != 0.0:
@@ -603,11 +687,23 @@ class ZImageTrainer(ZImageNetworkTrainer):
                 loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
                 avr_loss: float = loss_recorder.moving_average
                 logs = {"avr_loss": avr_loss}
+                if use_soar:
+                    logs["aux_per_sample"] = aux_count / max(float(latents.shape[0]), 1.0)
                 progress_bar.set_postfix(**logs)
 
                 if len(accelerator.trackers) > 0:
                     logs = self.generate_step_logs(
                         args, current_loss, avr_loss, lr_scheduler, None, optimizer, keys_scaled, mean_norm, maximum_norm
+                    )
+                    logs.update(
+                        {
+                            "loss/main": loss_main_avg.item(),
+                            "loss/aux": loss_aux_avg.detach().item(),
+                            "loss/total": current_loss,
+                            "soar/enabled": float(use_soar),
+                            "soar/trajectory_length": float(args.soar_trajectory_length) if use_soar else 0.0,
+                            "soar/aux_points_per_sample": aux_count / max(float(latents.shape[0]), 1.0),
+                        }
                     )
                     accelerator.log(logs, step=global_step)
 
@@ -676,6 +772,7 @@ def zimage_finetune_setup_parser(parser: argparse.ArgumentParser) -> argparse.Ar
     """Z-Image fine-tuning specific parser setup"""
     parser.add_argument("--full_bf16", action="store_true", help="Enable full bfloat16 training for Z-Image")
     parser.add_argument("--fused_backward_pass", action="store_true", help="Use fused backward pass for Adafactor optimizer")
+    add_soar_arguments(parser)
     parser.add_argument(
         "--mem_eff_save",
         action="store_true",
@@ -705,6 +802,8 @@ def main():
         logger.warning("FP8 training is not supported for fine-tuning. Set --fp8-base or --fp8-scaled to False.")
         args.fp8_base = False
         args.fp8_scaled = False
+
+    validate_soar_args(args)
 
     trainer = ZImageTrainer()
     trainer.train(args)

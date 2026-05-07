@@ -42,6 +42,15 @@ from musubi_tuner.hunyuan_model.vae import load_vae, VAE_VER
 import musubi_tuner.hunyuan_model.vae as vae_module
 from musubi_tuner.modules.lr_schedulers import RexLR
 from musubi_tuner.modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
+from musubi_tuner.soar_utils import sigma_to_t, single_step_aux_points
+from musubi_tuner.soar_train_utils import (
+    compute_loss_weighting_from_sigma,
+    compute_per_sample_loss,
+    default_flow_matching_target,
+    is_soar_enabled,
+    run_soar_auxiliary_pass,
+    validate_soar_args,
+)
 import musubi_tuner.networks.lora as lora_module
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
 from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_HUNYUAN_VIDEO, ARCHITECTURE_HUNYUAN_VIDEO_FULL
@@ -1294,6 +1303,32 @@ class NetworkTrainer:
 
         self.default_guidance_scale = 6.0
 
+    def supports_soar(self, args: argparse.Namespace) -> bool:
+        return False
+
+    def predict_velocity_for_soar(
+        self,
+        args: argparse.Namespace,
+        accelerator: Accelerator,
+        transformer,
+        batch: dict[str, torch.Tensor],
+        noisy_model_input: torch.Tensor,
+        timesteps: torch.Tensor,
+        network_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        raise NotImplementedError(f"{self.__class__.__name__} does not implement SOAR auxiliary forward")
+
+    def soar_velocity_to_standard(self, model_pred: torch.Tensor) -> torch.Tensor:
+        return model_pred
+
+    def soar_standard_to_local_target(
+        self,
+        clean_latents: torch.Tensor,
+        aux_latents: torch.Tensor,
+        aux_sigmas: torch.Tensor,
+    ) -> torch.Tensor:
+        return default_flow_matching_target(clean_latents, aux_latents, aux_sigmas)
+
     @property
     def i2v_training(self) -> bool:
         return self._i2v_training
@@ -1671,6 +1706,9 @@ class NetworkTrainer:
 
         # check model specific arguments
         self.handle_model_specific_args(args)
+        validate_soar_args(args, allow_fused_backward=False)
+        if getattr(args, "soar", False) and not self.supports_soar(args):
+            raise ValueError(f"--soar is not supported by {self.__class__.__name__}")
 
         # show timesteps for debugging
         if args.show_timesteps:
@@ -2035,6 +2073,15 @@ class NetworkTrainer:
             "ss_sigmoid_scale": args.sigmoid_scale,
             "ss_discrete_flow_shift": args.discrete_flow_shift,
         }
+        if hasattr(args, "soar"):
+            metadata.update(
+                {
+                    "ss_soar": bool(args.soar),
+                    "ss_soar_lambda_aux": args.soar_lambda_aux,
+                    "ss_soar_trajectory_length": args.soar_trajectory_length,
+                    "ss_soar_num_sampling_steps": args.soar_num_sampling_steps,
+                }
+            )
 
         datasets_metadata = []
         # tag_frequency = {}  # merge tag frequency for metadata editor # TODO support tag frequency
@@ -2197,24 +2244,73 @@ class NetworkTrainer:
                         args, noise, latents, batch["timesteps"], noise_scheduler, accelerator.device, dit_dtype
                     )
 
-                    weighting = compute_loss_weighting_for_sd3(
-                        args.weighting_scheme, noise_scheduler, timesteps, accelerator.device, dit_dtype
-                    )
-
                     model_pred, target = self.call_dit(
                         args, accelerator, transformer, latents, batch, noise, noisy_model_input, timesteps, network_dtype
                     )
-                    loss = torch.nn.functional.mse_loss(model_pred.to(network_dtype), target, reduction="none")
+                    use_soar = is_soar_enabled(args)
+                    loss_aux_sum = torch.tensor(0.0, device=latents.device, dtype=torch.float32)
+                    loss_aux_avg = torch.tensor(0.0, device=latents.device, dtype=torch.float32)
+                    aux_count = 0.0
 
-                    if weighting is not None:
-                        loss = loss * weighting
-                    # loss = loss.mean([1, 2, 3])
-                    # # min snr gamma, scale v pred loss like noise pred, v pred like loss, debiased estimation etc.
-                    # loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
+                    if use_soar:
+                        sigma_t0 = get_sigmas(noise_scheduler, timesteps, accelerator.device, n_dim=latents.ndim, dtype=torch.float32)
+                        weighting = compute_loss_weighting_from_sigma(args.weighting_scheme, sigma_t0, model_pred.ndim)
+                        loss_main_per_sample = compute_per_sample_loss(model_pred.to(network_dtype), target, weighting)
+                        loss_main_sum = loss_main_per_sample.sum()
 
-                    loss = loss.mean()  # mean loss over all elements in batch
+                        sigma_t0_1d = sigma_t0.reshape(sigma_t0.shape[0], -1)[:, 0].detach()
+                        t0 = sigma_to_t(sigma_t0_1d, noise_scheduler)
+                        aux_points = single_step_aux_points(
+                            z_t0=noisy_model_input.detach(),
+                            t0=t0.detach(),
+                            v_standard=self.soar_velocity_to_standard(model_pred).detach(),
+                            z_noise=noise.detach(),
+                            points_per_path=args.soar_trajectory_length,
+                            noise_scheduler=noise_scheduler,
+                            num_sampling_steps=args.soar_num_sampling_steps,
+                        )
+                        aux_count_expected = float(len(aux_points) * latents.shape[0])
+                        total_count = max(float(latents.shape[0]) + args.soar_lambda_aux * aux_count_expected, 1.0)
+                        accelerator.backward(loss_main_sum / total_count)
 
-                    accelerator.backward(loss)
+                        def predict_aux_velocity(aux_latents: torch.Tensor, aux_timesteps: torch.Tensor):
+                            return self.predict_velocity_for_soar(
+                                args,
+                                accelerator,
+                                transformer,
+                                batch,
+                                aux_latents,
+                                aux_timesteps,
+                                network_dtype,
+                            )
+
+                        loss_aux_sum, aux_count = run_soar_auxiliary_pass(
+                            args=args,
+                            accelerator=accelerator,
+                            predict_velocity_fn=predict_aux_velocity,
+                            target_fn=self.soar_standard_to_local_target,
+                            clean_latents=latents,
+                            aux_points=aux_points,
+                            total_count=total_count,
+                        )
+                        loss_main_avg = loss_main_per_sample.mean().detach()
+                        loss_aux_avg = (loss_aux_sum / aux_count) if aux_count > 0 else loss_aux_avg
+                        loss = (loss_main_sum.detach() + args.soar_lambda_aux * loss_aux_sum) / total_count
+                    else:
+                        sigma_t0 = get_sigmas(noise_scheduler, timesteps, accelerator.device, n_dim=model_pred.ndim, dtype=torch.float32)
+                        weighting = compute_loss_weighting_from_sigma(args.weighting_scheme, sigma_t0, model_pred.ndim)
+                        loss = torch.nn.functional.mse_loss(model_pred.to(network_dtype), target, reduction="none")
+
+                        if weighting is not None:
+                            loss = loss * weighting
+                        # loss = loss.mean([1, 2, 3])
+                        # # min snr gamma, scale v pred loss like noise pred, v pred like loss, debiased estimation etc.
+                        # loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
+
+                        loss = loss.mean()  # mean loss over all elements in batch
+                        loss_main_avg = loss.detach()
+
+                        accelerator.backward(loss)
                     if accelerator.sync_gradients:
                         # self.all_reduce_network(accelerator, network)  # sync DDP grad manually
                         state = accelerate.PartialState()
@@ -2274,6 +2370,8 @@ class NetworkTrainer:
                 loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
                 avr_loss: float = loss_recorder.moving_average
                 logs = {"avr_loss": avr_loss}  # , "lr": lr_scheduler.get_last_lr()[0]}
+                if use_soar:
+                    logs["aux_per_sample"] = aux_count / max(float(latents.shape[0]), 1.0)
                 progress_bar.set_postfix(**logs)
 
                 if args.scale_weight_norms:
@@ -2283,6 +2381,17 @@ class NetworkTrainer:
                     logs = self.generate_step_logs(
                         args, current_loss, avr_loss, lr_scheduler, lr_descriptions, optimizer, keys_scaled, mean_norm, maximum_norm
                     )
+                    if hasattr(args, "soar"):
+                        logs.update(
+                            {
+                                "loss/main": loss_main_avg.item(),
+                                "loss/aux": loss_aux_avg.detach().item(),
+                                "loss/total": current_loss,
+                                "soar/enabled": float(use_soar),
+                                "soar/trajectory_length": float(args.soar_trajectory_length) if use_soar else 0.0,
+                                "soar/aux_points_per_sample": aux_count / max(float(latents.shape[0]), 1.0),
+                            }
+                        )
                     accelerator.log(logs, step=global_step)
 
                 if global_step >= args.max_train_steps:

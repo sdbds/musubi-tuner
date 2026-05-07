@@ -24,6 +24,7 @@ from musubi_tuner.hv_train_network import (
     setup_parser_common,
     read_config_from_file,
 )
+from musubi_tuner.soar_train_utils import add_soar_arguments
 from musubi_tuner.utils import model_utils
 from musubi_tuner.utils.sai_model_spec import CUSTOM_ARCH_QWEN_IMAGE_EDIT_PLUS, CUSTOM_ARCH_QWEN_IMAGE_EDIT_2511
 
@@ -582,6 +583,34 @@ class QwenImageNetworkTrainer(NetworkTrainer):
         # print(model_pred.dtype, target.dtype)
         return model_pred, target
 
+    def supports_soar(self, args: argparse.Namespace) -> bool:
+        return not getattr(args, "is_edit", False) and not getattr(args, "is_layered", False) and not getattr(
+            args, "remove_first_image_from_target", False
+        )
+
+    def predict_velocity_for_soar(
+        self,
+        args: argparse.Namespace,
+        accelerator: Accelerator,
+        transformer,
+        batch: dict[str, torch.Tensor],
+        noisy_model_input: torch.Tensor,
+        timesteps: torch.Tensor,
+        network_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        model_pred, _ = self.call_dit(
+            args,
+            accelerator,
+            transformer,
+            noisy_model_input,
+            batch,
+            torch.zeros_like(noisy_model_input),
+            noisy_model_input,
+            timesteps,
+            network_dtype,
+        )
+        return model_pred
+
     # endregion model specific
 
 
@@ -603,6 +632,7 @@ def qwen_image_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argumen
 def main():
     parser = setup_parser_common()
     parser = qwen_image_setup_parser(parser)
+    parser = add_soar_arguments(parser)
 
     args = parser.parse_args()
     args = read_config_from_file(args, parser)

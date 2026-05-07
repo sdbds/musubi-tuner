@@ -291,6 +291,51 @@ accelerate launch --num_cpu_threads_per_process 1 src/musubi_tuner/zimage_train.
 - `--disable_numpy_memmap`: Disables numpy memory mapping for model loading, loading with standard file read. Increases RAM usage but may speed up model loading in some cases.
 - `--block_swap_optimizer_patch_params` option is available to patch optimizer parameters for block swapping. 
 
+### Experimental SOAR-lite
+
+`zimage_train.py` and `zimage_train_network.py` support an experimental SOAR-lite path:
+
+- `--soar`
+- `--soar_lambda_aux` (default: `1.0`)
+- `--soar_trajectory_length` (default: `6`)
+- `--soar_num_sampling_steps` (default: `40`)
+
+Recommended smoke test:
+
+```bash
+--soar --soar_trajectory_length 1
+```
+
+Current limitations:
+
+- In `zimage_train.py`, `--soar` is incompatible with `--fused_backward_pass`
+- In `zimage_train_network.py`, SOAR-lite is available for LoRA/network training and updates only network parameters
+- rollout is cond-only; classifier-free guidance rollout is not supported in v1
+
+<details>
+<summary>日本語</summary>
+
+`zimage_train.py` と `zimage_train_network.py` では、実験的なSOAR-liteを利用できます。
+
+- `--soar`
+- `--soar_lambda_aux`（デフォルト: `1.0`）
+- `--soar_trajectory_length`（デフォルト: `6`）
+- `--soar_num_sampling_steps`（デフォルト: `40`）
+
+初回のスモークテストでは、次のように補助点数だけを最小化するのが安全です。
+
+```bash
+--soar --soar_trajectory_length 1
+```
+
+現時点の制約:
+
+- `zimage_train.py` では、`--soar` と `--fused_backward_pass` は同時に使用できません
+- `zimage_train_network.py` では、SOAR-liteをLoRA/network学習で利用でき、networkパラメータのみを更新します
+- rolloutはcond-onlyで、v1ではCFG rolloutをサポートしません
+
+</details>
+
 `--full_bf16` reduces VRAM usage by about 30GB but may impact model accuracy as the weights are kept in bfloat16. Note that the optimizer state is still kept in float32. In addition, it is recommended to use this with an optimizer that supports stochastic rounding. In this repository, Adafactor optimizer with `--fused_backward_pass` option supports stochastic rounding.
 
 `--block_swap_optimizer_patch_params` option moves the gradients to the same device as the parameters during the optimizer step, which makes it work with block swapping. This workaround currently works with AdamW and Adafactor etc. AdamW8bit and other optimizers do not work with this patch due to their specific implementation.

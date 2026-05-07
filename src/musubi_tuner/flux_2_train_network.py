@@ -15,6 +15,7 @@ from musubi_tuner.hv_train_network import (
     setup_parser_common,
     read_config_from_file,
 )
+from musubi_tuner.soar_train_utils import add_soar_arguments
 
 import logging
 
@@ -332,6 +333,32 @@ class Flux2NetworkTrainer(NetworkTrainer):
 
         return model_pred, target
 
+    def supports_soar(self, args: argparse.Namespace) -> bool:
+        return True
+
+    def predict_velocity_for_soar(
+        self,
+        args: argparse.Namespace,
+        accelerator: Accelerator,
+        transformer,
+        batch: dict[str, torch.Tensor],
+        noisy_model_input: torch.Tensor,
+        timesteps: torch.Tensor,
+        network_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        model_pred, _ = self.call_dit(
+            args,
+            accelerator,
+            transformer,
+            noisy_model_input,
+            batch,
+            torch.zeros_like(noisy_model_input),
+            noisy_model_input,
+            timesteps,
+            network_dtype,
+        )
+        return model_pred
+
     # endregion model specific
 
 
@@ -347,6 +374,7 @@ def flux2_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentPars
 def main():
     parser = setup_parser_common()
     parser = flux2_setup_parser(parser)
+    parser = add_soar_arguments(parser)
 
     args = parser.parse_args()
     args = read_config_from_file(args, parser)

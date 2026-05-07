@@ -256,6 +256,27 @@ Don't forget to specify `--network_module networks.lora_qwen_image`.
 
 The appropriate settings for each parameter are unknown. Feedback is welcome.
 
+### Experimental SOAR-lite
+
+`qwen_image_train_network.py` supports experimental SOAR-lite for LoRA/network training in standard Qwen-Image text-to-image mode:
+
+- `--soar`
+- `--soar_lambda_aux` (default: `1.0`)
+- `--soar_trajectory_length` (default: `6`)
+- `--soar_num_sampling_steps` (default: `40`)
+
+For a first smoke test, use a single auxiliary point:
+
+```bash
+--soar --soar_trajectory_length 1
+```
+
+Current limitations:
+
+- SOAR-lite is rejected for Qwen-Image-Edit/Edit-2509/Edit-2511.
+- SOAR-lite is rejected for Qwen-Image-Layered and `--remove_first_image_from_target`.
+- SOAR-lite uses the same optimizer step as the main LoRA loss and does not unfreeze the base DiT.
+
 ### VRAM Usage Estimates with Memory Saving Options
 
 For 1024x1024 training with the batch size of 1, `--mixed_precision bf16` and `--gradient_checkpointing` is enabled and `--xformers` is used.
@@ -319,6 +340,27 @@ GPUのVRAMが16GB未満の場合は、`--fp8_vl`を推奨します。
 `--network_module networks.lora_qwen_image`を指定することを忘れないでください。
 
 それぞれのパラメータの適切な設定は不明です。フィードバックをお待ちしています。
+
+### Experimental SOAR-lite
+
+`qwen_image_train_network.py`では、標準のQwen-Image text-to-imageモードに限り、LoRA/network学習向けの実験的なSOAR-liteを利用できます。
+
+- `--soar`
+- `--soar_lambda_aux`（デフォルト: `1.0`）
+- `--soar_trajectory_length`（デフォルト: `6`）
+- `--soar_num_sampling_steps`（デフォルト: `40`）
+
+初回のスモークテストでは、補助点数を最小化してください。
+
+```bash
+--soar --soar_trajectory_length 1
+```
+
+現時点の制約:
+
+- Qwen-Image-Edit/Edit-2509/Edit-2511ではSOAR-liteは拒否されます。
+- Qwen-Image-Layeredおよび`--remove_first_image_from_target`ではSOAR-liteは拒否されます。
+- SOAR-liteはメインのLoRA lossと同じoptimizer stepを使い、base DiTはunfreezeしません。
 
 ### メモリ節約オプションを使用した場合のVRAM使用量の目安
 

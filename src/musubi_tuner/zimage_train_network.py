@@ -15,6 +15,7 @@ from musubi_tuner.hv_train_network import (
     read_config_from_file,
     setup_parser_common,
 )
+from musubi_tuner.soar_train_utils import add_soar_arguments, zimage_flow_matching_target
 from musubi_tuner.utils import model_utils
 from musubi_tuner.zimage import zimage_autoencoder, zimage_config, zimage_model, zimage_utils
 
@@ -260,24 +261,24 @@ class ZImageNetworkTrainer(NetworkTrainer):
         latents = (latents - shift) * scale
         return latents
 
-    def call_dit(
+    def predict_velocity(
         self,
         args: argparse.Namespace,
         accelerator: Accelerator,
         transformer,
-        latents: torch.Tensor,
         batch: dict[str, torch.Tensor],
-        noise: torch.Tensor,
         noisy_model_input: torch.Tensor,
         timesteps: torch.Tensor,
         network_dtype: torch.dtype,
     ):
         model: zimage_model.ZImageTransformer2DModel = accelerator.unwrap_model(transformer)
-        bsize = latents.shape[0]
+        bsize = noisy_model_input.shape[0]
 
         # latents: [B, C, H, W]
         # noisy_model_input: [B, C, H, W]
-        image_sequence_length = (latents.shape[2] // model.all_patch_size[0]) * (latents.shape[3] // model.all_patch_size[0])
+        image_sequence_length = (noisy_model_input.shape[2] // model.all_patch_size[0]) * (
+            noisy_model_input.shape[3] // model.all_patch_size[0]
+        )
 
         # Timesteps
         t_input = (1000.0 - timesteps) / 1000.0
@@ -398,12 +399,68 @@ class ZImageNetworkTrainer(NetworkTrainer):
                 model_pred = transformer(x=noisy_model_input, t=t_input, cap_feats=llm_embed, cap_mask=llm_mask)
 
         # model_pred: [B, C, F, H, W]
-        model_pred = model_pred.squeeze(2)  # [B, C, H, W]
+        return model_pred.squeeze(2)  # [B, C, H, W]
+
+    def call_dit(
+        self,
+        args: argparse.Namespace,
+        accelerator: Accelerator,
+        transformer,
+        latents: torch.Tensor,
+        batch: dict[str, torch.Tensor],
+        noise: torch.Tensor,
+        noisy_model_input: torch.Tensor,
+        timesteps: torch.Tensor,
+        network_dtype: torch.dtype,
+    ):
+        model_pred = self.predict_velocity(
+            args,
+            accelerator,
+            transformer,
+            batch,
+            noisy_model_input,
+            timesteps,
+            network_dtype,
+        )
 
         # Target: Opposite of usual Flow matching
         target = latents - noise
 
         return model_pred, target
+
+    def supports_soar(self, args: argparse.Namespace) -> bool:
+        return True
+
+    def predict_velocity_for_soar(
+        self,
+        args: argparse.Namespace,
+        accelerator: Accelerator,
+        transformer,
+        batch: dict[str, torch.Tensor],
+        noisy_model_input: torch.Tensor,
+        timesteps: torch.Tensor,
+        network_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        return self.predict_velocity(
+            args,
+            accelerator,
+            transformer,
+            batch,
+            noisy_model_input,
+            timesteps,
+            network_dtype,
+        )
+
+    def soar_velocity_to_standard(self, model_pred: torch.Tensor) -> torch.Tensor:
+        return -model_pred
+
+    def soar_standard_to_local_target(
+        self,
+        clean_latents: torch.Tensor,
+        aux_latents: torch.Tensor,
+        aux_sigmas: torch.Tensor,
+    ) -> torch.Tensor:
+        return zimage_flow_matching_target(clean_latents, aux_latents, aux_sigmas)
 
 
 def zimage_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -423,6 +480,7 @@ def zimage_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentPar
 def main():
     parser = setup_parser_common()
     parser = zimage_setup_parser(parser)
+    parser = add_soar_arguments(parser)
 
     args = parser.parse_args()
     args = read_config_from_file(args, parser)

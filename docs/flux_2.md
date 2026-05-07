@@ -185,6 +185,23 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/mus
 - `--vae_dtype` option is available to specify the VAE weight data type. Default is `float32`, `bfloat16` can also be specified.
 - Instead of `--sdpa`, `--xformers` and `--flash_attn` can also be used. Make sure the related libraries are installed.
 
+### Experimental SOAR-lite
+
+`flux_2_train_network.py` supports experimental SOAR-lite for LoRA/network training:
+
+- `--soar`
+- `--soar_lambda_aux` (default: `1.0`)
+- `--soar_trajectory_length` (default: `6`)
+- `--soar_num_sampling_steps` (default: `40`)
+
+For a first smoke test, use a single auxiliary point:
+
+```bash
+--soar --soar_trajectory_length 1
+```
+
+SOAR-lite uses the same optimizer step as the main LoRA loss and does not unfreeze the base DiT.
+
 `--fp8_text_encoder` option is not available for dev (Mistral 3).
 
 Some blocks can be offloaded to CPU for memory savings using the `--blocks_to_swap` option. See [HunyuanVideo documentation](./hunyuan_video.md#memory-optimization) for details.
@@ -213,6 +230,23 @@ FLUX.2の学習は専用のスクリプト`flux_2_train_network.py`を使用し�
 - メモリ節約のために`--gradient_checkpointing`が利用可能です。
 - `--vae_dtype`オプションは、VAEの重みデータ型を指定するためのオプションです。デフォルトは`float32`で、`bfloat16`も指定可能です。
 - `--sdpa`の代わりに`--xformers`および`--flash_attn`を使用することも可能です。関連するライブラリがインストールされていることを確認してください。
+
+### Experimental SOAR-lite
+
+`flux_2_train_network.py`では、LoRA/network学習向けの実験的なSOAR-liteを利用できます。
+
+- `--soar`
+- `--soar_lambda_aux`（デフォルト: `1.0`）
+- `--soar_trajectory_length`（デフォルト: `6`）
+- `--soar_num_sampling_steps`（デフォルト: `40`）
+
+初回のスモークテストでは、補助点数を最小化してください。
+
+```bash
+--soar --soar_trajectory_length 1
+```
+
+SOAR-liteはメインのLoRA lossと同じoptimizer stepを使い、base DiTはunfreezeしません。
 
 `--fp8_text_encoder`オプションはdev（Mistral 3）では使用できません。
 
