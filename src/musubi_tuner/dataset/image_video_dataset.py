@@ -96,6 +96,16 @@ ARCHITECTURE_HUNYUAN_VIDEO_1_5 = "hv15"
 ARCHITECTURE_HUNYUAN_VIDEO_1_5_FULL = "hunyuan_video_1_5"
 ARCHITECTURE_Z_IMAGE = "zi"
 ARCHITECTURE_Z_IMAGE_FULL = "z_image"
+SOAR_EMPTY_PROMPT_CACHE_PREFIX = "__soar_empty_prompt"
+
+
+def _is_legacy_soar_empty_prompt_cache_file(path: str) -> bool:
+    return os.path.basename(path).startswith(f"{SOAR_EMPTY_PROMPT_CACHE_PREFIX}_")
+
+
+def _glob_latent_cache_files(cache_directory: str, architecture: str) -> list[str]:
+    cache_files = glob.glob(os.path.join(cache_directory, f"*_{architecture}.safetensors"))
+    return [path for path in cache_files if not _is_legacy_soar_empty_prompt_cache_file(path)]
 
 
 def glob_images(directory, base="*", caption_extension=None):
@@ -1720,7 +1730,7 @@ class BaseDataset(torch.utils.data.Dataset):
         return metadata
 
     def get_all_latent_cache_files(self):
-        return glob.glob(os.path.join(self.cache_directory, f"*_{self.architecture}.safetensors"))
+        return _glob_latent_cache_files(self.cache_directory, self.architecture)
 
     def get_all_text_encoder_output_cache_files(self):
         return glob.glob(os.path.join(self.cache_directory, f"*_{self.architecture}_te.safetensors"))
@@ -2076,7 +2086,7 @@ class ImageDataset(BaseDataset):
         bucket_selector = BucketSelector(self.resolution, self.enable_bucket, self.bucket_no_upscale, self.architecture)
 
         # glob cache files
-        latent_cache_files = glob.glob(os.path.join(self.cache_directory, f"*_{self.architecture}.safetensors"))
+        latent_cache_files = _glob_latent_cache_files(self.cache_directory, self.architecture)
 
         # assign cache files to item info
         # (width, height) -> [ItemInfo] or (width, height, other conds...) -> [ItemInfo]
@@ -2427,7 +2437,7 @@ class VideoDataset(BaseDataset):
         bucket_selector = BucketSelector(self.resolution, self.enable_bucket, self.bucket_no_upscale, self.architecture)
 
         # glob cache files
-        latent_cache_files = glob.glob(os.path.join(self.cache_directory, f"*_{self.architecture}.safetensors"))
+        latent_cache_files = _glob_latent_cache_files(self.cache_directory, self.architecture)
 
         # assign cache files to item info
         bucketed_item_info: dict[tuple[int, int, int], list[ItemInfo]] = {}  # (width, height, frame_count) -> [ItemInfo]

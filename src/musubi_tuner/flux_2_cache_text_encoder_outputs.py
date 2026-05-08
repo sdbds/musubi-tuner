@@ -8,6 +8,7 @@ from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitize
 from musubi_tuner.dataset.image_video_dataset import ItemInfo, save_text_encoder_output_cache_flux_2
 
 from musubi_tuner.flux_2 import flux2_utils
+from musubi_tuner.soar_train_utils import get_dataset_cache_directories, save_soar_empty_prompt_cache
 import musubi_tuner.cache_text_encoder_outputs as cache_text_encoder_outputs
 import logging
 
@@ -26,6 +27,30 @@ def encode_and_save_batch(text_embedder: torch.nn.Module, batch: list[ItemInfo],
     # save prompt cache
     for item, _ctx_vec in zip(batch, ctx_vec):
         save_text_encoder_output_cache_flux_2(item, _ctx_vec, arch_full=arch_full)
+
+
+def encode_and_save_empty_prompt_cache(
+    text_embedder: torch.nn.Module,
+    train_dataset_group,
+    device: torch.device,
+    architecture: str,
+    arch_full: str,
+    model_version: str,
+    skip_existing: bool,
+):
+    autocast_dtype = torch.bfloat16 if text_embedder.dtype.itemsize == 1 else text_embedder.dtype
+    with torch.autocast(device_type=device.type, dtype=autocast_dtype), torch.no_grad():
+        ctx_vec = text_embedder([""]).cpu()[0]
+
+    cache_directories = get_dataset_cache_directories(train_dataset_group)
+    save_soar_empty_prompt_cache(
+        cache_directories=cache_directories,
+        architecture=architecture,
+        tensor_base_key="ctx_vec",
+        tensor=ctx_vec,
+        metadata={"architecture_full": arch_full, "model_version": model_version},
+        skip_existing=skip_existing,
+    )
 
 
 def main():
@@ -54,6 +79,15 @@ def main():
     m3_dtype = torch.float8_e4m3fn if args.fp8_text_encoder else torch.bfloat16
     text_embedder = flux2_utils.load_text_embedder(
         model_version_info, args.text_encoder, dtype=m3_dtype, device=device, disable_mmap=True
+    )
+    encode_and_save_empty_prompt_cache(
+        text_embedder,
+        train_dataset_group,
+        device,
+        model_version_info.architecture,
+        model_version_info.architecture_full,
+        args.model_version,
+        args.skip_existing,
     )
 
     # Encode with Mistral 3 or Qwen-3 text encoder

@@ -265,6 +265,7 @@ The appropriate settings for each parameter are unknown. Feedback is welcome.
 - `--soar_trajectory_length` (default: `6`)
 - `--soar_num_sampling_steps` (default: `40`)
 - `--soar_sigma_upper_ratio` (default: `1.5`)
+- `--soar_cfg_scale_sampling` (default: `1.0`; set `4.5` for official-style CFG rollout)
 
 For a first smoke test, use a single auxiliary point:
 
@@ -276,6 +277,7 @@ Current limitations:
 
 - SOAR-lite is rejected for Qwen-Image-Edit/Edit-2509/Edit-2511.
 - SOAR-lite is rejected for Qwen-Image-Layered and `--remove_first_image_from_target`.
+- CFG rollout requires the empty prompt sidecar cache created by `qwen_image_cache_text_encoder_outputs.py`.
 - SOAR-lite uses the same optimizer step as the main LoRA loss and does not unfreeze the base DiT.
 
 ### VRAM Usage Estimates with Memory Saving Options
@@ -351,6 +353,7 @@ GPUのVRAMが16GB未満の場合は、`--fp8_vl`を推奨します。
 - `--soar_trajectory_length`（デフォルト: `6`）
 - `--soar_num_sampling_steps`（デフォルト: `40`）
 - `--soar_sigma_upper_ratio`（デフォルト: `1.5`）
+- `--soar_cfg_scale_sampling`（デフォルト: `1.0`。公式に近いCFG rolloutを使う場合は`4.5`）
 
 初回のスモークテストでは、補助点数を最小化してください。
 
@@ -362,6 +365,7 @@ GPUのVRAMが16GB未満の場合は、`--fp8_vl`を推奨します。
 
 - Qwen-Image-Edit/Edit-2509/Edit-2511ではSOAR-liteは拒否されます。
 - Qwen-Image-Layeredおよび`--remove_first_image_from_target`ではSOAR-liteは拒否されます。
+- CFG rolloutには、`qwen_image_cache_text_encoder_outputs.py`が作成するempty promptのsidecar cacheが必要です。
 - SOAR-liteはメインのLoRA lossと同じoptimizer stepを使い、base DiTはunfreezeしません。
 
 ### メモリ節約オプションを使用した場合のVRAM使用量の目安

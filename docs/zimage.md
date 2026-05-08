@@ -300,6 +300,7 @@ accelerate launch --num_cpu_threads_per_process 1 src/musubi_tuner/zimage_train.
 - `--soar_trajectory_length` (default: `6`)
 - `--soar_num_sampling_steps` (default: `40`)
 - `--soar_sigma_upper_ratio` (default: `1.5`)
+- `--soar_cfg_scale_sampling` (default: `1.0`; set `4.5` for official-style CFG rollout in LoRA/network training)
 
 Recommended smoke test:
 
@@ -307,11 +308,14 @@ Recommended smoke test:
 --soar --soar_trajectory_length 1
 ```
 
+Official-style CFG rollout requires the empty prompt sidecar cache created by `zimage_cache_text_encoder_outputs.py`. Re-run the text encoder cache script after updating if the sidecar is missing.
+
 Current limitations:
 
 - In `zimage_train.py`, `--soar` is incompatible with `--fused_backward_pass`
+- In `zimage_train.py`, `--soar_cfg_scale_sampling` values other than `1.0` are not supported yet
 - In `zimage_train_network.py`, SOAR-lite is available for LoRA/network training and updates only network parameters
-- rollout is cond-only; classifier-free guidance rollout is not supported in v1
+- In `zimage_train_network.py`, `--soar_cfg_scale_sampling 4.5` enables official-style CFG rollout for standard text-to-image batches
 
 <details>
 <summary>日本語</summary>
@@ -323,6 +327,7 @@ Current limitations:
 - `--soar_trajectory_length`（デフォルト: `6`）
 - `--soar_num_sampling_steps`（デフォルト: `40`）
 - `--soar_sigma_upper_ratio`（デフォルト: `1.5`）
+- `--soar_cfg_scale_sampling`（デフォルト: `1.0`。LoRA/network学習で公式に近いCFG rolloutを使う場合は`4.5`）
 
 初回のスモークテストでは、次のように補助点数だけを最小化するのが安全です。
 
@@ -330,11 +335,14 @@ Current limitations:
 --soar --soar_trajectory_length 1
 ```
 
+公式に近いCFG rolloutには、`zimage_cache_text_encoder_outputs.py`が作成するempty promptのsidecar cacheが必要です。sidecarがない場合は、テキストエンコーダーキャッシュを作り直してください。
+
 現時点の制約:
 
 - `zimage_train.py` では、`--soar` と `--fused_backward_pass` は同時に使用できません
+- `zimage_train.py` では、`--soar_cfg_scale_sampling` に `1.0` 以外を指定することはまだできません
 - `zimage_train_network.py` では、SOAR-liteをLoRA/network学習で利用でき、networkパラメータのみを更新します
-- rolloutはcond-onlyで、v1ではCFG rolloutをサポートしません
+- `zimage_train_network.py` では、標準のtext-to-image batchに対して `--soar_cfg_scale_sampling 4.5` で公式に近いCFG rolloutを有効化できます
 
 </details>
 

@@ -14,6 +14,7 @@ import torch
 from musubi_tuner.dataset import config_utils
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
 from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_Z_IMAGE, ItemInfo, save_text_encoder_output_cache_z_image
+from musubi_tuner.soar_train_utils import get_dataset_cache_directories, save_soar_empty_prompt_cache
 from musubi_tuner.zimage import zimage_utils
 import musubi_tuner.cache_text_encoder_outputs as cache_text_encoder_outputs
 
@@ -52,6 +53,24 @@ def encode_and_save_batch(tokenizer, text_encoder, batch: list[ItemInfo], device
         save_text_encoder_output_cache_z_image(item, embed_trimmed)
 
 
+def encode_and_save_empty_prompt_cache(tokenizer, text_encoder, train_dataset_group, skip_existing: bool):
+    prompt_embeds, prompt_masks = zimage_utils.get_text_embeds(tokenizer, text_encoder, "")
+    prompt_embeds = prompt_embeds.cpu()
+    prompt_masks = prompt_masks.cpu()
+    actual_length = int(prompt_masks[0].sum().item())
+    empty_embed = prompt_embeds[0, :actual_length]
+
+    cache_directories = get_dataset_cache_directories(train_dataset_group)
+    save_soar_empty_prompt_cache(
+        cache_directories=cache_directories,
+        architecture=ARCHITECTURE_Z_IMAGE,
+        tensor_base_key="varlen_llm_embed",
+        tensor=empty_embed,
+        metadata={"architecture_full": "z_image"},
+        skip_existing=skip_existing,
+    )
+
+
 def main():
     parser = cache_text_encoder_outputs.setup_parser_common()
     parser = zimage_setup_parser(parser)
@@ -85,6 +104,7 @@ def main():
     logger.info(f"Loading Qwen3 text encoder from {args.text_encoder}")
     tokenizer, text_encoder = zimage_utils.load_qwen3(args.text_encoder, dtype=te_dtype, device=device, disable_mmap=True)
     text_encoder.eval()
+    encode_and_save_empty_prompt_cache(tokenizer, text_encoder, train_dataset_group, args.skip_existing)
 
     # Encode with Qwen3 text encoder
     logger.info("Encoding prompts with Qwen3 text encoder")

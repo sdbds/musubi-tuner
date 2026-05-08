@@ -15,7 +15,13 @@ from musubi_tuner.hv_train_network import (
     setup_parser_common,
     read_config_from_file,
 )
-from musubi_tuner.soar_train_utils import add_soar_arguments
+from musubi_tuner.soar_train_utils import (
+    add_soar_arguments,
+    combine_cfg_standard_velocity,
+    get_dataset_cache_directories,
+    is_soar_cfg_rollout_enabled,
+    load_soar_empty_prompt_tensor,
+)
 
 import logging
 
@@ -28,6 +34,7 @@ logging.basicConfig(level=logging.INFO)
 class Flux2NetworkTrainer(NetworkTrainer):
     def __init__(self):
         super().__init__()
+        self._soar_empty_ctx_vec: Optional[torch.Tensor] = None
 
     # region model specific
 
@@ -334,7 +341,21 @@ class Flux2NetworkTrainer(NetworkTrainer):
         return model_pred, target
 
     def supports_soar(self, args: argparse.Namespace) -> bool:
+        model_version_info = getattr(self, "model_version_info", None)
+        if is_soar_cfg_rollout_enabled(args) and getattr(model_version_info, "guidance_distilled", False):
+            return False
         return True
+
+    def load_soar_empty_prompt_cache(self, args: argparse.Namespace, train_dataset_group) -> None:
+        if not is_soar_cfg_rollout_enabled(args):
+            return
+        if getattr(self.model_version_info, "guidance_distilled", False):
+            raise ValueError("SOAR CFG rollout is not supported for guidance-distilled Flux.2 models")
+        self._soar_empty_ctx_vec = load_soar_empty_prompt_tensor(
+            cache_directories=get_dataset_cache_directories(train_dataset_group),
+            architecture=self.architecture,
+            tensor_base_key="ctx_vec",
+        )
 
     def predict_velocity_for_soar(
         self,
@@ -358,6 +379,44 @@ class Flux2NetworkTrainer(NetworkTrainer):
             network_dtype,
         )
         return model_pred
+
+    def soar_velocity_to_standard(self, model_pred: torch.Tensor) -> torch.Tensor:
+        return model_pred
+
+    def get_soar_rollout_velocity_standard(
+        self,
+        args: argparse.Namespace,
+        accelerator: Accelerator,
+        transformer,
+        batch: dict[str, torch.Tensor],
+        noisy_model_input: torch.Tensor,
+        timesteps: torch.Tensor,
+        network_dtype: torch.dtype,
+        cond_model_pred: torch.Tensor,
+    ) -> torch.Tensor:
+        if not is_soar_cfg_rollout_enabled(args):
+            return self.soar_velocity_to_standard(cond_model_pred).detach()
+        if "latents_control_0" in batch:
+            raise ValueError("SOAR CFG rollout is not supported for Flux.2 control batches yet")
+        if self._soar_empty_ctx_vec is None:
+            raise ValueError("SOAR CFG rollout requires Flux.2 empty prompt cache")
+
+        empty_ctx_vec = self._soar_empty_ctx_vec
+        if empty_ctx_vec.ndim == 2:
+            empty_ctx_vec = empty_ctx_vec.unsqueeze(0)
+        if empty_ctx_vec.shape[0] != 1:
+            raise ValueError(f"Expected Flux.2 empty ctx_vec batch dimension 1, got {tuple(empty_ctx_vec.shape)}")
+        batch_uncond = dict(batch)
+        batch_uncond["ctx_vec"] = empty_ctx_vec.expand(noisy_model_input.shape[0], -1, -1).clone()
+
+        with torch.no_grad():
+            uncond_model_pred = self.predict_velocity_for_soar(
+                args, accelerator, transformer, batch_uncond, noisy_model_input, timesteps, network_dtype
+            )
+
+        cond_standard = self.soar_velocity_to_standard(cond_model_pred.detach())
+        uncond_standard = self.soar_velocity_to_standard(uncond_model_pred.detach())
+        return combine_cfg_standard_velocity(uncond_standard, cond_standard, args.soar_cfg_scale_sampling).detach()
 
     # endregion model specific
 

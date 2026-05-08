@@ -49,6 +49,7 @@ from musubi_tuner.soar_train_utils import (
     default_flow_matching_target,
     get_sigmas_from_continuous_timesteps,
     is_continuous_timestep_sampling,
+    is_soar_cfg_rollout_enabled,
     is_soar_enabled,
     run_soar_auxiliary_pass,
     validate_soar_args,
@@ -1314,6 +1315,10 @@ class NetworkTrainer:
     def supports_soar(self, args: argparse.Namespace) -> bool:
         return False
 
+    def load_soar_empty_prompt_cache(self, args: argparse.Namespace, train_dataset_group) -> None:
+        if is_soar_cfg_rollout_enabled(args):
+            raise NotImplementedError(f"{self.__class__.__name__} does not implement SOAR CFG rollout cache loading")
+
     def predict_velocity_for_soar(
         self,
         args: argparse.Namespace,
@@ -1336,6 +1341,21 @@ class NetworkTrainer:
         aux_sigmas: torch.Tensor,
     ) -> torch.Tensor:
         return default_flow_matching_target(clean_latents, aux_latents, aux_sigmas)
+
+    def get_soar_rollout_velocity_standard(
+        self,
+        args: argparse.Namespace,
+        accelerator: Accelerator,
+        transformer,
+        batch: dict[str, torch.Tensor],
+        noisy_model_input: torch.Tensor,
+        timesteps: torch.Tensor,
+        network_dtype: torch.dtype,
+        cond_model_pred: torch.Tensor,
+    ) -> torch.Tensor:
+        if is_soar_cfg_rollout_enabled(args):
+            raise NotImplementedError(f"{self.__class__.__name__} does not implement SOAR CFG rollout")
+        return self.soar_velocity_to_standard(cond_model_pred).detach()
 
     @property
     def i2v_training(self) -> bool:
@@ -1751,6 +1771,8 @@ class NetworkTrainer:
                 "No training items found in the dataset. Please ensure that the latent/Text Encoder cache has been created beforehand."
                 " / データセットに学習データがありません。latent/Text Encoderキャッシュを事前に作成したか確認してください"
             )
+        if is_soar_enabled(args):
+            self.load_soar_empty_prompt_cache(args, train_dataset_group)
 
         ds_for_collator = train_dataset_group if args.max_data_loader_n_workers == 0 else None
         collator = collator_class(current_epoch, ds_for_collator)
@@ -2089,6 +2111,7 @@ class NetworkTrainer:
                     "ss_soar_trajectory_length": args.soar_trajectory_length,
                     "ss_soar_num_sampling_steps": args.soar_num_sampling_steps,
                     "ss_soar_sigma_upper_ratio": args.soar_sigma_upper_ratio,
+                    "ss_soar_cfg_scale_sampling": args.soar_cfg_scale_sampling,
                 }
             )
 
@@ -2275,10 +2298,20 @@ class NetworkTrainer:
                         loss_main_sum = loss_main_per_sample.sum()
 
                         sigma_t0_1d = sigma_t0.reshape(sigma_t0.shape[0], -1)[:, 0].detach()
+                        v_rollout_standard = self.get_soar_rollout_velocity_standard(
+                            args,
+                            accelerator,
+                            transformer,
+                            batch,
+                            noisy_model_input,
+                            timesteps,
+                            network_dtype,
+                            model_pred,
+                        )
                         aux_points = single_step_aux_points(
                             z_t0=noisy_model_input.detach(),
                             sigma_t0=sigma_t0_1d.detach(),
-                            v_standard=self.soar_velocity_to_standard(model_pred).detach(),
+                            v_standard=v_rollout_standard.detach(),
                             z_noise=noise.detach(),
                             points_per_path=args.soar_trajectory_length,
                             noise_scheduler=noise_scheduler,
@@ -2396,6 +2429,8 @@ class NetworkTrainer:
                 logs = {"avr_loss": avr_loss}  # , "lr": lr_scheduler.get_last_lr()[0]}
                 if use_soar:
                     logs["aux_per_sample"] = aux_count / max(float(latents.shape[0]), 1.0)
+                    logs["main_loss"] = loss_main_avg.detach().item()
+                    logs["aux_loss"] = loss_aux_avg.detach().item()
                 progress_bar.set_postfix(**logs)
 
                 if args.scale_weight_norms:
@@ -2414,6 +2449,8 @@ class NetworkTrainer:
                                 "soar/enabled": float(use_soar),
                                 "soar/trajectory_length": float(args.soar_trajectory_length) if use_soar else 0.0,
                                 "soar/aux_points_per_sample": aux_count / max(float(latents.shape[0]), 1.0),
+                                "soar/cfg_scale_sampling": float(args.soar_cfg_scale_sampling) if use_soar else 1.0,
+                                "soar/cfg_rollout_enabled": float(use_soar and is_soar_cfg_rollout_enabled(args)),
                             }
                         )
                     accelerator.log(logs, step=global_step)

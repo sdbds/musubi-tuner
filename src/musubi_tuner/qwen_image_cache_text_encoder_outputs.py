@@ -11,11 +11,13 @@ from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitize
 
 from musubi_tuner.dataset.image_video_dataset import (
     ARCHITECTURE_QWEN_IMAGE,
+    ARCHITECTURE_QWEN_IMAGE_FULL,
     ARCHITECTURE_QWEN_IMAGE_EDIT,
     ARCHITECTURE_QWEN_IMAGE_LAYERED,
     ItemInfo,
     save_text_encoder_output_cache_qwen_image,
 )
+from musubi_tuner.soar_train_utils import get_dataset_cache_directories, save_soar_empty_prompt_cache
 
 import musubi_tuner.cache_text_encoder_outputs as cache_text_encoder_outputs
 import logging
@@ -101,6 +103,36 @@ def encode_and_save_batch(
         save_text_encoder_output_cache_qwen_image(item, embed_i)
 
 
+def encode_and_save_empty_prompt_cache(
+    tokenizer: Qwen2Tokenizer,
+    text_encoder: Qwen2_5_VLForConditionalGeneration,
+    train_dataset_group,
+    accelerator: Optional[accelerate.Accelerator],
+    skip_existing: bool,
+):
+    with torch.no_grad():
+        if accelerator is not None:
+            with accelerator.autocast():
+                embed, mask = qwen_image_utils.get_qwen_prompt_embeds(tokenizer, text_encoder, [""])
+                if embed.dtype == torch.float8_e4m3fn:
+                    embed = embed.to(torch.bfloat16)
+        else:
+            embed, mask = qwen_image_utils.get_qwen_prompt_embeds(tokenizer, text_encoder, [""])
+
+    txt_len = int(mask[0].to(dtype=torch.bool).sum().item())
+    empty_embed = embed[0, :txt_len].cpu()
+
+    cache_directories = get_dataset_cache_directories(train_dataset_group)
+    save_soar_empty_prompt_cache(
+        cache_directories=cache_directories,
+        architecture=ARCHITECTURE_QWEN_IMAGE,
+        tensor_base_key="varlen_vl_embed",
+        tensor=empty_embed,
+        metadata={"architecture_full": ARCHITECTURE_QWEN_IMAGE_FULL, "model_version": "original"},
+        skip_existing=skip_existing,
+    )
+
+
 def main():
     parser = cache_text_encoder_outputs.setup_parser_common()
     parser = qwen_image_setup_parser(parser)
@@ -147,6 +179,9 @@ def main():
         vl_processor = qwen_image_utils.load_vl_processor()
     else:
         vl_processor = None
+
+    if not args.is_edit and not args.is_layered:
+        encode_and_save_empty_prompt_cache(tokenizer, text_encoder, train_dataset_group, accelerator, args.skip_existing)
 
     # Encode with Qwen2.5-VL
     logger.info("Encoding with Qwen2.5-VL")

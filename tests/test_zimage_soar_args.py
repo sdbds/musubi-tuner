@@ -20,6 +20,7 @@ class TestZImageSoarArgs(unittest.TestCase):
         self.assertEqual(args.soar_trajectory_length, 6)
         self.assertEqual(args.soar_num_sampling_steps, 40)
         self.assertEqual(args.soar_sigma_upper_ratio, 1.5)
+        self.assertEqual(args.soar_cfg_scale_sampling, 1.0)
 
     def test_validate_soar_rejects_fused_backward(self):
         args = Namespace(

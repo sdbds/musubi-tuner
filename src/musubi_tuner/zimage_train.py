@@ -38,6 +38,7 @@ from musubi_tuner.soar_train_utils import (
     compute_loss_weighting_from_sigma,
     compute_per_sample_loss,
     is_continuous_timestep_sampling,
+    is_soar_cfg_rollout_enabled,
     is_soar_enabled,
     run_soar_auxiliary_pass,
     validate_soar_args,
@@ -137,6 +138,8 @@ class ZImageTrainer(ZImageNetworkTrainer):
         # check model specific arguments
         self.handle_model_specific_args(args)
         validate_soar_args(args)
+        if is_soar_enabled(args) and is_soar_cfg_rollout_enabled(args):
+            raise ValueError("--soar_cfg_scale_sampling other than 1.0 is currently supported only by LoRA/network training")
 
         # ZImageNetrworkTrainer set args.dit_dtype as mixed precision, override it here to support float32/bfloat16 (full_bf16)
         args.dit_dtype = "bfloat16" if args.full_bf16 else "float32"
@@ -392,6 +395,7 @@ class ZImageTrainer(ZImageNetworkTrainer):
             "ss_soar_trajectory_length": args.soar_trajectory_length,
             "ss_soar_num_sampling_steps": args.soar_num_sampling_steps,
             "ss_soar_sigma_upper_ratio": args.soar_sigma_upper_ratio,
+            "ss_soar_cfg_scale_sampling": args.soar_cfg_scale_sampling,
         }
 
         datasets_metadata = []
@@ -706,6 +710,8 @@ class ZImageTrainer(ZImageNetworkTrainer):
                 logs = {"avr_loss": avr_loss}
                 if use_soar:
                     logs["aux_per_sample"] = aux_count / max(float(latents.shape[0]), 1.0)
+                    logs["main_loss"] = loss_main_avg.detach().item()
+                    logs["aux_loss"] = loss_aux_avg.detach().item()
                 progress_bar.set_postfix(**logs)
 
                 if len(accelerator.trackers) > 0:
@@ -720,6 +726,8 @@ class ZImageTrainer(ZImageNetworkTrainer):
                             "soar/enabled": float(use_soar),
                             "soar/trajectory_length": float(args.soar_trajectory_length) if use_soar else 0.0,
                             "soar/aux_points_per_sample": aux_count / max(float(latents.shape[0]), 1.0),
+                            "soar/cfg_scale_sampling": float(args.soar_cfg_scale_sampling) if use_soar else 1.0,
+                            "soar/cfg_rollout_enabled": 0.0,
                         }
                     )
                     accelerator.log(logs, step=global_step)

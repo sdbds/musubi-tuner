@@ -24,7 +24,13 @@ from musubi_tuner.hv_train_network import (
     setup_parser_common,
     read_config_from_file,
 )
-from musubi_tuner.soar_train_utils import add_soar_arguments
+from musubi_tuner.soar_train_utils import (
+    add_soar_arguments,
+    combine_cfg_standard_velocity,
+    get_dataset_cache_directories,
+    is_soar_cfg_rollout_enabled,
+    load_soar_empty_prompt_tensor,
+)
 from musubi_tuner.utils import model_utils
 from musubi_tuner.utils.sai_model_spec import CUSTOM_ARCH_QWEN_IMAGE_EDIT_PLUS, CUSTOM_ARCH_QWEN_IMAGE_EDIT_2511
 
@@ -40,6 +46,7 @@ class QwenImageNetworkTrainer(NetworkTrainer):
         self.is_edit = None
         self.is_layered = None
         self.vae_frame_stride = 1  # for Qwen-Image, frame stride is 1
+        self._soar_empty_vl_embed: Optional[torch.Tensor] = None
 
     # region model specific
 
@@ -588,6 +595,17 @@ class QwenImageNetworkTrainer(NetworkTrainer):
             args, "remove_first_image_from_target", False
         )
 
+    def load_soar_empty_prompt_cache(self, args: argparse.Namespace, train_dataset_group) -> None:
+        if not is_soar_cfg_rollout_enabled(args):
+            return
+        if not self.supports_soar(args):
+            raise ValueError("SOAR CFG rollout is supported only for standard Qwen-Image text-to-image LoRA")
+        self._soar_empty_vl_embed = load_soar_empty_prompt_tensor(
+            cache_directories=get_dataset_cache_directories(train_dataset_group),
+            architecture=ARCHITECTURE_QWEN_IMAGE,
+            tensor_base_key="varlen_vl_embed",
+        )
+
     def predict_velocity_for_soar(
         self,
         args: argparse.Namespace,
@@ -610,6 +628,38 @@ class QwenImageNetworkTrainer(NetworkTrainer):
             network_dtype,
         )
         return model_pred
+
+    def soar_velocity_to_standard(self, model_pred: torch.Tensor) -> torch.Tensor:
+        return model_pred
+
+    def get_soar_rollout_velocity_standard(
+        self,
+        args: argparse.Namespace,
+        accelerator: Accelerator,
+        transformer,
+        batch: dict[str, torch.Tensor],
+        noisy_model_input: torch.Tensor,
+        timesteps: torch.Tensor,
+        network_dtype: torch.dtype,
+        cond_model_pred: torch.Tensor,
+    ) -> torch.Tensor:
+        if not is_soar_cfg_rollout_enabled(args):
+            return self.soar_velocity_to_standard(cond_model_pred).detach()
+        if not self.supports_soar(args):
+            raise ValueError("SOAR CFG rollout is supported only for standard Qwen-Image text-to-image LoRA")
+        if self._soar_empty_vl_embed is None:
+            raise ValueError("SOAR CFG rollout requires Qwen-Image empty prompt cache")
+
+        batch_uncond = dict(batch)
+        batch_uncond["vl_embed"] = [self._soar_empty_vl_embed] * noisy_model_input.shape[0]
+        with torch.no_grad():
+            uncond_model_pred = self.predict_velocity_for_soar(
+                args, accelerator, transformer, batch_uncond, noisy_model_input, timesteps, network_dtype
+            )
+
+        cond_standard = self.soar_velocity_to_standard(cond_model_pred.detach())
+        uncond_standard = self.soar_velocity_to_standard(uncond_model_pred.detach())
+        return combine_cfg_standard_velocity(uncond_standard, cond_standard, args.soar_cfg_scale_sampling).detach()
 
     # endregion model specific
 

@@ -86,6 +86,50 @@ class TestZImagePredictVelocity(unittest.TestCase):
         self.assertTrue(torch.equal(self.trainer.soar_velocity_to_standard(model_pred), -model_pred))
         self.assertTrue(torch.equal(self.trainer.soar_standard_to_local_target(clean, aux, sigma), torch.full_like(clean, -6.0)))
 
+    def test_soar_cfg_rollout_combines_zimage_predictions_in_standard_space(self):
+        args = Namespace(split_attn=False, gradient_checkpointing=False, soar_cfg_scale_sampling=4.5)
+        self.trainer._soar_empty_llm_embed = torch.full((1, 8), 9.0)
+        captured = {}
+
+        def fake_predict_velocity_for_soar(args, accelerator, transformer, batch, noisy_model_input, timesteps, network_dtype):
+            captured["batch"] = batch
+            return torch.full_like(noisy_model_input, -1.0)
+
+        self.trainer.predict_velocity_for_soar = fake_predict_velocity_for_soar
+        cond_model_pred = torch.full_like(self.noisy_model_input, -3.0)
+
+        rollout = self.trainer.get_soar_rollout_velocity_standard(
+            args,
+            self.accelerator,
+            self.transformer,
+            {"llm_embed": self.llm_embed},
+            self.noisy_model_input,
+            self.timesteps,
+            torch.float32,
+            cond_model_pred,
+        )
+
+        self.assertTrue(torch.equal(rollout, torch.full_like(self.noisy_model_input, 10.0)))
+        self.assertEqual(len(captured["batch"]["llm_embed"]), self.noisy_model_input.shape[0])
+        self.assertTrue(torch.equal(captured["batch"]["llm_embed"][0], self.trainer._soar_empty_llm_embed))
+
+    def test_soar_cfg_scale_one_keeps_cond_only_rollout(self):
+        args = Namespace(soar_cfg_scale_sampling=1.0)
+        cond_model_pred = torch.full_like(self.noisy_model_input, -3.0)
+
+        rollout = self.trainer.get_soar_rollout_velocity_standard(
+            args,
+            self.accelerator,
+            self.transformer,
+            {"llm_embed": self.llm_embed},
+            self.noisy_model_input,
+            self.timesteps,
+            torch.float32,
+            cond_model_pred,
+        )
+
+        self.assertTrue(torch.equal(rollout, torch.full_like(self.noisy_model_input, 3.0)))
+
 
 if __name__ == "__main__":
     unittest.main()

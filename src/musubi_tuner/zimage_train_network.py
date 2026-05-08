@@ -15,7 +15,14 @@ from musubi_tuner.hv_train_network import (
     read_config_from_file,
     setup_parser_common,
 )
-from musubi_tuner.soar_train_utils import add_soar_arguments, zimage_flow_matching_target
+from musubi_tuner.soar_train_utils import (
+    add_soar_arguments,
+    combine_cfg_standard_velocity,
+    get_dataset_cache_directories,
+    is_soar_cfg_rollout_enabled,
+    load_soar_empty_prompt_tensor,
+    zimage_flow_matching_target,
+)
 from musubi_tuner.utils import model_utils
 from musubi_tuner.zimage import zimage_autoencoder, zimage_config, zimage_model, zimage_utils
 
@@ -26,6 +33,7 @@ logging.basicConfig(level=logging.INFO)
 class ZImageNetworkTrainer(NetworkTrainer):
     def __init__(self):
         super().__init__()
+        self._soar_empty_llm_embed: Optional[torch.Tensor] = None
 
     # region model specific
 
@@ -431,6 +439,15 @@ class ZImageNetworkTrainer(NetworkTrainer):
     def supports_soar(self, args: argparse.Namespace) -> bool:
         return True
 
+    def load_soar_empty_prompt_cache(self, args: argparse.Namespace, train_dataset_group) -> None:
+        if not is_soar_cfg_rollout_enabled(args):
+            return
+        self._soar_empty_llm_embed = load_soar_empty_prompt_tensor(
+            cache_directories=get_dataset_cache_directories(train_dataset_group),
+            architecture=self.architecture,
+            tensor_base_key="varlen_llm_embed",
+        )
+
     def predict_velocity_for_soar(
         self,
         args: argparse.Namespace,
@@ -461,6 +478,35 @@ class ZImageNetworkTrainer(NetworkTrainer):
         aux_sigmas: torch.Tensor,
     ) -> torch.Tensor:
         return zimage_flow_matching_target(clean_latents, aux_latents, aux_sigmas)
+
+    def get_soar_rollout_velocity_standard(
+        self,
+        args: argparse.Namespace,
+        accelerator: Accelerator,
+        transformer,
+        batch: dict[str, torch.Tensor],
+        noisy_model_input: torch.Tensor,
+        timesteps: torch.Tensor,
+        network_dtype: torch.dtype,
+        cond_model_pred: torch.Tensor,
+    ) -> torch.Tensor:
+        if not is_soar_cfg_rollout_enabled(args):
+            return self.soar_velocity_to_standard(cond_model_pred).detach()
+        if any(key.startswith("latents_control_") for key in batch):
+            raise ValueError("SOAR CFG rollout is not supported for Z-Image control/Omni batches yet")
+        if self._soar_empty_llm_embed is None:
+            raise ValueError("SOAR CFG rollout requires Z-Image empty prompt cache")
+
+        batch_uncond = dict(batch)
+        batch_uncond["llm_embed"] = [self._soar_empty_llm_embed] * noisy_model_input.shape[0]
+        with torch.no_grad():
+            uncond_model_pred = self.predict_velocity_for_soar(
+                args, accelerator, transformer, batch_uncond, noisy_model_input, timesteps, network_dtype
+            )
+
+        cond_standard = self.soar_velocity_to_standard(cond_model_pred.detach())
+        uncond_standard = self.soar_velocity_to_standard(uncond_model_pred.detach())
+        return combine_cfg_standard_velocity(uncond_standard, cond_standard, args.soar_cfg_scale_sampling).detach()
 
 
 def zimage_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:

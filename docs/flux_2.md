@@ -194,6 +194,7 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/mus
 - `--soar_trajectory_length` (default: `6`)
 - `--soar_num_sampling_steps` (default: `40`)
 - `--soar_sigma_upper_ratio` (default: `1.5`)
+- `--soar_cfg_scale_sampling` (default: `1.0`; set `4.5` for official-style CFG rollout on non-distilled Flux.2 base models)
 
 For a first smoke test, use a single auxiliary point:
 
@@ -202,6 +203,8 @@ For a first smoke test, use a single auxiliary point:
 ```
 
 SOAR-lite uses the same optimizer step as the main LoRA loss and does not unfreeze the base DiT.
+
+Official-style CFG rollout requires the empty prompt sidecar cache created by `flux_2_cache_text_encoder_outputs.py`. It is rejected for guidance-distilled Flux.2 models such as `dev`, `klein-4b`, and `klein-9b`; use `klein-base-4b` or `klein-base-9b` for CFG rollout.
 
 `--fp8_text_encoder` option is not available for dev (Mistral 3).
 
@@ -241,6 +244,7 @@ FLUX.2の学習は専用のスクリプト`flux_2_train_network.py`を使用し�
 - `--soar_trajectory_length`（デフォルト: `6`）
 - `--soar_num_sampling_steps`（デフォルト: `40`）
 - `--soar_sigma_upper_ratio`（デフォルト: `1.5`）
+- `--soar_cfg_scale_sampling`（デフォルト: `1.0`。非蒸留のFlux.2 baseモデルで公式に近いCFG rolloutを使う場合は`4.5`）
 
 初回のスモークテストでは、補助点数を最小化してください。
 
@@ -249,6 +253,8 @@ FLUX.2の学習は専用のスクリプト`flux_2_train_network.py`を使用し�
 ```
 
 SOAR-liteはメインのLoRA lossと同じoptimizer stepを使い、base DiTはunfreezeしません。
+
+公式に近いCFG rolloutには、`flux_2_cache_text_encoder_outputs.py`が作成するempty promptのsidecar cacheが必要です。`dev`、`klein-4b`、`klein-9b`などのguidance-distilledモデルでは拒否されます。CFG rolloutには`klein-base-4b`または`klein-base-9b`を使用してください。
 
 `--fp8_text_encoder`オプションはdev（Mistral 3）では使用できません。
 
