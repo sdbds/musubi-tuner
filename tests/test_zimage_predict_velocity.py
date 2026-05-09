@@ -87,28 +87,16 @@ class TestZImagePredictVelocity(unittest.TestCase):
         self.assertTrue(torch.equal(self.trainer.soar_standard_to_local_target(clean, aux, sigma), torch.full_like(clean, -6.0)))
 
     def test_soar_cfg_rollout_combines_zimage_predictions_in_standard_space(self):
-        # The CFG rollout now uses a single batched forward over [uncond; cond] (HY-SOAR style),
-        # so the fake forward returns distinct values for the two halves and the test verifies
-        # the combination works in standard-velocity space.
         args = Namespace(split_attn=False, gradient_checkpointing=False, soar_cfg_scale_sampling=4.5)
         self.trainer._soar_empty_llm_embed = torch.full((1, 8), 9.0)
         captured = {}
-        bsize = self.noisy_model_input.shape[0]
 
         def fake_predict_velocity_for_soar(args, accelerator, transformer, batch, noisy_model_input, timesteps, network_dtype):
             captured["batch"] = batch
-            captured["noisy_shape"] = tuple(noisy_model_input.shape)
-            captured["ts_shape"] = tuple(timesteps.shape)
-            # First half = uncond branch returns -1.0, second half = cond branch returns -3.0
-            out = torch.empty_like(noisy_model_input)
-            out[:bsize] = -1.0
-            out[bsize:] = -3.0
-            return out
+            return torch.full_like(noisy_model_input, -1.0)
 
         self.trainer.predict_velocity_for_soar = fake_predict_velocity_for_soar
-        # cond_model_pred is the main-pass prediction; not used by the CFG-rollout path now
-        # (the rollout re-runs cond inside the batched forward to match HY-SOAR).
-        cond_model_pred = torch.full_like(self.noisy_model_input, -7.0)
+        cond_model_pred = torch.full_like(self.noisy_model_input, -3.0)
 
         rollout = self.trainer.get_soar_rollout_velocity_standard(
             args,
@@ -121,18 +109,9 @@ class TestZImagePredictVelocity(unittest.TestCase):
             cond_model_pred,
         )
 
-        # cond_std = -(-3.0) = 3.0 ; uncond_std = -(-1.0) = 1.0
-        # combined = 1.0 + 4.5*(3.0 - 1.0) = 10.0
         self.assertTrue(torch.equal(rollout, torch.full_like(self.noisy_model_input, 10.0)))
-        # Batched forward: 2*B
-        self.assertEqual(captured["noisy_shape"][0], 2 * bsize)
-        self.assertEqual(captured["ts_shape"][0], 2 * bsize)
-        # llm_embed list has 2*B entries; first B are uncond (empty embed), last B are the cond originals
-        self.assertEqual(len(captured["batch"]["llm_embed"]), 2 * bsize)
-        for i in range(bsize):
-            self.assertTrue(torch.equal(captured["batch"]["llm_embed"][i], self.trainer._soar_empty_llm_embed))
-        for i, original in enumerate(self.llm_embed):
-            self.assertTrue(torch.equal(captured["batch"]["llm_embed"][bsize + i], original))
+        self.assertEqual(len(captured["batch"]["llm_embed"]), self.noisy_model_input.shape[0])
+        self.assertTrue(torch.equal(captured["batch"]["llm_embed"][0], self.trainer._soar_empty_llm_embed))
 
     def test_soar_cfg_scale_one_keeps_cond_only_rollout(self):
         args = Namespace(soar_cfg_scale_sampling=1.0)

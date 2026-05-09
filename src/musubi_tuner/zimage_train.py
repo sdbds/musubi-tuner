@@ -139,11 +139,7 @@ class ZImageTrainer(ZImageNetworkTrainer):
         self.handle_model_specific_args(args)
         validate_soar_args(args)
         if is_soar_enabled(args) and is_soar_cfg_rollout_enabled(args):
-            raise ValueError(
-                "--soar_cfg_scale_sampling other than 1.0 is currently supported only by LoRA/network "
-                "training (zimage_train_network.py). For full fine-tuning, pass --soar_cfg_scale_sampling 1.0 "
-                "explicitly. (The default was raised to 4.5 to match HY-SOAR for LoRA training.)"
-            )
+            raise ValueError("--soar_cfg_scale_sampling other than 1.0 is currently supported only by LoRA/network training")
 
         # ZImageNetrworkTrainer set args.dit_dtype as mixed precision, override it here to support float32/bfloat16 (full_bf16)
         args.dit_dtype = "bfloat16" if args.full_bf16 else "float32"
