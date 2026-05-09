@@ -14,7 +14,7 @@ from safetensors.torch import load_file, save_file
 SoarTargetFn = Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]
 SoarPredictFn = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 
-SOAR_CFG_SCALE_SAMPLING_DEFAULT = 1.0
+SOAR_CFG_SCALE_SAMPLING_DEFAULT = 4.5
 SOAR_EMPTY_PROMPT_CACHE_PREFIX = "__soar_empty_prompt"
 SOAR_EMPTY_PROMPT_CACHE_DIR = "__soar_empty_prompt"
 
@@ -39,7 +39,16 @@ def add_soar_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentPars
     if not _parser_has_option(parser, "--soar"):
         parser.add_argument("--soar", action="store_true", help="Enable experimental SOAR auxiliary correction")
     if not _parser_has_option(parser, "--soar_lambda_aux"):
-        parser.add_argument("--soar_lambda_aux", type=float, default=1.0, help="Weight for the SOAR auxiliary loss")
+        parser.add_argument(
+            "--soar_lambda_aux",
+            type=float,
+            default=1.0,
+            help=(
+                "Weight for the SOAR auxiliary loss. Official HY-SOAR full fine-tuning uses 1.0. "
+                "For LoRA training, recommend 0.1-0.3 to keep main objective dominant and avoid "
+                "progressive blurring of generated samples."
+            ),
+        )
     if not _parser_has_option(parser, "--soar_trajectory_length"):
         parser.add_argument(
             "--soar_trajectory_length",
@@ -59,14 +68,23 @@ def add_soar_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentPars
             "--soar_sigma_upper_ratio",
             type=float,
             default=1.5,
-            help="Upper sigma ratio for SOAR auxiliary interpolation, clamped to 1.0",
+            help=(
+                "Upper sigma ratio for SOAR auxiliary interpolation, clamped to 1.0. "
+                "1.5 matches HY-SOAR full fine-tuning. For LoRA, recommend 1.0 to keep auxiliary "
+                "points within the same noise band as the main step (prevents over-noisy supervision)."
+            ),
         )
     if not _parser_has_option(parser, "--soar_cfg_scale_sampling"):
         parser.add_argument(
             "--soar_cfg_scale_sampling",
             type=float,
             default=SOAR_CFG_SCALE_SAMPLING_DEFAULT,
-            help="CFG scale used only for SOAR rollout point generation. 1.0 keeps cond-only SOAR-lite behavior.",
+            help=(
+                "CFG scale used only for SOAR rollout point generation. Default 4.5 matches "
+                "HY-SOAR. Set to 1.0 to disable CFG rollout (cond-only SOAR-lite). When != 1.0, "
+                "an empty-prompt cache must exist for each dataset cache_directory; generate it "
+                "via the matching `*_cache_text_encoder_outputs.py --soar` script."
+            ),
         )
     return parser
 

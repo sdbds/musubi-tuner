@@ -431,7 +431,10 @@ class ZImageNetworkTrainer(NetworkTrainer):
             network_dtype,
         )
 
-        # Target: Opposite of usual Flow matching
+        # Z-Image uses an inverted flow-matching convention: the model predicts
+        # `latents - noise` (= `z_0 - z_1`) instead of the standard `noise - latents` (= `z_1 - z_0`).
+        # Every SOAR helper below (`soar_velocity_to_standard`, `soar_standard_to_local_target`)
+        # applies the matching sign flip so the auxiliary path stays consistent.
         target = latents - noise
 
         return model_pred, target
@@ -469,6 +472,10 @@ class ZImageNetworkTrainer(NetworkTrainer):
         )
 
     def soar_velocity_to_standard(self, model_pred: torch.Tensor) -> torch.Tensor:
+        # Z-Image predicts `z_0 - z_1`; SOAR's single-step ODE expects the standard
+        # `v_std = z_1 - z_0` ("toward noise"). Negate to convert. Combined with
+        # `soar_standard_to_local_target` (which uses `(z_0 - z_t')/sigma`), the two flips
+        # cancel so the aux MSE stays in Z-Image's native target space.
         return -model_pred
 
     def soar_standard_to_local_target(
@@ -477,6 +484,8 @@ class ZImageNetworkTrainer(NetworkTrainer):
         aux_latents: torch.Tensor,
         aux_sigmas: torch.Tensor,
     ) -> torch.Tensor:
+        # Mirror of the inverted velocity convention above:
+        # `(z_0 - z_t') / sigma` matches what `predict_velocity` outputs in Z-Image's space.
         return zimage_flow_matching_target(clean_latents, aux_latents, aux_sigmas)
 
     def get_soar_rollout_velocity_standard(
@@ -490,23 +499,54 @@ class ZImageNetworkTrainer(NetworkTrainer):
         network_dtype: torch.dtype,
         cond_model_pred: torch.Tensor,
     ) -> torch.Tensor:
+        # Invariant: `cond_model_pred` is the main-pass output of `predict_velocity`, so it must
+        # be image-shaped (no F=1 dim) and match `noisy_model_input`. A mismatch usually means
+        # someone forgot the `.squeeze(2)` at the end of `predict_velocity` or fed a stale tensor.
+        if cond_model_pred.shape != noisy_model_input.shape:
+            raise ValueError(
+                f"SOAR rollout: cond_model_pred shape {tuple(cond_model_pred.shape)} does not match "
+                f"noisy_model_input shape {tuple(noisy_model_input.shape)}"
+            )
+
+        # Cond-only rollout (CFG disabled): reuse the main-pass prediction; cheapest path.
         if not is_soar_cfg_rollout_enabled(args):
             return self.soar_velocity_to_standard(cond_model_pred).detach()
+
         if any(key.startswith("latents_control_") for key in batch):
             raise ValueError("SOAR CFG rollout is not supported for Z-Image control/Omni batches yet")
         if self._soar_empty_llm_embed is None:
             raise ValueError("SOAR CFG rollout requires Z-Image empty prompt cache")
 
-        batch_uncond = dict(batch)
-        batch_uncond["llm_embed"] = [self._soar_empty_llm_embed] * noisy_model_input.shape[0]
+        # CFG rollout: match HY-SOAR (`soar/train_soar_sd3_5m.py`) by running ONE batched no_grad
+        # forward over [uncond; cond] and chunk(2) the output. This keeps both branches in lockstep
+        # (same dropout / norm state) and matches the official rollout exactly.
+        bsize = noisy_model_input.shape[0]
+        cond_llm_embed = list(batch["llm_embed"])  # list[Tensor[L_i, D]]
+        uncond_llm_embed = [self._soar_empty_llm_embed] * bsize
+        batched_llm_embed = uncond_llm_embed + cond_llm_embed
+        batched_noisy = torch.cat([noisy_model_input, noisy_model_input], dim=0)
+        batched_timesteps = torch.cat([timesteps, timesteps], dim=0)
+
+        batched_batch = dict(batch)
+        batched_batch["llm_embed"] = batched_llm_embed
+
         with torch.no_grad():
-            uncond_model_pred = self.predict_velocity_for_soar(
-                args, accelerator, transformer, batch_uncond, noisy_model_input, timesteps, network_dtype
+            batched_pred = self.predict_velocity_for_soar(
+                args,
+                accelerator,
+                transformer,
+                batched_batch,
+                batched_noisy,
+                batched_timesteps,
+                network_dtype,
             )
 
-        cond_standard = self.soar_velocity_to_standard(cond_model_pred.detach())
-        uncond_standard = self.soar_velocity_to_standard(uncond_model_pred.detach())
-        return combine_cfg_standard_velocity(uncond_standard, cond_standard, args.soar_cfg_scale_sampling).detach()
+        uncond_model_pred, cond_model_pred_rollout = batched_pred.detach().chunk(2, dim=0)
+        cond_standard = self.soar_velocity_to_standard(cond_model_pred_rollout)
+        uncond_standard = self.soar_velocity_to_standard(uncond_model_pred)
+        return combine_cfg_standard_velocity(
+            uncond_standard, cond_standard, args.soar_cfg_scale_sampling
+        ).detach()
 
 
 def zimage_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:

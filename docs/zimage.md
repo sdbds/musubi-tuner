@@ -296,11 +296,11 @@ accelerate launch --num_cpu_threads_per_process 1 src/musubi_tuner/zimage_train.
 `zimage_train.py` and `zimage_train_network.py` support an experimental SOAR-lite path:
 
 - `--soar`
-- `--soar_lambda_aux` (default: `1.0`)
+- `--soar_lambda_aux` (default: `1.0`; **for LoRA recommend `0.1`–`0.3`** to keep the main objective dominant — see "LoRA blur" note below)
 - `--soar_trajectory_length` (default: `6`)
 - `--soar_num_sampling_steps` (default: `40`)
-- `--soar_sigma_upper_ratio` (default: `1.5`)
-- `--soar_cfg_scale_sampling` (default: `1.0`; set `4.5` for official-style CFG rollout in LoRA/network training)
+- `--soar_sigma_upper_ratio` (default: `1.5`; **for LoRA recommend `1.0`** to keep auxiliary points within the main step's noise band)
+- `--soar_cfg_scale_sampling` (default: `4.5` — official HY-SOAR; set `1.0` to disable CFG rollout)
 
 Recommended smoke test:
 
@@ -308,12 +308,23 @@ Recommended smoke test:
 --soar --soar_trajectory_length 1
 ```
 
+LoRA/network training that runs progressively blurry samples almost always means the auxiliary loss is dominating. Try:
+
+```bash
+--soar \
+  --soar_lambda_aux 0.2 \
+  --soar_sigma_upper_ratio 1.0 \
+  --soar_cfg_scale_sampling 4.5
+```
+
+Default `lambda_aux=1.0` × `trajectory_length=6` makes auxiliary gradients ~6/7 of the total update — fine for full fine-tuning (HY-SOAR is full FT), but LoRA's small parameter capacity gets overwhelmed and learns to predict low-frequency / mean outputs.
+
 Official-style CFG rollout requires the empty prompt sidecar cache created by `zimage_cache_text_encoder_outputs.py`. Re-run the text encoder cache script after updating if the sidecar is missing.
 
 Current limitations:
 
 - In `zimage_train.py`, `--soar` is incompatible with `--fused_backward_pass`
-- In `zimage_train.py`, `--soar_cfg_scale_sampling` values other than `1.0` are not supported yet
+- In `zimage_train.py` (full fine-tuning), `--soar_cfg_scale_sampling` values other than `1.0` are not supported yet — pass `--soar_cfg_scale_sampling 1.0` explicitly when running full FT after the default change
 - In `zimage_train_network.py`, SOAR-lite is available for LoRA/network training and updates only network parameters
 - In `zimage_train_network.py`, `--soar_cfg_scale_sampling 4.5` enables official-style CFG rollout for standard text-to-image batches
 
@@ -323,11 +334,11 @@ Current limitations:
 `zimage_train.py` と `zimage_train_network.py` では、実験的なSOAR-liteを利用できます。
 
 - `--soar`
-- `--soar_lambda_aux`（デフォルト: `1.0`）
+- `--soar_lambda_aux`（デフォルト: `1.0`。**LoRAでは `0.1`–`0.3` を推奨**。下記「LoRAでの段階的ぼけ」を参照）
 - `--soar_trajectory_length`（デフォルト: `6`）
 - `--soar_num_sampling_steps`（デフォルト: `40`）
-- `--soar_sigma_upper_ratio`（デフォルト: `1.5`）
-- `--soar_cfg_scale_sampling`（デフォルト: `1.0`。LoRA/network学習で公式に近いCFG rolloutを使う場合は`4.5`）
+- `--soar_sigma_upper_ratio`（デフォルト: `1.5`。**LoRAでは `1.0` を推奨**）
+- `--soar_cfg_scale_sampling`（デフォルト: `4.5` — 公式HY-SOAR準拠。CFG rolloutを無効化するには `1.0`）
 
 初回のスモークテストでは、次のように補助点数だけを最小化するのが安全です。
 
@@ -335,12 +346,21 @@ Current limitations:
 --soar --soar_trajectory_length 1
 ```
 
+LoRA/network 学習でサンプル画像が段階的にぼけていく場合、補助損失が支配的になっているのがほぼ原因です。次を試してください。
+
+```bash
+--soar \
+  --soar_lambda_aux 0.2 \
+  --soar_sigma_upper_ratio 1.0 \
+  --soar_cfg_scale_sampling 4.5
+```
+
 公式に近いCFG rolloutには、`zimage_cache_text_encoder_outputs.py`が作成するempty promptのsidecar cacheが必要です。sidecarがない場合は、テキストエンコーダーキャッシュを作り直してください。
 
 現時点の制約:
 
 - `zimage_train.py` では、`--soar` と `--fused_backward_pass` は同時に使用できません
-- `zimage_train.py` では、`--soar_cfg_scale_sampling` に `1.0` 以外を指定することはまだできません
+- `zimage_train.py`（全層FT）では、`--soar_cfg_scale_sampling` に `1.0` 以外を指定することはまだできません — デフォルト変更後にfull FTを行う場合は明示的に `--soar_cfg_scale_sampling 1.0` を渡してください
 - `zimage_train_network.py` では、SOAR-liteをLoRA/network学習で利用でき、networkパラメータのみを更新します
 - `zimage_train_network.py` では、標準のtext-to-image batchに対して `--soar_cfg_scale_sampling 4.5` で公式に近いCFG rolloutを有効化できます
 
