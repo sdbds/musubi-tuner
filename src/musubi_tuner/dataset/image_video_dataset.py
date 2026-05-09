@@ -589,11 +589,20 @@ def save_text_encoder_output_cache_hunyuan_video_1_5(item_info: ItemInfo, embed:
     save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_HUNYUAN_VIDEO_1_5_FULL)
 
 
-def save_text_encoder_output_cache_z_image(item_info: ItemInfo, embed: torch.Tensor):
+def save_text_encoder_output_cache_z_image(
+    item_info: ItemInfo,
+    embed: Optional[torch.Tensor] = None,
+    dopsd_teacher_embed: Optional[torch.Tensor] = None,
+    dopsd_teacher_key: str = "dopsd_teacher_llm_embed",
+):
     """Z-Image architecture."""
     sd = {}
-    dtype_str = dtype_to_str(embed.dtype)
-    sd[f"varlen_llm_embed_{dtype_str}"] = embed.detach().cpu()
+    if embed is not None:
+        dtype_str = dtype_to_str(embed.dtype)
+        sd[f"varlen_llm_embed_{dtype_str}"] = embed.detach().cpu()
+    if dopsd_teacher_embed is not None:
+        dtype_str = dtype_to_str(dopsd_teacher_embed.dtype)
+        sd[f"varlen_{dopsd_teacher_key}_{dtype_str}"] = dopsd_teacher_embed.detach().cpu()
 
     save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_Z_IMAGE_FULL)
 

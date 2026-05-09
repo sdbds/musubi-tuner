@@ -45,6 +45,14 @@ from musubi_tuner.modules.scheduling_flow_match_discrete import FlowMatchDiscret
 import musubi_tuner.networks.lora as lora_module
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
 from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_HUNYUAN_VIDEO, ARCHITECTURE_HUNYUAN_VIDEO_FULL
+from musubi_tuner.dopsd_train_utils import (
+    AdapterEma,
+    add_dopsd_arguments,
+    is_dopsd_enabled,
+    run_dopsd_stepwise_backward,
+    update_dopsd_metadata,
+    validate_dopsd_args,
+)
 from musubi_tuner.hv_generate_video import save_images_grid, save_videos_grid, resize_image_to_bucket, encode_to_latents
 
 import logging
@@ -1275,6 +1283,36 @@ class NetworkTrainer:
 
     # region model specific
 
+    def supports_dopsd(self, args: argparse.Namespace) -> bool:
+        return False
+
+    def get_dopsd_schedule(self, args: argparse.Namespace, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+        raise NotImplementedError(f"{self.__class__.__name__} does not implement D-OPSD schedule")
+
+    def make_dopsd_teacher_batch(self, args: argparse.Namespace, batch: dict) -> dict:
+        raise NotImplementedError(f"{self.__class__.__name__} does not implement D-OPSD teacher batch")
+
+    def predict_velocity_for_dopsd(
+        self,
+        args: argparse.Namespace,
+        accelerator: Accelerator,
+        transformer,
+        batch: dict,
+        latents: torch.Tensor,
+        timesteps: torch.Tensor,
+        network_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        raise NotImplementedError(f"{self.__class__.__name__} does not implement D-OPSD forward")
+
+    def dopsd_rollout_step(
+        self,
+        latents: torch.Tensor,
+        model_pred: torch.Tensor,
+        sigmas: torch.Tensor,
+        step_index: int,
+    ) -> torch.Tensor:
+        raise NotImplementedError(f"{self.__class__.__name__} does not implement D-OPSD rollout")
+
     @property
     def architecture(self) -> str:
         return ARCHITECTURE_HUNYUAN_VIDEO
@@ -1671,6 +1709,9 @@ class NetworkTrainer:
 
         # check model specific arguments
         self.handle_model_specific_args(args)
+        validate_dopsd_args(args)
+        if is_dopsd_enabled(args) and not self.supports_dopsd(args):
+            raise ValueError(f"--dopsd is not supported by {self.__class__.__name__}")
 
         # show timesteps for debugging
         if args.show_timesteps:
@@ -1935,6 +1976,17 @@ class NetworkTrainer:
 
         accelerator.unwrap_model(network).prepare_grad_etc(transformer)
 
+        dopsd_ema = None
+        dopsd_timesteps = None
+        dopsd_sigmas = None
+        if is_dopsd_enabled(args):
+            dopsd_ema = AdapterEma(accelerator.unwrap_model(network))
+            dopsd_timesteps, dopsd_sigmas = self.get_dopsd_schedule(args, accelerator.device)
+            accelerator.print(
+                f"enable D-OPSD: steps={args.dopsd_num_sampling_steps}, "
+                f"loss_weight={args.dopsd_loss_weight}, ema_decay={args.dopsd_ema_decay}"
+            )
+
         if args.full_fp16:
             # patch accelerator for fp16 training
             # def patch_accelerator_for_fp16_training(accelerator):
@@ -2071,6 +2123,8 @@ class NetworkTrainer:
                 vae_name = os.path.basename(vae_name)
             metadata["ss_vae_name"] = vae_name
 
+        update_dopsd_metadata(metadata, args)
+
         metadata = {k: str(v) for k, v in metadata.items()}
 
         # make minimum metadata for filtering
@@ -2189,32 +2243,60 @@ class NetworkTrainer:
 
                     latents = self.scale_shift_latents(latents)
 
-                    # Sample noise that we'll add to the latents
-                    noise = torch.randn_like(latents)
+                    if is_dopsd_enabled(args):
+                        assert dopsd_ema is not None and dopsd_timesteps is not None and dopsd_sigmas is not None
 
-                    # calculate model input and timesteps
-                    noisy_model_input, timesteps = self.get_noisy_model_input_and_timesteps(
-                        args, noise, latents, batch["timesteps"], noise_scheduler, accelerator.device, dit_dtype
-                    )
+                        def dopsd_predict_fn(dopsd_batch, dopsd_latents, dopsd_timesteps_for_step):
+                            return self.predict_velocity_for_dopsd(
+                                args,
+                                accelerator,
+                                transformer,
+                                dopsd_batch,
+                                dopsd_latents,
+                                dopsd_timesteps_for_step,
+                                network_dtype,
+                            )
 
-                    weighting = compute_loss_weighting_for_sd3(
-                        args.weighting_scheme, noise_scheduler, timesteps, accelerator.device, dit_dtype
-                    )
+                        loss, _ = run_dopsd_stepwise_backward(
+                            args=args,
+                            accelerator=accelerator,
+                            network=network,
+                            ema=dopsd_ema,
+                            batch=batch,
+                            latents=latents,
+                            timesteps=dopsd_timesteps,
+                            sigmas=dopsd_sigmas,
+                            predict_fn=dopsd_predict_fn,
+                            make_teacher_batch_fn=lambda dopsd_batch: self.make_dopsd_teacher_batch(args, dopsd_batch),
+                            rollout_step_fn=self.dopsd_rollout_step,
+                        )
+                    else:
+                        # Sample noise that we'll add to the latents
+                        noise = torch.randn_like(latents)
 
-                    model_pred, target = self.call_dit(
-                        args, accelerator, transformer, latents, batch, noise, noisy_model_input, timesteps, network_dtype
-                    )
-                    loss = torch.nn.functional.mse_loss(model_pred.to(network_dtype), target, reduction="none")
+                        # calculate model input and timesteps
+                        noisy_model_input, timesteps = self.get_noisy_model_input_and_timesteps(
+                            args, noise, latents, batch["timesteps"], noise_scheduler, accelerator.device, dit_dtype
+                        )
 
-                    if weighting is not None:
-                        loss = loss * weighting
-                    # loss = loss.mean([1, 2, 3])
-                    # # min snr gamma, scale v pred loss like noise pred, v pred like loss, debiased estimation etc.
-                    # loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
+                        weighting = compute_loss_weighting_for_sd3(
+                            args.weighting_scheme, noise_scheduler, timesteps, accelerator.device, dit_dtype
+                        )
 
-                    loss = loss.mean()  # mean loss over all elements in batch
+                        model_pred, target = self.call_dit(
+                            args, accelerator, transformer, latents, batch, noise, noisy_model_input, timesteps, network_dtype
+                        )
+                        loss = torch.nn.functional.mse_loss(model_pred.to(network_dtype), target, reduction="none")
 
-                    accelerator.backward(loss)
+                        if weighting is not None:
+                            loss = loss * weighting
+                        # loss = loss.mean([1, 2, 3])
+                        # # min snr gamma, scale v pred loss like noise pred, v pred like loss, debiased estimation etc.
+                        # loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
+
+                        loss = loss.mean()  # mean loss over all elements in batch
+
+                        accelerator.backward(loss)
                     if accelerator.sync_gradients:
                         # self.all_reduce_network(accelerator, network)  # sync DDP grad manually
                         state = accelerate.PartialState()
@@ -2228,6 +2310,8 @@ class NetworkTrainer:
                             accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
 
                     optimizer.step()
+                    if accelerator.sync_gradients and dopsd_ema is not None:
+                        dopsd_ema.update(accelerator.unwrap_model(network), float(args.dopsd_ema_decay))
                     lr_scheduler.step()
                     optimizer.zero_grad(set_to_none=True)
 
@@ -3019,6 +3103,8 @@ def setup_parser_common() -> argparse.ArgumentParser:
     parser.add_argument("--dit", type=str, help="DiT checkpoint path / DiTのチェックポイントのパス")
     parser.add_argument("--vae", type=str, help="VAE checkpoint path / VAEのチェックポイントのパス")
     parser.add_argument("--vae_dtype", type=str, default=None, help="data type for VAE, default depends on model")
+
+    parser = add_dopsd_arguments(parser)
 
     return parser
 

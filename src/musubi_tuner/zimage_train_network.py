@@ -261,24 +261,23 @@ class ZImageNetworkTrainer(NetworkTrainer):
         latents = (latents - shift) * scale
         return latents
 
-    def call_dit(
+    def predict_velocity(
         self,
         args: argparse.Namespace,
         accelerator: Accelerator,
         transformer,
-        latents: torch.Tensor,
         batch: dict[str, torch.Tensor],
-        noise: torch.Tensor,
         noisy_model_input: torch.Tensor,
         timesteps: torch.Tensor,
         network_dtype: torch.dtype,
     ):
         model: zimage_model.ZImageTransformer2DModel = accelerator.unwrap_model(transformer)
-        bsize = latents.shape[0]
+        bsize = noisy_model_input.shape[0]
 
-        # latents: [B, C, H, W]
         # noisy_model_input: [B, C, H, W]
-        image_sequence_length = (latents.shape[2] // model.all_patch_size[0]) * (latents.shape[3] // model.all_patch_size[0])
+        image_sequence_length = (noisy_model_input.shape[2] // model.all_patch_size[0]) * (
+            noisy_model_input.shape[3] // model.all_patch_size[0]
+        )
 
         # Add frame dimension F=1
         noisy_model_input = noisy_model_input.unsqueeze(2)  # [B, C, 1, H, W]
@@ -325,10 +324,88 @@ class ZImageNetworkTrainer(NetworkTrainer):
         # model_pred: [B, C, F, H, W]
         model_pred = model_pred.squeeze(2)  # [B, C, H, W]
 
+        return model_pred
+
+    def call_dit(
+        self,
+        args: argparse.Namespace,
+        accelerator: Accelerator,
+        transformer,
+        latents: torch.Tensor,
+        batch: dict[str, torch.Tensor],
+        noise: torch.Tensor,
+        noisy_model_input: torch.Tensor,
+        timesteps: torch.Tensor,
+        network_dtype: torch.dtype,
+    ):
+        model_pred = self.predict_velocity(
+            args,
+            accelerator,
+            transformer,
+            batch,
+            noisy_model_input,
+            timesteps,
+            network_dtype,
+        )
+
         # Target: Opposite of usual Flow matching
         target = latents - noise
 
         return model_pred, target
+
+    def supports_dopsd(self, args: argparse.Namespace) -> bool:
+        return True
+
+    def get_dopsd_schedule(self, args: argparse.Namespace, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+        timesteps, sigmas = zimage_utils.get_timesteps_sigmas(args.dopsd_num_sampling_steps, args.discrete_flow_shift)
+        return timesteps.to(device=device), sigmas.to(device=device)
+
+    def make_dopsd_teacher_batch(self, args: argparse.Namespace, batch: dict) -> dict:
+        teacher_embed_key = args.dopsd_teacher_embed_key
+        if teacher_embed_key not in batch:
+            raise ValueError(
+                f"D-OPSD requires cached teacher embeddings in batch key '{teacher_embed_key}'. "
+                "Re-run zimage_cache_text_encoder_outputs.py with --dopsd_cache_teacher_outputs."
+            )
+        for embed in batch[teacher_embed_key]:
+            if embed.shape[-1] != zimage_config.DEFAULT_TRANSFORMER_CAP_FEAT_DIM:
+                raise ValueError(
+                    f"D-OPSD teacher embedding dim {embed.shape[-1]} does not match "
+                    f"Z-Image cap_feat_dim {zimage_config.DEFAULT_TRANSFORMER_CAP_FEAT_DIM}."
+                )
+        teacher_batch = dict(batch)
+        teacher_batch["llm_embed"] = teacher_batch[teacher_embed_key]
+        return teacher_batch
+
+    def predict_velocity_for_dopsd(
+        self,
+        args: argparse.Namespace,
+        accelerator: Accelerator,
+        transformer,
+        batch: dict,
+        latents: torch.Tensor,
+        timesteps: torch.Tensor,
+        network_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        return self.predict_velocity(
+            args,
+            accelerator,
+            transformer,
+            batch,
+            latents,
+            timesteps,
+            network_dtype,
+        )
+
+    def dopsd_rollout_step(
+        self,
+        latents: torch.Tensor,
+        model_pred: torch.Tensor,
+        sigmas: torch.Tensor,
+        step_index: int,
+    ) -> torch.Tensor:
+        # Z-Image transformer predicts the opposite sign from the inference velocity.
+        return zimage_utils.step(-model_pred.to(torch.float32), latents, sigmas, step_index)
 
 
 def zimage_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
