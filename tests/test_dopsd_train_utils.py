@@ -237,6 +237,46 @@ class DopsdTrainUtilsTest(unittest.TestCase):
             self.assertIn("varlen_llm_embed_bfloat16", tensors)
             self.assertIn("varlen_dopsd_teacher_llm_embed_bfloat16", tensors)
 
+    def test_content_retrieval_resets_caption_only_after_text_cache_retrieval(self):
+        try:
+            import numpy as np
+        except Exception:
+            np = None
+        if np is not None and int(np.__version__.split(".", 1)[0]) >= 2:
+            self.skipTest("local cv2 build is not compatible with NumPy 2.x")
+
+        try:
+            from PIL import Image
+
+            from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_Z_IMAGE, ImageDataset
+        except ImportError as exc:
+            self.skipTest(f"dataset dependencies are not importable in this environment: {exc}")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_path = Path(temp_dir) / "item.png"
+            caption_path = Path(temp_dir) / "item.txt"
+            Image.new("RGB", (64, 64), color=(255, 0, 0)).save(image_path)
+            caption_path.write_text("caption", encoding="utf-8")
+
+            dataset = ImageDataset(
+                resolution=(64, 64),
+                batch_size=1,
+                caption_extension=".txt",
+                enable_bucket=False,
+                bucket_no_upscale=False,
+                cache_directory=temp_dir,
+                debug_dataset=False,
+                architecture=ARCHITECTURE_Z_IMAGE,
+                image_directory=temp_dir,
+            )
+
+            list(dataset.retrieve_text_encoder_output_cache_batches(num_workers=1))
+            batches = list(dataset.retrieve_latent_cache_batches(num_workers=1))
+
+            self.assertEqual(len(batches), 1)
+            self.assertEqual(len(batches[0][1]), 1)
+            self.assertIsNotNone(batches[0][1][0].content)
+
     def test_flux2_cache_can_add_teacher_embedding_without_dropping_student_embedding(self):
         try:
             import numpy as np
