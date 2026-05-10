@@ -15,6 +15,7 @@ from musubi_tuner.hv_train_network import (
     setup_parser_common,
     read_config_from_file,
 )
+from musubi_tuner.dopsd_train_utils import DOPSD_ZIMAGE_TEACHER_EMBED_KEY
 from musubi_tuner.utils import model_utils
 
 import logging
@@ -356,12 +357,18 @@ class ZImageNetworkTrainer(NetworkTrainer):
     def supports_dopsd(self, args: argparse.Namespace) -> bool:
         return True
 
-    def get_dopsd_schedule(self, args: argparse.Namespace, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+    def get_dopsd_schedule(
+        self,
+        args: argparse.Namespace,
+        device: torch.device,
+        batch: Optional[dict] = None,
+        latents: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         timesteps, sigmas = zimage_utils.get_timesteps_sigmas(args.dopsd_num_sampling_steps, args.discrete_flow_shift)
         return timesteps.to(device=device), sigmas.to(device=device)
 
     def make_dopsd_teacher_batch(self, args: argparse.Namespace, batch: dict) -> dict:
-        teacher_embed_key = args.dopsd_teacher_embed_key
+        teacher_embed_key = DOPSD_ZIMAGE_TEACHER_EMBED_KEY
         if teacher_embed_key not in batch:
             raise ValueError(
                 f"D-OPSD requires cached teacher embeddings in batch key '{teacher_embed_key}'. "

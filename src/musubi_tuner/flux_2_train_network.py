@@ -15,6 +15,7 @@ from musubi_tuner.hv_train_network import (
     setup_parser_common,
     read_config_from_file,
 )
+from musubi_tuner.dopsd_train_utils import DOPSD_FLUX2_TEACHER_EMBED_KEY
 
 import logging
 
@@ -255,24 +256,22 @@ class Flux2NetworkTrainer(NetworkTrainer):
     def scale_shift_latents(self, latents):
         return latents
 
-    def call_dit(
+    def predict_velocity(
         self,
         args: argparse.Namespace,
         accelerator: Accelerator,
         transformer,
-        latents: torch.Tensor,
         batch: dict[str, torch.Tensor],
-        noise: torch.Tensor,
         noisy_model_input: torch.Tensor,
         timesteps: torch.Tensor,
         network_dtype: torch.dtype,
-    ):
+    ) -> torch.Tensor:
         model: flux2_models.Flux2 = transformer
 
-        bsize = latents.shape[0]
+        bsize = noisy_model_input.shape[0]
         # pack latents
-        packed_latent_height = latents.shape[2]
-        packed_latent_width = latents.shape[3]
+        packed_latent_height = noisy_model_input.shape[2]
+        packed_latent_width = noisy_model_input.shape[3]
         noisy_model_input, img_ids = flux2_utils.prc_img(noisy_model_input)  # (B, HW, C), (B, HW, 4)
 
         # control
@@ -326,11 +325,110 @@ class Flux2NetworkTrainer(NetworkTrainer):
         # unpack height/width latents
         model_pred = rearrange(model_pred, "b (h w) c -> b c h w", h=packed_latent_height, w=packed_latent_width)
 
+        return model_pred
+
+    def call_dit(
+        self,
+        args: argparse.Namespace,
+        accelerator: Accelerator,
+        transformer,
+        latents: torch.Tensor,
+        batch: dict[str, torch.Tensor],
+        noise: torch.Tensor,
+        noisy_model_input: torch.Tensor,
+        timesteps: torch.Tensor,
+        network_dtype: torch.dtype,
+    ):
+        model_pred = self.predict_velocity(
+            args,
+            accelerator,
+            transformer,
+            batch,
+            noisy_model_input,
+            timesteps,
+            network_dtype,
+        )
+
         # flow matching loss
         latents = latents.to(device=accelerator.device, dtype=network_dtype)
         target = noise - latents
 
         return model_pred, target
+
+    def supports_dopsd(self, args: argparse.Namespace) -> bool:
+        return args.model_version in {"klein-4b", "klein-9b"}
+
+    def get_dopsd_schedule(
+        self,
+        args: argparse.Namespace,
+        device: torch.device,
+        batch: Optional[dict] = None,
+        latents: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if latents is None:
+            raise ValueError("FLUX.2 D-OPSD schedule requires current batch latents")
+        image_seq_len = int(latents.shape[2] * latents.shape[3])
+        flow_shift = getattr(args, "discrete_flow_shift", None)
+        if flow_shift == 1.0:
+            flow_shift = None
+        sigmas = torch.tensor(
+            flux2_utils.get_schedule(args.dopsd_num_sampling_steps, image_seq_len, flow_shift),
+            device=device,
+            dtype=torch.float32,
+        )
+        timesteps = sigmas[:-1] * 1000.0
+        return timesteps, sigmas
+
+    def make_dopsd_teacher_batch(self, args: argparse.Namespace, batch: dict) -> dict:
+        if any(key.startswith("latents_control_") for key in batch):
+            raise ValueError("FLUX.2 D-OPSD does not support control-image batches in this phase")
+
+        teacher_embed_key = DOPSD_FLUX2_TEACHER_EMBED_KEY
+        if teacher_embed_key not in batch:
+            raise ValueError(
+                f"D-OPSD requires cached FLUX.2 teacher embeddings in batch key '{teacher_embed_key}'. "
+                "Re-run flux_2_cache_text_encoder_outputs.py with --dopsd_cache_teacher_outputs."
+            )
+        expected_dim = self.model_version_info.params.context_in_dim
+        if batch[teacher_embed_key].shape[-1] != expected_dim:
+            raise ValueError(
+                f"D-OPSD FLUX.2 teacher ctx dim {batch[teacher_embed_key].shape[-1]} does not match "
+                f"model context dim {expected_dim}."
+            )
+
+        teacher_batch = dict(batch)
+        teacher_batch["ctx_vec"] = teacher_batch[teacher_embed_key]
+        return teacher_batch
+
+    def predict_velocity_for_dopsd(
+        self,
+        args: argparse.Namespace,
+        accelerator: Accelerator,
+        transformer,
+        batch: dict,
+        latents: torch.Tensor,
+        timesteps: torch.Tensor,
+        network_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        return self.predict_velocity(
+            args,
+            accelerator,
+            transformer,
+            batch,
+            latents,
+            timesteps,
+            network_dtype,
+        )
+
+    def dopsd_rollout_step(
+        self,
+        latents: torch.Tensor,
+        model_pred: torch.Tensor,
+        sigmas: torch.Tensor,
+        step_index: int,
+    ) -> torch.Tensor:
+        delta = (sigmas[step_index + 1] - sigmas[step_index]).to(device=latents.device, dtype=latents.dtype)
+        return latents + delta * model_pred.to(dtype=latents.dtype)
 
     # endregion model specific
 

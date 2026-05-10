@@ -16,6 +16,13 @@ from safetensors.torch import save_file
 from musubi_tuner import zimage_train_network
 from musubi_tuner.dataset import config_utils
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
+from musubi_tuner.dopsd_train_utils import (
+    AdapterEma,
+    is_dopsd_enabled,
+    run_dopsd_stepwise_backward,
+    update_dopsd_metadata,
+    validate_dopsd_args,
+)
 from musubi_tuner.modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
 from musubi_tuner.zimage import zimage_model
 from musubi_tuner.hv_train_network import (
@@ -101,6 +108,15 @@ class ZImageTrainer(ZImageNetworkTrainer):
 
         # check model specific arguments
         self.handle_model_specific_args(args)
+        validate_dopsd_args(args)
+        if is_dopsd_enabled(args):
+            if not self.supports_dopsd(args):
+                raise ValueError(f"--dopsd is not supported by {self.__class__.__name__}")
+            if args.fused_backward_pass:
+                raise ValueError(
+                    "Z-Image full-parameter D-OPSD does not support --fused_backward_pass. "
+                    "D-OPSD calls backward once per rollout step, while fused backward steps parameters during backward."
+                )
 
         # ZImageNetrworkTrainer set args.dit_dtype as mixed precision, override it here to support float32/bfloat16 (full_bf16)
         args.dit_dtype = "bfloat16" if args.full_bf16 else "float32"
@@ -283,6 +299,14 @@ class ZImageTrainer(ZImageNetworkTrainer):
         # resume from local or huggingface. accelerator.step is set
         self.resume_from_local_or_hf_if_specified(accelerator, args)  # accelerator.load_state(args.resume)
 
+        dopsd_ema = None
+        if is_dopsd_enabled(args):
+            dopsd_ema = AdapterEma(accelerator.unwrap_model(transformer), shadow_device="cpu", backup_device="cpu")
+            accelerator.print(
+                f"enable full-parameter D-OPSD: steps={args.dopsd_num_sampling_steps}, "
+                f"loss_weight={args.dopsd_loss_weight}, ema_decay={args.dopsd_ema_decay}, ema_device=cpu"
+            )
+
         # patch for fused backward pass, adafactor only
         if args.fused_backward_pass:
             # use fused optimizer for backward pass: other optimizers will be supported in the future
@@ -359,6 +383,7 @@ class ZImageTrainer(ZImageNetworkTrainer):
             datasets_metadata.append(dataset_metadata)
 
         metadata["ss_datasets"] = json.dumps(datasets_metadata)
+        update_dopsd_metadata(metadata, args, train_mode="full_finetune")
 
         # model name and hash
         if args.dit is not None:
@@ -515,29 +540,60 @@ class ZImageTrainer(ZImageNetworkTrainer):
                 with accelerator.accumulate(training_model):
                     latents = self.scale_shift_latents(latents)
 
-                    # Sample noise that we'll add to the latents
-                    noise = torch.randn_like(latents)
+                    if is_dopsd_enabled(args):
+                        assert dopsd_ema is not None
+                        dopsd_timesteps, dopsd_sigmas = self.get_dopsd_schedule(
+                            args, accelerator.device, batch=batch, latents=latents
+                        )
 
-                    # calculate model input and timesteps
-                    noisy_model_input, timesteps = self.get_noisy_model_input_and_timesteps(
-                        args, noise, latents, batch["timesteps"], noise_scheduler, accelerator.device, dit_dtype
-                    )
+                        def dopsd_predict_fn(dopsd_batch, dopsd_latents, dopsd_timesteps_for_step):
+                            return self.predict_velocity_for_dopsd(
+                                args,
+                                accelerator,
+                                transformer,
+                                dopsd_batch,
+                                dopsd_latents,
+                                dopsd_timesteps_for_step,
+                                dit_dtype,
+                            )
 
-                    weighting = compute_loss_weighting_for_sd3(
-                        args.weighting_scheme, noise_scheduler, timesteps, accelerator.device, dit_dtype
-                    )
+                        loss, _ = run_dopsd_stepwise_backward(
+                            args=args,
+                            accelerator=accelerator,
+                            network=transformer,
+                            ema=dopsd_ema,
+                            batch=batch,
+                            latents=latents,
+                            timesteps=dopsd_timesteps,
+                            sigmas=dopsd_sigmas,
+                            predict_fn=dopsd_predict_fn,
+                            make_teacher_batch_fn=lambda dopsd_batch: self.make_dopsd_teacher_batch(args, dopsd_batch),
+                            rollout_step_fn=self.dopsd_rollout_step,
+                        )
+                    else:
+                        # Sample noise that we'll add to the latents
+                        noise = torch.randn_like(latents)
 
-                    model_pred, target = self.call_dit(
-                        args, accelerator, transformer, latents, batch, noise, noisy_model_input, timesteps, dit_dtype
-                    )
-                    loss = torch.nn.functional.mse_loss(model_pred.to(dit_dtype), target.to(dit_dtype), reduction="none")
+                        # calculate model input and timesteps
+                        noisy_model_input, timesteps = self.get_noisy_model_input_and_timesteps(
+                            args, noise, latents, batch["timesteps"], noise_scheduler, accelerator.device, dit_dtype
+                        )
 
-                    if weighting is not None:
-                        loss = loss * weighting
+                        weighting = compute_loss_weighting_for_sd3(
+                            args.weighting_scheme, noise_scheduler, timesteps, accelerator.device, dit_dtype
+                        )
 
-                    loss = loss.mean()  # mean loss over all elements in batch
+                        model_pred, target = self.call_dit(
+                            args, accelerator, transformer, latents, batch, noise, noisy_model_input, timesteps, dit_dtype
+                        )
+                        loss = torch.nn.functional.mse_loss(model_pred.to(dit_dtype), target.to(dit_dtype), reduction="none")
 
-                    accelerator.backward(loss)
+                        if weighting is not None:
+                            loss = loss * weighting
+
+                        loss = loss.mean()  # mean loss over all elements in batch
+
+                        accelerator.backward(loss)
 
                     if not args.fused_backward_pass:
                         if accelerator.sync_gradients and args.max_grad_norm != 0.0:
@@ -555,6 +611,8 @@ class ZImageTrainer(ZImageNetworkTrainer):
 
                         optimizer.step()
                         lr_scheduler.step()
+                        if accelerator.sync_gradients and dopsd_ema is not None:
+                            dopsd_ema.update(accelerator.unwrap_model(transformer), float(args.dopsd_ema_decay))
                         optimizer.zero_grad(set_to_none=True)
                     else:
                         # optimizer.step() and optimizer.zero_grad() are called in the optimizer hook

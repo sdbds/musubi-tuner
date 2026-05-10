@@ -290,6 +290,7 @@ accelerate launch --num_cpu_threads_per_process 1 src/musubi_tuner/zimage_train.
 - `--blocks_to_swap`: Swaps model blocks between VRAM and main memory to reduce VRAM usage. This is effective when VRAM is limited.
 - `--disable_numpy_memmap`: Disables numpy memory mapping for model loading, loading with standard file read. Increases RAM usage but may speed up model loading in some cases.
 - `--block_swap_optimizer_patch_params` option is available to patch optimizer parameters for block swapping. 
+- `--dopsd`: Enables D-OPSD full-parameter fine-tuning when teacher multimodal text-encoder caches have been generated. D-OPSD keeps the EMA teacher weights on CPU and does not support `--fused_backward_pass`.
 
 `--full_bf16` reduces VRAM usage by about 30GB but may impact model accuracy as the weights are kept in bfloat16. Note that the optimizer state is still kept in float32. In addition, it is recommended to use this with an optimizer that supports stochastic rounding. In this repository, Adafactor optimizer with `--fused_backward_pass` option supports stochastic rounding.
 

@@ -1,20 +1,19 @@
-# Z-Image D-OPSD LoRA Spec
+# Z-Image D-OPSD Training Spec
 
 ## Goal
 
-Implement the low-VRAM variant of D-OPSD for Z-Image network training:
+Implement D-OPSD for Z-Image adapter training and full-parameter fine-tuning:
 
-- train only adapter parameters
 - cache both student text embeddings and teacher multimodal embeddings before training
-- keep one frozen base transformer in memory
-- keep one EMA copy of adapter parameters, not a second transformer
+- support LoRA/LyCORIS by training only adapter parameters with a frozen base transformer
+- support full-parameter fine-tuning by training the DiT directly
+- keep one EMA copy of the trainable parameters, not a second live transformer
 - run distillation loss timestep by timestep and call backward after each timestep
 
-The baseline LoRA/SFT path must remain byte-for-byte behaviorally unchanged unless `--dopsd` is set.
+The baseline LoRA/SFT/full-fine-tuning paths must remain behaviorally unchanged unless `--dopsd` is set.
 
 ## Non-Goals
 
-- Full-parameter D-OPSD.
 - Online VLM/text encoder execution during training.
 - Reproducing the paper's Qwen3-VL LLM reweighting inside the trainer. The cache script can apply this offline.
 - Control/Omni Z-Image D-OPSD.
@@ -49,16 +48,18 @@ For each batch:
 1. Load target latents and cached student/teacher embeddings.
 2. Initialize rollout state from Gaussian noise with the same shape as target latents.
 3. For each Z-Image inference timestep:
-   - swap live adapter weights to EMA weights
+   - swap live trainable weights to EMA weights
    - run teacher prediction with cached multimodal teacher embedding under `torch.no_grad()`
-   - restore live student adapter weights
+   - restore live student trainable weights
    - run student prediction with cached text embedding
    - minimize `MSE(student_velocity, stopgrad(teacher_velocity)) / K`
    - call `accelerator.backward(...)` immediately
    - update rollout state with detached student prediction and Z-Image's inference sign convention
-4. After the optimizer step, update EMA adapter weights.
+4. After the optimizer step, update EMA trainable weights.
 
-This preserves the main memory property: at no point do we retain all K student graphs until a final backward.
+This preserves the main graph memory property: at no point do we retain all K student graphs until a final backward.
+For LoRA this keeps the EMA small. For full-parameter fine-tuning, the EMA is a full DiT-sized teacher state
+and should be kept on CPU.
 
 ## CLI
 
@@ -72,6 +73,21 @@ python src/musubi_tuner/zimage_train_network.py \
   --dopsd_ema_decay 0.9999
 ```
 
+Full-parameter fine-tuning uses the same cache contract and D-OPSD flags with `zimage_train.py`:
+
+```bash
+python src/musubi_tuner/zimage_train.py \
+  ...existing full fine-tuning args... \
+  --dopsd \
+  --dopsd_num_sampling_steps 8 \
+  --dopsd_ema_decay 0.9999
+```
+
+Full-parameter D-OPSD stores the EMA teacher weights on CPU by default. It rejects
+`--fused_backward_pass` because the fused optimizer path updates parameters during
+backward, while D-OPSD intentionally calls backward once per rollout step before a
+single optimizer step.
+
 Teacher cache:
 
 ```bash
@@ -79,12 +95,24 @@ python src/musubi_tuner/zimage_cache_text_encoder_outputs.py \
   --dataset_config path/to/dataset.toml \
   --text_encoder path/to/qwen3-4b \
   --dopsd_cache_teacher_outputs \
-  --dopsd_teacher_text_encoder path/to/qwen3-vl-compatible-model \
-  --dopsd_teacher_llm_reweight_source path/to/qwen3-4b
+  --dopsd_teacher_text_encoder path/to/qwen3-vl-4b-weights-or-dir
 ```
 
+`--dopsd_teacher_text_encoder` is the teacher VLM weight source, not the
+processor/tokenizer source. The cache script loads the official
+`Qwen/Qwen3-VL-4B-Instruct` processor/tokenizer by default, matching the
+repository pattern where local model arguments commonly point at safetensors
+weights.
+
+The teacher VLM language-model reweight source is the same `--text_encoder`
+used for the student Qwen3 text encoder. Do not provide a separate Qwen3 path;
+using a different text model can silently create a feature-space mismatch.
+
+This path requires the project-pinned `transformers==4.57.6` so Qwen3-VL Auto
+classes and processors are available.
+
 If the teacher VLM checkpoint was already prepared with Qwen3-4B language weights, pass
-`--dopsd_teacher_already_reweighted` instead of `--dopsd_teacher_llm_reweight_source`.
+`--dopsd_teacher_already_reweighted` to skip the default `--text_encoder` reweight step.
 `--dopsd_teacher_allow_raw_vlm` is only for ablations and is not paper-consistent for Z-Image.
 
 The teacher cache path rejects text-only models and processors that do not produce image tensors. This keeps

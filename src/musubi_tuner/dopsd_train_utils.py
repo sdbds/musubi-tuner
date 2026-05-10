@@ -10,6 +10,8 @@ from accelerate import Accelerator
 
 
 DOPSD_TEACHER_EMBED_KEY = "dopsd_teacher_llm_embed"
+DOPSD_ZIMAGE_TEACHER_EMBED_KEY = DOPSD_TEACHER_EMBED_KEY
+DOPSD_FLUX2_TEACHER_EMBED_KEY = "dopsd_teacher_ctx_vec"
 
 
 def _parser_has_option(parser: argparse.ArgumentParser, option: str) -> bool:
@@ -18,7 +20,7 @@ def _parser_has_option(parser: argparse.ArgumentParser, option: str) -> bool:
 
 def add_dopsd_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     if not _parser_has_option(parser, "--dopsd"):
-        parser.add_argument("--dopsd", action="store_true", help="Enable experimental D-OPSD LoRA distillation")
+        parser.add_argument("--dopsd", action="store_true", help="Enable experimental D-OPSD distillation")
     if not _parser_has_option(parser, "--dopsd_loss_weight"):
         parser.add_argument("--dopsd_loss_weight", type=float, default=1.0, help="Weight for the D-OPSD distillation loss")
     if not _parser_has_option(parser, "--dopsd_num_sampling_steps"):
@@ -26,21 +28,14 @@ def add_dopsd_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentPar
             "--dopsd_num_sampling_steps",
             type=int,
             default=8,
-            help="Few-step Z-Image schedule length used for D-OPSD on-policy rollouts",
+            help="Few-step schedule length used for D-OPSD on-policy rollouts",
         )
     if not _parser_has_option(parser, "--dopsd_ema_decay"):
         parser.add_argument(
             "--dopsd_ema_decay",
             type=float,
             default=0.9999,
-            help="EMA decay for the teacher adapter. 1.0 freezes the initial adapter as teacher.",
-        )
-    if not _parser_has_option(parser, "--dopsd_teacher_embed_key"):
-        parser.add_argument(
-            "--dopsd_teacher_embed_key",
-            type=str,
-            default=DOPSD_TEACHER_EMBED_KEY,
-            help="Batch/cache key for cached multimodal teacher embeddings",
+            help="EMA decay for the teacher trainable weights. 1.0 freezes the initial trainable weights as teacher.",
         )
     return parser
 
@@ -66,23 +61,44 @@ def get_named_trainable_parameters(module: torch.nn.Module) -> list[tuple[str, t
 
 
 class AdapterEma:
-    def __init__(self, module: torch.nn.Module):
+    def __init__(
+        self,
+        module: torch.nn.Module,
+        shadow_device: torch.device | str | None = None,
+        backup_device: torch.device | str | None = None,
+    ):
         named_params = get_named_trainable_parameters(module)
         if not named_params:
-            raise ValueError("D-OPSD requires at least one trainable adapter parameter for EMA teacher")
-        self.shadow = {name: param.detach().clone() for name, param in named_params}
+            raise ValueError("D-OPSD requires at least one trainable parameter for EMA teacher")
+        self.shadow_device = torch.device(shadow_device) if shadow_device is not None else None
+        self.backup_device = torch.device(backup_device) if backup_device is not None else None
+        self.shadow = {name: self._clone_for_shadow(param) for name, param in named_params}
+
+    def _clone_for_shadow(self, param: torch.nn.Parameter) -> torch.Tensor:
+        tensor = param.detach()
+        if self.shadow_device is not None:
+            tensor = tensor.to(device=self.shadow_device)
+        return tensor.clone()
+
+    def _clone_for_backup(self, param: torch.nn.Parameter) -> torch.Tensor:
+        tensor = param.detach()
+        if self.backup_device is not None:
+            tensor = tensor.to(device=self.backup_device)
+        return tensor.clone()
 
     def update(self, module: torch.nn.Module, decay: float) -> None:
         with torch.no_grad():
             for name, param in get_named_trainable_parameters(module):
                 if name not in self.shadow:
-                    self.shadow[name] = param.detach().clone()
+                    self.shadow[name] = self._clone_for_shadow(param)
                     continue
                 shadow = self.shadow[name]
-                if shadow.device != param.device or shadow.dtype != param.dtype:
-                    shadow = shadow.to(device=param.device, dtype=param.dtype)
+                shadow_device = self.shadow_device if self.shadow_device is not None else param.device
+                if shadow.device != shadow_device or shadow.dtype != param.dtype:
+                    shadow = shadow.to(device=shadow_device, dtype=param.dtype)
                     self.shadow[name] = shadow
-                shadow.mul_(decay).add_(param.detach(), alpha=1.0 - decay)
+                current = param.detach().to(device=shadow.device, dtype=shadow.dtype)
+                shadow.mul_(decay).add_(current, alpha=1.0 - decay)
 
     @contextmanager
     def use_ema_weights(self, module: torch.nn.Module) -> Iterator[None]:
@@ -94,7 +110,7 @@ class AdapterEma:
                 param = named_params.get(name)
                 if param is None:
                     continue
-                backups[name] = param.detach().clone()
+                backups[name] = self._clone_for_backup(param)
                 param.copy_(shadow.to(device=param.device, dtype=param.dtype))
             module.eval()
         try:
@@ -103,7 +119,8 @@ class AdapterEma:
             with torch.no_grad():
                 named_params = dict(get_named_trainable_parameters(module))
                 for name, backup in backups.items():
-                    named_params[name].copy_(backup)
+                    param = named_params[name]
+                    param.copy_(backup.to(device=param.device, dtype=param.dtype))
                 module.train(was_training)
 
 
@@ -156,11 +173,12 @@ def run_dopsd_stepwise_backward(
     return total_loss / float(step_count), step_count
 
 
-def update_dopsd_metadata(metadata: dict, args: argparse.Namespace) -> None:
+def update_dopsd_metadata(metadata: dict, args: argparse.Namespace, train_mode: str | None = None) -> None:
     if not getattr(args, "dopsd", False):
         return
     metadata["ss_dopsd"] = bool(getattr(args, "dopsd", False))
     metadata["ss_dopsd_loss_weight"] = getattr(args, "dopsd_loss_weight", None)
     metadata["ss_dopsd_num_sampling_steps"] = getattr(args, "dopsd_num_sampling_steps", None)
     metadata["ss_dopsd_ema_decay"] = getattr(args, "dopsd_ema_decay", None)
-    metadata["ss_dopsd_teacher_embed_key"] = getattr(args, "dopsd_teacher_embed_key", None)
+    if train_mode is not None:
+        metadata["ss_dopsd_train_mode"] = train_mode

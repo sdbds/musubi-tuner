@@ -546,12 +546,22 @@ def save_text_encoder_output_cache_flux_kontext(item_info: ItemInfo, t5_vec: tor
     save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_FLUX_KONTEXT_FULL)
 
 
-def save_text_encoder_output_cache_flux_2(item_info: ItemInfo, ctx_vec: torch.Tensor, arch_full: str):
+def save_text_encoder_output_cache_flux_2(
+    item_info: ItemInfo,
+    ctx_vec: Optional[torch.Tensor] = None,
+    arch_full: str = ARCHITECTURE_FLUX_2_DEV_FULL,
+    dopsd_teacher_ctx_vec: Optional[torch.Tensor] = None,
+    dopsd_teacher_key: str = "dopsd_teacher_ctx_vec",
+):
     """Flux 2 architecture."""
 
     sd = {}
-    dtype_str = dtype_to_str(ctx_vec.dtype)
-    sd[f"ctx_vec_{dtype_str}"] = ctx_vec.detach().cpu()
+    if ctx_vec is not None:
+        dtype_str = dtype_to_str(ctx_vec.dtype)
+        sd[f"ctx_vec_{dtype_str}"] = ctx_vec.detach().cpu()
+    if dopsd_teacher_ctx_vec is not None:
+        dtype_str = dtype_to_str(dopsd_teacher_ctx_vec.dtype)
+        sd[f"{dopsd_teacher_key}_{dtype_str}"] = dopsd_teacher_ctx_vec.detach().cpu()
 
     save_text_encoder_output_cache_common(item_info, sd, arch_full)
 

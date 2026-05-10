@@ -1286,7 +1286,13 @@ class NetworkTrainer:
     def supports_dopsd(self, args: argparse.Namespace) -> bool:
         return False
 
-    def get_dopsd_schedule(self, args: argparse.Namespace, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+    def get_dopsd_schedule(
+        self,
+        args: argparse.Namespace,
+        device: torch.device,
+        batch: Optional[dict] = None,
+        latents: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError(f"{self.__class__.__name__} does not implement D-OPSD schedule")
 
     def make_dopsd_teacher_batch(self, args: argparse.Namespace, batch: dict) -> dict:
@@ -1977,11 +1983,8 @@ class NetworkTrainer:
         accelerator.unwrap_model(network).prepare_grad_etc(transformer)
 
         dopsd_ema = None
-        dopsd_timesteps = None
-        dopsd_sigmas = None
         if is_dopsd_enabled(args):
             dopsd_ema = AdapterEma(accelerator.unwrap_model(network))
-            dopsd_timesteps, dopsd_sigmas = self.get_dopsd_schedule(args, accelerator.device)
             accelerator.print(
                 f"enable D-OPSD: steps={args.dopsd_num_sampling_steps}, "
                 f"loss_weight={args.dopsd_loss_weight}, ema_decay={args.dopsd_ema_decay}"
@@ -2123,7 +2126,7 @@ class NetworkTrainer:
                 vae_name = os.path.basename(vae_name)
             metadata["ss_vae_name"] = vae_name
 
-        update_dopsd_metadata(metadata, args)
+        update_dopsd_metadata(metadata, args, train_mode="adapter")
 
         metadata = {k: str(v) for k, v in metadata.items()}
 
@@ -2244,7 +2247,10 @@ class NetworkTrainer:
                     latents = self.scale_shift_latents(latents)
 
                     if is_dopsd_enabled(args):
-                        assert dopsd_ema is not None and dopsd_timesteps is not None and dopsd_sigmas is not None
+                        assert dopsd_ema is not None
+                        dopsd_timesteps, dopsd_sigmas = self.get_dopsd_schedule(
+                            args, accelerator.device, batch=batch, latents=latents
+                        )
 
                         def dopsd_predict_fn(dopsd_batch, dopsd_latents, dopsd_timesteps_for_step):
                             return self.predict_velocity_for_dopsd(

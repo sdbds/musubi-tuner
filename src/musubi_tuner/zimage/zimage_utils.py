@@ -8,7 +8,8 @@ import torch
 from transformers import Qwen3Config, Qwen3ForCausalLM, Qwen2Tokenizer
 from accelerate import init_empty_weights
 
-from musubi_tuner.utils.safetensors_utils import load_split_weights
+from musubi_tuner.utils.device_utils import synchronize_device
+from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen, get_split_weight_filenames
 from musubi_tuner.zimage import zimage_config
 
 logger = logging.getLogger(__name__)
@@ -22,6 +23,91 @@ def shift_scale_latents_for_decode(latents: torch.Tensor) -> torch.Tensor:
     """Shift and scale latents before decoding with the VAE. latents should be casted to float32 before calling this function."""
     latents = (latents / zimage_config.ZIMAGE_VAE_SCALING_FACTOR) + zimage_config.ZIMAGE_VAE_SHIFT_FACTOR
     return latents
+
+
+def normalize_qwen3_text_encoder_state_dict(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    has_hf_vlm_language = any(key.startswith("model.language_model.") for key in state_dict)
+    if has_hf_vlm_language:
+        normalized = {}
+        dropped_visual = 0
+        converted_language = 0
+        for key, value in state_dict.items():
+            if key.startswith("model.language_model."):
+                new_key = key.replace("model.language_model.", "model.", 1)
+                converted_language += 1
+            elif key.startswith("model.visual."):
+                dropped_visual += 1
+                continue
+            else:
+                continue
+
+            if new_key in normalized:
+                raise ValueError(f"Duplicate Qwen3 text encoder key after VLM normalization: {new_key}")
+            normalized[new_key] = value
+
+        logger.info(
+            "Extracted Qwen3 text encoder weights from Qwen-VL state dict: converted %d language keys, dropped %d visual keys",
+            converted_language,
+            dropped_visual,
+        )
+        return normalized
+
+    return state_dict
+
+
+def _load_qwen3_text_encoder_state_dict(
+    ckpt_path: str,
+    device: Union[str, torch.device],
+    disable_mmap: bool,
+    dtype: Optional[torch.dtype],
+) -> dict[str, torch.Tensor]:
+    target_device = torch.device(device) if device is not None else None
+    filenames = get_split_weight_filenames(ckpt_path) or [ckpt_path]
+    state_dict = {}
+    converted_language = 0
+    dropped_visual = 0
+    loaded_plain = 0
+
+    for filename in filenames:
+        with MemoryEfficientSafeOpen(filename, disable_numpy_memmap=disable_mmap) as f:
+            keys = f.keys()
+            has_hf_vlm_language = any(key.startswith("model.language_model.") for key in keys)
+            has_hf_vlm_visual = any(key.startswith("model.visual.") for key in keys)
+
+            if has_hf_vlm_language:
+                for key in keys:
+                    if key.startswith("model.language_model."):
+                        new_key = key.replace("model.language_model.", "model.", 1)
+                        converted_language += 1
+                    elif key.startswith("model.visual."):
+                        dropped_visual += 1
+                        continue
+                    else:
+                        continue
+
+                    if new_key in state_dict:
+                        raise ValueError(f"Duplicate Qwen3 text encoder key while loading {ckpt_path}: {new_key}")
+                    state_dict[new_key] = f.get_tensor(key, device=target_device, dtype=dtype)
+            elif has_hf_vlm_visual:
+                dropped_visual += len(keys)
+                continue
+            else:
+                for key in keys:
+                    if key in state_dict:
+                        raise ValueError(f"Duplicate Qwen3 text encoder key while loading {ckpt_path}: {key}")
+                    state_dict[key] = f.get_tensor(key, device=target_device, dtype=dtype)
+                    loaded_plain += 1
+
+    synchronize_device(target_device)
+    if converted_language or dropped_visual:
+        logger.info(
+            "Loaded Qwen3 text encoder subset from %s: converted %d language keys, dropped %d visual keys, loaded %d plain keys",
+            ckpt_path,
+            converted_language,
+            dropped_visual,
+            loaded_plain,
+        )
+    return state_dict
 
 
 def load_qwen3(
@@ -106,10 +192,10 @@ def load_qwen3(
         qwen3 = Qwen3ForCausalLM._from_config(config)
 
     if state_dict is not None:
-        sd = state_dict
+        sd = normalize_qwen3_text_encoder_state_dict(state_dict)
     else:
         logger.info(f"Loading state dict from {ckpt_path}")
-        sd = load_split_weights(ckpt_path, device=str(device), disable_mmap=disable_mmap, dtype=dtype)
+        sd = _load_qwen3_text_encoder_state_dict(ckpt_path, device=device, disable_mmap=disable_mmap, dtype=dtype)
 
     sd["lm_head.weight"] = sd["model.embed_tokens.weight"]  # tie weights
 
