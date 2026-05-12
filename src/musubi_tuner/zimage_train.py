@@ -18,7 +18,9 @@ from musubi_tuner.dataset import config_utils
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
 from musubi_tuner.dopsd_train_utils import (
     AdapterEma,
+    add_dopsd_full_finetune_arguments,
     is_dopsd_enabled,
+    resolve_full_ema_devices,
     run_dopsd_stepwise_backward,
     update_dopsd_metadata,
     validate_dopsd_args,
@@ -301,10 +303,18 @@ class ZImageTrainer(ZImageNetworkTrainer):
 
         dopsd_ema = None
         if is_dopsd_enabled(args):
-            dopsd_ema = AdapterEma(accelerator.unwrap_model(transformer), shadow_device="cpu", backup_device="cpu")
+            ema_shadow_device, ema_backup_device, ema_device_label = resolve_full_ema_devices(
+                args, accelerator.unwrap_model(transformer), accelerator.device
+            )
+            dopsd_ema = AdapterEma(
+                accelerator.unwrap_model(transformer),
+                shadow_device=ema_shadow_device,
+                backup_device=ema_backup_device,
+            )
             accelerator.print(
                 f"enable full-parameter D-OPSD: steps={args.dopsd_num_sampling_steps}, "
-                f"loss_weight={args.dopsd_loss_weight}, ema_decay={args.dopsd_ema_decay}, ema_device=cpu"
+                f"loss_weight={args.dopsd_loss_weight}, ema_decay={args.dopsd_ema_decay}, "
+                f"ema_device={ema_device_label}"
             )
 
         # patch for fused backward pass, adafactor only
@@ -733,6 +743,7 @@ class ZImageTrainer(ZImageNetworkTrainer):
 
 def zimage_finetune_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     """Z-Image fine-tuning specific parser setup"""
+    parser = add_dopsd_full_finetune_arguments(parser)
     parser.add_argument("--full_bf16", action="store_true", help="Enable full bfloat16 training for Z-Image")
     parser.add_argument("--fused_backward_pass", action="store_true", help="Use fused backward pass for Adafactor optimizer")
     parser.add_argument(

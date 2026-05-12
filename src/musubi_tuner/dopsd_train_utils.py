@@ -12,6 +12,9 @@ from accelerate import Accelerator
 DOPSD_TEACHER_EMBED_KEY = "dopsd_teacher_llm_embed"
 DOPSD_ZIMAGE_TEACHER_EMBED_KEY = DOPSD_TEACHER_EMBED_KEY
 DOPSD_FLUX2_TEACHER_EMBED_KEY = "dopsd_teacher_ctx_vec"
+DOPSD_FLUX2_IDENTITY_EDIT_PROMPT = (
+    "Reconstruct the reference image exactly. Do not change its content, composition, style, or colors."
+)
 
 
 def _parser_has_option(parser: argparse.ArgumentParser, option: str) -> bool:
@@ -40,6 +43,22 @@ def add_dopsd_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentPar
     return parser
 
 
+def add_dopsd_full_finetune_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    if not _parser_has_option(parser, "--dopsd_full_ema_device"):
+        parser.add_argument(
+            "--dopsd_full_ema_device",
+            type=str,
+            default="auto",
+            choices=("cpu", "gpu", "auto"),
+            help=(
+                "EMA teacher storage for full-parameter D-OPSD. "
+                "'auto' uses GPU only when free CUDA memory appears sufficient, "
+                "'cpu' uses less VRAM and is slower, 'gpu' keeps a full EMA copy on GPU and is faster."
+            ),
+        )
+    return parser
+
+
 def validate_dopsd_args(args: argparse.Namespace) -> None:
     if not getattr(args, "dopsd", False):
         return
@@ -60,6 +79,37 @@ def get_named_trainable_parameters(module: torch.nn.Module) -> list[tuple[str, t
     return [(name, param) for name, param in module.named_parameters() if param.requires_grad]
 
 
+def resolve_full_ema_devices(
+    args: argparse.Namespace,
+    module: torch.nn.Module,
+    device: torch.device,
+) -> tuple[torch.device | None, torch.device | None, str]:
+    requested = getattr(args, "dopsd_full_ema_device", "auto")
+    if requested == "gpu":
+        if device.type != "cuda":
+            raise ValueError("--dopsd_full_ema_device=gpu requires a CUDA training device")
+        return None, None, "gpu"
+    if requested == "auto" and _has_cuda_memory_for_gpu_ema(module, device):
+        return None, None, "gpu-auto"
+    return torch.device("cpu"), torch.device("cpu"), "cpu" if requested != "auto" else "cpu-auto"
+
+
+def _has_cuda_memory_for_gpu_ema(module: torch.nn.Module, device: torch.device) -> bool:
+    if device.type != "cuda" or not torch.cuda.is_available():
+        return False
+    trainable_bytes = sum(param.numel() * param.element_size() for _, param in get_named_trainable_parameters(module))
+    if trainable_bytes <= 0:
+        return False
+    try:
+        free_bytes, _ = torch.cuda.mem_get_info(device)
+    except TypeError:
+        free_bytes, _ = torch.cuda.mem_get_info()
+    except RuntimeError:
+        return False
+    # A full GPU EMA needs one extra parameter copy plus allocator slack.
+    return free_bytes > int(trainable_bytes * 1.25)
+
+
 class AdapterEma:
     def __init__(
         self,
@@ -72,7 +122,18 @@ class AdapterEma:
             raise ValueError("D-OPSD requires at least one trainable parameter for EMA teacher")
         self.shadow_device = torch.device(shadow_device) if shadow_device is not None else None
         self.backup_device = torch.device(backup_device) if backup_device is not None else None
+        self._named_params = named_params
+        self._param_lookup = dict(named_params)
         self.shadow = {name: self._clone_for_shadow(param) for name, param in named_params}
+
+    def _refresh_named_params(self, module: torch.nn.Module) -> None:
+        named_params = get_named_trainable_parameters(module)
+        if len(named_params) != len(self._named_params) or any(
+            name != old_name or param is not old_param
+            for (name, param), (old_name, old_param) in zip(named_params, self._named_params)
+        ):
+            self._named_params = named_params
+            self._param_lookup = dict(named_params)
 
     def _clone_for_shadow(self, param: torch.nn.Parameter) -> torch.Tensor:
         tensor = param.detach()
@@ -88,7 +149,8 @@ class AdapterEma:
 
     def update(self, module: torch.nn.Module, decay: float) -> None:
         with torch.no_grad():
-            for name, param in get_named_trainable_parameters(module):
+            self._refresh_named_params(module)
+            for name, param in self._named_params:
                 if name not in self.shadow:
                     self.shadow[name] = self._clone_for_shadow(param)
                     continue
@@ -102,9 +164,8 @@ class AdapterEma:
 
     @contextmanager
     def use_ema_weights(self, module: torch.nn.Module) -> Iterator[None]:
-        named_params = dict(get_named_trainable_parameters(module))
-        if self._can_swap_without_copy(named_params):
-            with self._swap_ema_weights(module, named_params):
+        if self._can_swap_without_copy():
+            with self._swap_ema_weights(module):
                 yield
             return
 
@@ -112,7 +173,7 @@ class AdapterEma:
         was_training = module.training
         with torch.no_grad():
             for name, shadow in self.shadow.items():
-                param = named_params.get(name)
+                param = self._param_lookup.get(name)
                 if param is None:
                     continue
                 backups[name] = self._clone_for_backup(param)
@@ -122,18 +183,17 @@ class AdapterEma:
             yield
         finally:
             with torch.no_grad():
-                named_params = dict(get_named_trainable_parameters(module))
                 for name, backup in backups.items():
-                    param = named_params[name]
+                    param = self._param_lookup[name]
                     param.copy_(backup.to(device=param.device, dtype=param.dtype))
                 module.train(was_training)
 
-    def _can_swap_without_copy(self, named_params: dict[str, torch.nn.Parameter]) -> bool:
+    def _can_swap_without_copy(self) -> bool:
         if self.backup_device is not None:
             return False
 
         for name, shadow in self.shadow.items():
-            param = named_params.get(name)
+            param = self._param_lookup.get(name)
             if param is None:
                 continue
             if shadow.device != param.device or shadow.dtype != param.dtype or shadow.shape != param.shape:
@@ -141,12 +201,12 @@ class AdapterEma:
         return True
 
     @contextmanager
-    def _swap_ema_weights(self, module: torch.nn.Module, named_params: dict[str, torch.nn.Parameter]) -> Iterator[None]:
+    def _swap_ema_weights(self, module: torch.nn.Module) -> Iterator[None]:
         swapped_names: list[str] = []
         was_training = module.training
         with torch.no_grad():
             for name, shadow in self.shadow.items():
-                param = named_params.get(name)
+                param = self._param_lookup.get(name)
                 if param is None:
                     continue
                 student_data = param.data
@@ -158,9 +218,8 @@ class AdapterEma:
             yield
         finally:
             with torch.no_grad():
-                named_params = dict(get_named_trainable_parameters(module))
                 for name in swapped_names:
-                    param = named_params[name]
+                    param = self._param_lookup[name]
                     ema_data = param.data
                     param.data = self.shadow[name]
                     self.shadow[name] = ema_data
@@ -191,11 +250,7 @@ def dopsd_x0_loss(
     sigmas: torch.Tensor,
     step_index: int,
 ) -> torch.Tensor:
-    sigma = sigmas[step_index].to(device=state.device, dtype=torch.float32)
-    state = state.float()
-    x0_student = state + sigma * student_pred.float()
-    x0_teacher = state + sigma * teacher_pred.float()
-    return F.mse_loss(x0_student, x0_teacher.detach(), reduction="mean")
+    return dopsd_sigma_weighted_velocity_loss(state, student_pred, teacher_pred, sigmas, step_index)
 
 
 def dopsd_flow_x0_loss(
@@ -205,11 +260,20 @@ def dopsd_flow_x0_loss(
     sigmas: torch.Tensor,
     step_index: int,
 ) -> torch.Tensor:
-    sigma = sigmas[step_index].to(device=state.device, dtype=torch.float32)
-    state = state.float()
-    x0_student = state - sigma * student_pred.float()
-    x0_teacher = state - sigma * teacher_pred.float()
-    return F.mse_loss(x0_student, x0_teacher.detach(), reduction="mean")
+    return dopsd_sigma_weighted_velocity_loss(state, student_pred, teacher_pred, sigmas, step_index)
+
+
+def dopsd_sigma_weighted_velocity_loss(
+    state: torch.Tensor,
+    student_pred: torch.Tensor,
+    teacher_pred: torch.Tensor,
+    sigmas: torch.Tensor,
+    step_index: int,
+) -> torch.Tensor:
+    del state
+    sigma = sigmas[step_index].to(device=student_pred.device, dtype=torch.float32)
+    velocity_loss = F.mse_loss(student_pred.float(), teacher_pred.float().detach(), reduction="mean")
+    return velocity_loss * sigma.square()
 
 
 def run_dopsd_stepwise_backward(
@@ -267,5 +331,7 @@ def update_dopsd_metadata(metadata: dict, args: argparse.Namespace, train_mode: 
     metadata["ss_dopsd_loss_weight"] = getattr(args, "dopsd_loss_weight", None)
     metadata["ss_dopsd_num_sampling_steps"] = getattr(args, "dopsd_num_sampling_steps", None)
     metadata["ss_dopsd_ema_decay"] = getattr(args, "dopsd_ema_decay", None)
+    if hasattr(args, "dopsd_full_ema_device"):
+        metadata["ss_dopsd_full_ema_device"] = getattr(args, "dopsd_full_ema_device", None)
     if train_mode is not None:
         metadata["ss_dopsd_train_mode"] = train_mode

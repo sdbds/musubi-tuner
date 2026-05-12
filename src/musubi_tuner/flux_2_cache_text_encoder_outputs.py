@@ -8,15 +8,7 @@ from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitize
 from musubi_tuner.dataset.image_video_dataset import ItemInfo, save_text_encoder_output_cache_flux_2
 
 from musubi_tuner.flux_2 import flux2_utils
-from musubi_tuner.dopsd_train_utils import DOPSD_FLUX2_TEACHER_EMBED_KEY
-from musubi_tuner.utils import model_utils
-from musubi_tuner.dopsd_cache_utils import (
-    content_to_pil_image,
-    load_auto_vlm,
-    load_qwen3_vl_processor,
-    qwen3_vl_processor_id_for_variant,
-    validate_multimodal_inputs,
-)
+from musubi_tuner.dopsd_train_utils import DOPSD_FLUX2_IDENTITY_EDIT_PROMPT, DOPSD_FLUX2_TEACHER_EMBED_KEY
 import musubi_tuner.cache_text_encoder_outputs as cache_text_encoder_outputs
 import logging
 
@@ -37,58 +29,22 @@ def encode_and_save_batch(text_embedder: torch.nn.Module, batch: list[ItemInfo],
         save_text_encoder_output_cache_flux_2(item, _ctx_vec, arch_full=arch_full)
 
 
-def _apply_flux2_teacher_chat_template(processor, image, caption: str) -> str:
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "image", "image": image},
-                {"type": "text", "text": caption},
-            ],
-        }
-    ]
-    try:
-        return processor.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-            enable_thinking=False,
-        )
-    except TypeError:
-        return processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-
-
 def encode_and_save_dopsd_teacher_batch(
-    processor,
-    teacher_encoder,
+    text_embedder: torch.nn.Module,
     batch: list[ItemInfo],
     device: torch.device,
     expected_dim: int,
     teacher_embed_key: str,
     arch_full: str,
 ):
-    images = [content_to_pil_image(item.content) for item in batch]
-    texts = [_apply_flux2_teacher_chat_template(processor, image, item.caption) for image, item in zip(images, batch)]
-
-    inputs = processor(
-        text=texts,
-        images=images,
-        padding="max_length",
-        truncation=True,
-        max_length=flux2_utils.MAX_LENGTH,
-        return_tensors="pt",
-    )
-    validate_multimodal_inputs(inputs)
-    inputs = inputs.to(device)
-
-    with torch.no_grad():
-        outputs = teacher_encoder(**inputs, output_hidden_states=True, use_cache=False)
-
-    ctx_vec = torch.cat([outputs.hidden_states[layer] for layer in flux2_utils.OUTPUT_LAYERS_QWEN3], dim=-1)
+    prompts = [DOPSD_FLUX2_IDENTITY_EDIT_PROMPT for _ in batch]
+    autocast_dtype = torch.bfloat16 if text_embedder.dtype.itemsize == 1 else text_embedder.dtype
+    with torch.autocast(device_type=device.type, dtype=autocast_dtype), torch.no_grad():
+        ctx_vec = text_embedder(prompts).cpu()
     if ctx_vec.shape[-1] != expected_dim:
         raise ValueError(
             f"D-OPSD FLUX.2 teacher ctx dim {ctx_vec.shape[-1]} does not match model context dim {expected_dim}. "
-            "Use a Qwen3-VL teacher whose language hidden size matches this Klein variant."
+            "Use the matching Qwen3 text encoder for this Klein variant."
         )
 
     for item, ctx_i in zip(batch, ctx_vec):
@@ -106,6 +62,8 @@ def main():
 
     args = parser.parse_args()
     model_version_info = flux2_utils.FLUX2_MODEL_INFO[args.model_version]
+    if args.dopsd_cache_teacher_outputs and args.model_version not in {"klein-4b", "klein-9b"}:
+        raise ValueError("--dopsd_cache_teacher_outputs for FLUX.2 only supports klein-4b and klein-9b")
 
     device = args.device if args.device is not None else "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(device)
@@ -144,39 +102,14 @@ def main():
         all_cache_paths_for_dataset,
         encode_for_text_encoder,
     )
-    del text_embedder
 
     if args.dopsd_cache_teacher_outputs:
-        if args.model_version not in {"klein-4b", "klein-9b"}:
-            raise ValueError("--dopsd_cache_teacher_outputs for FLUX.2 only supports klein-4b and klein-9b")
-        if args.dopsd_teacher_text_encoder is None:
-            raise ValueError("--dopsd_teacher_text_encoder is required when --dopsd_cache_teacher_outputs is set")
-
-        teacher_dtype = model_utils.str_to_dtype(args.dopsd_teacher_dtype)
-        teacher_config_id = qwen3_vl_processor_id_for_variant(model_version_info.qwen_variant)
-        teacher_processor = load_qwen3_vl_processor(model_version_info.qwen_variant)
-        teacher_llm_reweight_source = (
-            None if args.dopsd_teacher_already_reweighted or args.dopsd_teacher_allow_raw_vlm else args.text_encoder
-        )
-        logger.info(f"Loading D-OPSD FLUX.2 teacher encoder from {args.dopsd_teacher_text_encoder}")
-        teacher_encoder = load_auto_vlm(
-            args.dopsd_teacher_text_encoder,
-            teacher_dtype,
-            device,
-            teacher_llm_reweight_source,
-            args.dopsd_teacher_already_reweighted,
-            args.dopsd_teacher_allow_raw_vlm,
-            "FLUX.2 Klein",
-            teacher_config_id,
-        )
-
-        logger.info("Encoding D-OPSD FLUX.2 multimodal teacher outputs")
+        logger.info("Encoding D-OPSD FLUX.2 identity-edit teacher context")
 
         def encode_for_dopsd_teacher(batch: list[ItemInfo]):
-            nonlocal teacher_processor, teacher_encoder
+            nonlocal text_embedder
             encode_and_save_dopsd_teacher_batch(
-                teacher_processor,
-                teacher_encoder,
+                text_embedder,
                 batch,
                 device,
                 model_version_info.params.context_in_dim,
@@ -192,10 +125,9 @@ def main():
             all_cache_files_for_dataset,
             all_cache_paths_for_dataset,
             encode_for_dopsd_teacher,
-            requires_content=True,
         )
 
-        del teacher_processor, teacher_encoder
+    del text_embedder
 
     # remove cache files not in dataset
     cache_text_encoder_outputs.post_process_cache_files(
@@ -209,32 +141,7 @@ def flux_2_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentPar
     parser.add_argument(
         "--dopsd_cache_teacher_outputs",
         action="store_true",
-        help="Also cache D-OPSD multimodal teacher ctx vectors into the FLUX.2 text encoder cache",
-    )
-    parser.add_argument(
-        "--dopsd_teacher_text_encoder",
-        type=str,
-        default=None,
-        help=(
-            "Qwen3-VL teacher encoder weights path or directory for D-OPSD cache generation; "
-            "processor/tokenizer are loaded from the matching official Qwen3-VL repo"
-        ),
-    )
-    parser.add_argument(
-        "--dopsd_teacher_already_reweighted",
-        action="store_true",
-        help="Assert that --dopsd_teacher_text_encoder already contains --text_encoder-reweighted LLM weights",
-    )
-    parser.add_argument(
-        "--dopsd_teacher_allow_raw_vlm",
-        action="store_true",
-        help="Allow raw VLM teacher cache generation for ablations; this is not paper-consistent for FLUX.2 Klein",
-    )
-    parser.add_argument(
-        "--dopsd_teacher_dtype",
-        type=str,
-        default="bfloat16",
-        help="Dtype for the D-OPSD teacher encoder, e.g. bfloat16 or float16",
+        help="Also cache the FLUX.2 D-OPSD identity-edit teacher ctx vector into the text encoder cache",
     )
     flux2_utils.add_model_version_args(parser)
     return parser

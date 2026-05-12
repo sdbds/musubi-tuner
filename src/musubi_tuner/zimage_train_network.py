@@ -367,7 +367,10 @@ class ZImageNetworkTrainer(NetworkTrainer):
         timesteps, sigmas = zimage_utils.get_timesteps_sigmas(args.dopsd_num_sampling_steps, args.discrete_flow_shift)
         return timesteps.to(device=device), sigmas.to(device=device)
 
-    def make_dopsd_teacher_batch(self, args: argparse.Namespace, batch: dict) -> dict:
+    def make_dopsd_teacher_batch(
+        self, args: argparse.Namespace, batch: dict, latents: Optional[torch.Tensor] = None
+    ) -> dict:
+        del latents
         teacher_embed_key = DOPSD_ZIMAGE_TEACHER_EMBED_KEY
         if teacher_embed_key not in batch:
             raise ValueError(

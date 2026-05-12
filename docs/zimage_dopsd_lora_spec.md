@@ -52,14 +52,15 @@ For each batch:
    - run teacher prediction with cached multimodal teacher embedding under `torch.no_grad()`
    - restore live student trainable weights
    - run student prediction with cached text embedding
-   - minimize `MSE(student_velocity, stopgrad(teacher_velocity)) / K`
+   - minimize official `x0` loss, implemented as the equivalent
+     `sigma ** 2 * MSE(student_velocity, stopgrad(teacher_velocity)) / K`
    - call `accelerator.backward(...)` immediately
    - update rollout state with detached student prediction and Z-Image's inference sign convention
 4. After the optimizer step, update EMA trainable weights.
 
 This preserves the main graph memory property: at no point do we retain all K student graphs until a final backward.
-For LoRA this keeps the EMA small. For full-parameter fine-tuning, the EMA is a full DiT-sized teacher state
-and should be kept on CPU.
+For LoRA this keeps the EMA small. For full-parameter fine-tuning, the EMA is a full DiT-sized teacher state.
+It uses `auto` storage by default: GPU when reported free CUDA memory appears sufficient, otherwise CPU.
 
 ## CLI
 
@@ -83,10 +84,12 @@ python src/musubi_tuner/zimage_train.py \
   --dopsd_ema_decay 0.9999
 ```
 
-Full-parameter D-OPSD stores the EMA teacher weights on CPU by default. It rejects
+Full-parameter D-OPSD stores the EMA teacher weights with `auto` placement by default. It rejects
 `--fused_backward_pass` because the fused optimizer path updates parameters during
 backward, while D-OPSD intentionally calls backward once per rollout step before a
-single optimizer step.
+single optimizer step. Use `--dopsd_full_ema_device gpu` to force roughly one
+extra trainable DiT copy of VRAM for faster teacher swaps, or
+`--dopsd_full_ema_device cpu` to force the lower-VRAM slower path.
 
 Teacher cache:
 

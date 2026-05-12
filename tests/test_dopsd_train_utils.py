@@ -20,9 +20,13 @@ from musubi_tuner.dopsd_cache_utils import (
 )
 from musubi_tuner.dopsd_train_utils import (
     AdapterEma,
+    DOPSD_FLUX2_IDENTITY_EDIT_PROMPT,
+    DOPSD_FLUX2_TEACHER_EMBED_KEY,
+    add_dopsd_full_finetune_arguments,
     add_dopsd_arguments,
     dopsd_flow_x0_loss,
     dopsd_x0_loss,
+    resolve_full_ema_devices,
     run_dopsd_stepwise_backward,
     validate_dopsd_args,
 )
@@ -51,6 +55,14 @@ class DopsdTrainUtilsTest(unittest.TestCase):
         self.assertFalse(args.dopsd)
         self.assertEqual(args.dopsd_num_sampling_steps, 8)
         self.assertEqual(args.dopsd_ema_decay, 0.9999)
+
+    def test_add_dopsd_full_finetune_arguments_is_idempotent(self):
+        parser = argparse.ArgumentParser()
+        add_dopsd_full_finetune_arguments(parser)
+        add_dopsd_full_finetune_arguments(parser)
+        args = parser.parse_args([])
+
+        self.assertEqual(args.dopsd_full_ema_device, "auto")
 
     def test_qwen3_vl_processor_ids_are_fixed_by_architecture(self):
         self.assertEqual(qwen3_vl_processor_id_for_variant("4B"), "Qwen/Qwen3-VL-4B-Instruct")
@@ -184,6 +196,57 @@ class DopsdTrainUtilsTest(unittest.TestCase):
         ema.update(model, decay=0.5)
         self.assertEqual(ema.shadow["weight"].device.type, "cpu")
         self.assertEqual(ema.shadow["weight"].item(), 2.5)
+
+    def test_adapter_ema_refreshes_parameter_cache_on_update(self):
+        class DynamicModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = torch.nn.Parameter(torch.tensor([2.0]))
+
+        model = DynamicModel()
+        ema = AdapterEma(model)
+        model.extra = torch.nn.Parameter(torch.tensor([4.0]))
+
+        ema.update(model, decay=0.5)
+
+        self.assertIn("extra", ema.shadow)
+        self.assertEqual(ema.shadow["extra"].item(), 4.0)
+
+    def test_resolve_full_ema_devices_has_explicit_tiers(self):
+        model = torch.nn.Linear(1, 1, bias=False)
+
+        shadow_device, backup_device, label = resolve_full_ema_devices(
+            argparse.Namespace(dopsd_full_ema_device="cpu"), model, torch.device("cpu")
+        )
+        self.assertEqual(shadow_device, torch.device("cpu"))
+        self.assertEqual(backup_device, torch.device("cpu"))
+        self.assertEqual(label, "cpu")
+
+        shadow_device, backup_device, label = resolve_full_ema_devices(
+            argparse.Namespace(dopsd_full_ema_device="gpu"), model, torch.device("cuda")
+        )
+        self.assertIsNone(shadow_device)
+        self.assertIsNone(backup_device)
+        self.assertEqual(label, "gpu")
+
+        with self.assertRaisesRegex(ValueError, "requires a CUDA"):
+            resolve_full_ema_devices(argparse.Namespace(dopsd_full_ema_device="gpu"), model, torch.device("cpu"))
+
+        with patch("musubi_tuner.dopsd_train_utils._has_cuda_memory_for_gpu_ema", return_value=True):
+            shadow_device, backup_device, label = resolve_full_ema_devices(
+                argparse.Namespace(dopsd_full_ema_device="auto"), model, torch.device("cuda")
+            )
+        self.assertIsNone(shadow_device)
+        self.assertIsNone(backup_device)
+        self.assertEqual(label, "gpu-auto")
+
+        with patch("musubi_tuner.dopsd_train_utils._has_cuda_memory_for_gpu_ema", return_value=False):
+            shadow_device, backup_device, label = resolve_full_ema_devices(
+                argparse.Namespace(dopsd_full_ema_device="auto"), model, torch.device("cuda")
+            )
+        self.assertEqual(shadow_device, torch.device("cpu"))
+        self.assertEqual(backup_device, torch.device("cpu"))
+        self.assertEqual(label, "cpu-auto")
 
     def test_run_dopsd_stepwise_backward_serializes_each_timestep(self):
         args = argparse.Namespace(dopsd_loss_weight=1.0)
@@ -390,6 +453,100 @@ class DopsdTrainUtilsTest(unittest.TestCase):
             flux_tensors = load_file(flux_item.text_encoder_output_cache_path)
             self.assertIn("ctx_vec_bfloat16", flux_tensors)
             self.assertIn("dopsd_teacher_ctx_vec_bfloat16", flux_tensors)
+
+    def test_flux2_dopsd_teacher_cache_uses_identity_edit_qwen_context(self):
+        try:
+            import numpy as np
+        except Exception:
+            np = None
+        if np is not None and int(np.__version__.split(".", 1)[0]) >= 2:
+            self.skipTest("local cv2 build is not compatible with NumPy 2.x")
+
+        try:
+            from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_FLUX_2_KLEIN_4B_FULL, ItemInfo
+            from musubi_tuner.flux_2_cache_text_encoder_outputs import encode_and_save_dopsd_teacher_batch
+        except ImportError as exc:
+            self.skipTest(f"FLUX.2 dependencies are not importable in this environment: {exc}")
+
+        class FakeTextEmbedder(torch.nn.Module):
+            @property
+            def dtype(self):
+                return torch.bfloat16
+
+            def forward(self, prompts):
+                self.prompts = prompts
+                return torch.ones(len(prompts), 2, 4, dtype=torch.bfloat16)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            items = []
+            for index in range(2):
+                item = ItemInfo(f"flux_item_{index}", "caption", (0, 0))
+                item.text_encoder_output_cache_path = str(Path(temp_dir) / f"flux_item_{index}_te.safetensors")
+                items.append(item)
+
+            embedder = FakeTextEmbedder()
+            encode_and_save_dopsd_teacher_batch(
+                embedder,
+                items,
+                torch.device("cpu"),
+                expected_dim=4,
+                teacher_embed_key=DOPSD_FLUX2_TEACHER_EMBED_KEY,
+                arch_full=ARCHITECTURE_FLUX_2_KLEIN_4B_FULL,
+            )
+
+            self.assertEqual(embedder.prompts, [DOPSD_FLUX2_IDENTITY_EDIT_PROMPT, DOPSD_FLUX2_IDENTITY_EDIT_PROMPT])
+            for item in items:
+                tensors = load_file(item.text_encoder_output_cache_path)
+                self.assertIn("dopsd_teacher_ctx_vec_bfloat16", tensors)
+                self.assertEqual(tuple(tensors["dopsd_teacher_ctx_vec_bfloat16"].shape), (2, 4))
+
+    def test_flux2_dopsd_teacher_batch_injects_target_latents_as_reference(self):
+        try:
+            import numpy as np
+        except Exception:
+            np = None
+        if np is not None and int(np.__version__.split(".", 1)[0]) >= 2:
+            self.skipTest("local cv2 build is not compatible with NumPy 2.x")
+
+        try:
+            from musubi_tuner.flux_2_train_network import Flux2NetworkTrainer
+        except ImportError as exc:
+            self.skipTest(f"FLUX.2 dependencies are not importable in this environment: {exc}")
+
+        trainer = Flux2NetworkTrainer()
+        trainer.model_version_info = types.SimpleNamespace(params=types.SimpleNamespace(context_in_dim=4))
+        batch = {
+            "ctx_vec": torch.zeros(2, 3, 4),
+            DOPSD_FLUX2_TEACHER_EMBED_KEY: torch.ones(2, 3, 4),
+        }
+        latents = torch.randn(2, 128, 4, 4)
+
+        teacher_batch = trainer.make_dopsd_teacher_batch(argparse.Namespace(), batch, latents)
+
+        self.assertIs(teacher_batch["ctx_vec"], batch[DOPSD_FLUX2_TEACHER_EMBED_KEY])
+        self.assertTrue(torch.equal(teacher_batch["latents_control_0"], latents))
+        self.assertFalse(teacher_batch["latents_control_0"].requires_grad)
+        self.assertNotIn("latents_control_0", batch)
+
+    def test_flux2_dopsd_teacher_batch_requires_target_latents(self):
+        try:
+            import numpy as np
+        except Exception:
+            np = None
+        if np is not None and int(np.__version__.split(".", 1)[0]) >= 2:
+            self.skipTest("local cv2 build is not compatible with NumPy 2.x")
+
+        try:
+            from musubi_tuner.flux_2_train_network import Flux2NetworkTrainer
+        except ImportError as exc:
+            self.skipTest(f"FLUX.2 dependencies are not importable in this environment: {exc}")
+
+        trainer = Flux2NetworkTrainer()
+        trainer.model_version_info = types.SimpleNamespace(params=types.SimpleNamespace(context_in_dim=4))
+        batch = {DOPSD_FLUX2_TEACHER_EMBED_KEY: torch.ones(2, 3, 4)}
+
+        with self.assertRaisesRegex(ValueError, "requires current target latents"):
+            trainer.make_dopsd_teacher_batch(argparse.Namespace(), batch)
 
 
 if __name__ == "__main__":

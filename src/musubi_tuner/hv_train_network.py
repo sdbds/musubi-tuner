@@ -1296,8 +1296,14 @@ class NetworkTrainer:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError(f"{self.__class__.__name__} does not implement D-OPSD schedule")
 
-    def make_dopsd_teacher_batch(self, args: argparse.Namespace, batch: dict) -> dict:
+    def make_dopsd_teacher_batch(
+        self, args: argparse.Namespace, batch: dict, latents: Optional[torch.Tensor] = None
+    ) -> dict:
+        del latents
         raise NotImplementedError(f"{self.__class__.__name__} does not implement D-OPSD teacher batch")
+
+    def dopsd_log_suffix(self, args: argparse.Namespace) -> str:
+        return ""
 
     def predict_velocity_for_dopsd(
         self,
@@ -1999,6 +2005,7 @@ class NetworkTrainer:
             accelerator.print(
                 f"enable D-OPSD: steps={args.dopsd_num_sampling_steps}, "
                 f"loss_weight={args.dopsd_loss_weight}, ema_decay={args.dopsd_ema_decay}"
+                f"{self.dopsd_log_suffix(args)}"
             )
 
         if args.full_fp16:
@@ -2284,7 +2291,9 @@ class NetworkTrainer:
                             timesteps=dopsd_timesteps,
                             sigmas=dopsd_sigmas,
                             predict_fn=dopsd_predict_fn,
-                            make_teacher_batch_fn=lambda dopsd_batch: self.make_dopsd_teacher_batch(args, dopsd_batch),
+                            make_teacher_batch_fn=lambda dopsd_batch: self.make_dopsd_teacher_batch(
+                                args, dopsd_batch, latents
+                            ),
                             rollout_step_fn=self.dopsd_rollout_step,
                             loss_fn=self.dopsd_loss,
                         )

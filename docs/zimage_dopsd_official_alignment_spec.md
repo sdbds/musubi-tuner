@@ -32,9 +32,9 @@ official commit checked: 4a4cd7c1e2683db0e21addcf3599914ee269889b
 
 The first implementation target is Z-Image Turbo adapter training. Full
 fine-tuning should keep using the same shared D-OPSD primitives when the change
-is mathematically identical. FLUX.2 Klein support must not be silently changed
-to an unverified official behavior because the official repository has not
-published its FLUX.2 training code yet.
+is mathematically identical. FLUX.2 Klein uses the same `x0` objective with its
+own flow sign convention, but still keeps its own schedule because the official
+repository has not published FLUX.2 training code.
 
 ## Non-Goals
 
@@ -170,9 +170,16 @@ x0_student = state + sigma * student_pred
 loss = mse(x0_student.float(), x0_teacher.float().detach())
 ```
 
-This is equivalent to velocity loss weighted by `sigma ** 2`, but the code
-should compute `x0` explicitly so the training objective is obvious and matches
-the official implementation.
+This is exactly equivalent to velocity loss weighted by `sigma ** 2`:
+
+```text
+loss = sigma ** 2 * mse(student_velocity, stopgrad(teacher_velocity))
+```
+
+because the shared `state` term cancels and the sign disappears under MSE. The
+implementation may use this weighted-velocity form to avoid materializing two
+extra DiT-sized `x0` tensors, as long as validation proves it matches the
+explicit `x0` formula.
 
 ## Backward Strategy
 
@@ -203,6 +210,18 @@ those weights into the network for teacher forward. This is acceptable if:
 - EMA updates only after the optimizer step.
 
 This avoids adding a second adapter system just to mirror PEFT structure.
+Adapter EMA should cache trainable parameter references after initialization and
+refresh that cache only if the trainable parameter set changes; the parameter
+set is stable during normal training, so rebuilding a name-to-parameter map on
+every teacher step is avoidable overhead.
+
+For full-parameter fine-tuning, EMA storage has three tiers:
+
+```text
+auto: default; use GPU only when reported free CUDA memory is sufficient, otherwise CPU
+cpu:  lowest VRAM, slower teacher swap
+gpu:  full EMA copy on the training device, faster but costs roughly one extra trainable DiT copy
+```
 
 ## Implementation Plan
 
@@ -214,9 +233,9 @@ This avoids adding a second adapter system just to mirror PEFT structure.
 2. Add a model-specific D-OPSD loss hook.
    - Shared runner default may remain velocity loss for unsupported/experimental
      models.
-   - Z-Image must override it with official `x0` loss.
-   - This prevents accidental FLUX.2 behavior changes before official FLUX.2
-     code exists.
+   - Z-Image must override it with official `x0` loss, implemented either
+     explicitly or as the equivalent `sigma ** 2` weighted velocity loss.
+   - FLUX.2 Klein may use the same objective with its own flow sign convention.
 
 3. Update `run_dopsd_stepwise_backward`.
    - Compute teacher and student predictions as now.
@@ -272,6 +291,8 @@ Minimum validation before implementation is considered complete:
 ```text
 loss == mse(state + sigma * student_pred,
             state + sigma * teacher_pred.detach())
+loss == sigma ** 2 * mse(student_pred,
+                         teacher_pred.detach())
 ```
 
 - Cache check that newly saved Z-Image teacher embeddings are variable-length
@@ -300,5 +321,7 @@ cache key == varlen_dopsd_teacher_llm_embed_<dtype>
 - Switch the whole local implementation to PEFT dual adapters.
   That adds a second adapter framework without fixing the actual mismatch.
 
-- Apply the Z-Image official `x0` loss to FLUX.2 immediately.
-  That is guesswork until the official FLUX.2 code is available.
+- Reuse the Z-Image official schedule for FLUX.2.
+  The `x0` objective is algebraic and model-agnostic, but the schedule is
+  model-specific. FLUX.2 must keep deriving its schedule from the packed image
+  sequence length and flow shift.

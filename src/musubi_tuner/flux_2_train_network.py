@@ -358,6 +358,11 @@ class Flux2NetworkTrainer(NetworkTrainer):
     def supports_dopsd(self, args: argparse.Namespace) -> bool:
         return args.model_version in {"klein-4b", "klein-9b"}
 
+    def dopsd_log_suffix(self, args: argparse.Namespace) -> str:
+        if not self.supports_dopsd(args):
+            return ""
+        return ", teacher=edit_reference, teacher_reference=target_latents"
+
     def get_dopsd_schedule(
         self,
         args: argparse.Namespace,
@@ -379,14 +384,18 @@ class Flux2NetworkTrainer(NetworkTrainer):
         timesteps = sigmas[:-1] * 1000.0
         return timesteps, sigmas
 
-    def make_dopsd_teacher_batch(self, args: argparse.Namespace, batch: dict) -> dict:
+    def make_dopsd_teacher_batch(
+        self, args: argparse.Namespace, batch: dict, latents: Optional[torch.Tensor] = None
+    ) -> dict:
         if any(key.startswith("latents_control_") for key in batch):
             raise ValueError("FLUX.2 D-OPSD does not support control-image batches in this phase")
+        if latents is None:
+            raise ValueError("FLUX.2 D-OPSD edit teacher requires current target latents")
 
         teacher_embed_key = DOPSD_FLUX2_TEACHER_EMBED_KEY
         if teacher_embed_key not in batch:
             raise ValueError(
-                f"D-OPSD requires cached FLUX.2 teacher embeddings in batch key '{teacher_embed_key}'. "
+                f"D-OPSD requires cached FLUX.2 identity-edit teacher embeddings in batch key '{teacher_embed_key}'. "
                 "Re-run flux_2_cache_text_encoder_outputs.py with --dopsd_cache_teacher_outputs."
             )
         expected_dim = self.model_version_info.params.context_in_dim
@@ -398,6 +407,7 @@ class Flux2NetworkTrainer(NetworkTrainer):
 
         teacher_batch = dict(batch)
         teacher_batch["ctx_vec"] = teacher_batch[teacher_embed_key]
+        teacher_batch["latents_control_0"] = latents.detach()
         return teacher_batch
 
     def predict_velocity_for_dopsd(
