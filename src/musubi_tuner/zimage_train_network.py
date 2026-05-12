@@ -15,7 +15,7 @@ from musubi_tuner.hv_train_network import (
     setup_parser_common,
     read_config_from_file,
 )
-from musubi_tuner.dopsd_train_utils import DOPSD_ZIMAGE_TEACHER_EMBED_KEY
+from musubi_tuner.dopsd_train_utils import DOPSD_ZIMAGE_TEACHER_EMBED_KEY, dopsd_x0_loss
 from musubi_tuner.utils import model_utils
 
 import logging
@@ -413,6 +413,16 @@ class ZImageNetworkTrainer(NetworkTrainer):
     ) -> torch.Tensor:
         # Z-Image transformer predicts the opposite sign from the inference velocity.
         return zimage_utils.step(-model_pred.to(torch.float32), latents, sigmas, step_index)
+
+    def dopsd_loss(
+        self,
+        state: torch.Tensor,
+        student_pred: torch.Tensor,
+        teacher_pred: torch.Tensor,
+        sigmas: torch.Tensor,
+        step_index: int,
+    ) -> torch.Tensor:
+        return dopsd_x0_loss(state, student_pred, teacher_pred, sigmas, step_index)
 
 
 def zimage_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:

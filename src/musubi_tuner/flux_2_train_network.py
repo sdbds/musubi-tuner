@@ -15,7 +15,7 @@ from musubi_tuner.hv_train_network import (
     setup_parser_common,
     read_config_from_file,
 )
-from musubi_tuner.dopsd_train_utils import DOPSD_FLUX2_TEACHER_EMBED_KEY
+from musubi_tuner.dopsd_train_utils import DOPSD_FLUX2_TEACHER_EMBED_KEY, dopsd_flow_x0_loss
 
 import logging
 
@@ -429,6 +429,16 @@ class Flux2NetworkTrainer(NetworkTrainer):
     ) -> torch.Tensor:
         delta = (sigmas[step_index + 1] - sigmas[step_index]).to(device=latents.device, dtype=latents.dtype)
         return latents + delta * model_pred.to(dtype=latents.dtype)
+
+    def dopsd_loss(
+        self,
+        state: torch.Tensor,
+        student_pred: torch.Tensor,
+        teacher_pred: torch.Tensor,
+        sigmas: torch.Tensor,
+        step_index: int,
+    ) -> torch.Tensor:
+        return dopsd_flow_x0_loss(state, student_pred, teacher_pred, sigmas, step_index)
 
     # endregion model specific
 

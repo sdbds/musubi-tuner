@@ -13,6 +13,8 @@ QWEN3_VL_PROCESSOR_IDS = {
     "8B": "Qwen/Qwen3-VL-8B-Instruct",
 }
 MIN_QWEN3_VL_TRANSFORMERS_VERSION = "4.57.6"
+DOPSD_QWEN3_VL_MIN_PIXELS = 512 * 512
+DOPSD_QWEN3_VL_MAX_PIXELS = 768 * 768
 
 
 def content_to_pil_image(content) -> Image.Image:
@@ -24,6 +26,17 @@ def content_to_pil_image(content) -> Image.Image:
         raise ValueError("D-OPSD teacher cache requires dataset content. Use image datasets with cached latents.")
     image = Image.fromarray(content[..., :3]) if not isinstance(content, Image.Image) else content
     return image.convert("RGB")
+
+
+def extract_masked_hidden_state(
+    hidden_state: torch.Tensor,
+    attention_mask: torch.Tensor,
+    max_sequence_length: int | None = None,
+) -> torch.Tensor:
+    embed = hidden_state[attention_mask.to(dtype=torch.bool)]
+    if max_sequence_length is not None:
+        embed = embed[:max_sequence_length]
+    return embed.detach().cpu()
 
 
 def _resolve_module(root: torch.nn.Module, paths: tuple[str, ...]) -> tuple[str, torch.nn.Module]:
@@ -53,8 +66,18 @@ def load_qwen3_vl_processor(qwen_variant: str):
 
     require_qwen3_vl_transformers(transformers)
     processor_id = qwen3_vl_processor_id_for_variant(qwen_variant)
-    logger.info(f"Loading official Qwen3-VL processor from {processor_id}")
-    return transformers.AutoProcessor.from_pretrained(processor_id, trust_remote_code=True)
+    logger.info(
+        "Loading official Qwen3-VL processor from %s with min_pixels=%d, max_pixels=%d",
+        processor_id,
+        DOPSD_QWEN3_VL_MIN_PIXELS,
+        DOPSD_QWEN3_VL_MAX_PIXELS,
+    )
+    return transformers.AutoProcessor.from_pretrained(
+        processor_id,
+        trust_remote_code=True,
+        min_pixels=DOPSD_QWEN3_VL_MIN_PIXELS,
+        max_pixels=DOPSD_QWEN3_VL_MAX_PIXELS,
+    )
 
 
 def require_qwen3_vl_transformers(transformers_module) -> None:

@@ -17,6 +17,7 @@ from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitize
 from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_Z_IMAGE, ItemInfo, save_text_encoder_output_cache_z_image
 from musubi_tuner.dopsd_cache_utils import (
     content_to_pil_image,
+    extract_masked_hidden_state,
     load_auto_vlm,
     load_qwen3_vl_processor,
     qwen3_vl_processor_id_for_variant,
@@ -33,6 +34,7 @@ logging.basicConfig(level=logging.INFO)
 
 DOPSD_ZIMAGE_TEACHER_HIDDEN_STATE_INDEX = -2
 DOPSD_ZIMAGE_TEACHER_QWEN_VARIANT = "4B"
+DOPSD_ZIMAGE_TEACHER_MAX_SEQUENCE_LENGTH = 1024
 
 
 def encode_and_save_batch(tokenizer, text_encoder, batch: list[ItemInfo], device: torch.device):
@@ -95,11 +97,12 @@ def encode_and_save_dopsd_teacher_batch(
     hidden_state_index: int,
     expected_dim: int,
     teacher_embed_key: str,
+    max_sequence_length: int,
 ):
     images = [content_to_pil_image(item.content) for item in batch]
     texts = [_apply_chat_template(processor, image, item.caption) for image, item in zip(images, batch)]
 
-    inputs = processor(text=texts, images=images, padding=True, return_tensors="pt")
+    inputs = processor(text=texts, images=images, padding=True, truncation=True, return_tensors="pt")
     validate_multimodal_inputs(inputs)
     inputs = inputs.to(device)
 
@@ -110,7 +113,7 @@ def encode_and_save_dopsd_teacher_batch(
     attention_mask = inputs.attention_mask.to(dtype=torch.bool)
 
     for item, hidden, mask in zip(batch, hidden_states, attention_mask):
-        embed = hidden[mask].detach().cpu()
+        embed = extract_masked_hidden_state(hidden, mask, max_sequence_length)
         if embed.shape[-1] != expected_dim:
             raise ValueError(
                 f"D-OPSD teacher embedding dim {embed.shape[-1]} does not match Z-Image cap_feat_dim {expected_dim}. "
@@ -208,6 +211,7 @@ def main():
                 DOPSD_ZIMAGE_TEACHER_HIDDEN_STATE_INDEX,
                 zimage_config.DEFAULT_TRANSFORMER_CAP_FEAT_DIM,
                 DOPSD_TEACHER_EMBED_KEY,
+                DOPSD_ZIMAGE_TEACHER_MAX_SEQUENCE_LENGTH,
             )
 
         cache_text_encoder_outputs.process_text_encoder_batches(

@@ -102,10 +102,15 @@ class AdapterEma:
 
     @contextmanager
     def use_ema_weights(self, module: torch.nn.Module) -> Iterator[None]:
+        named_params = dict(get_named_trainable_parameters(module))
+        if self._can_swap_without_copy(named_params):
+            with self._swap_ema_weights(module, named_params):
+                yield
+            return
+
         backups: dict[str, torch.Tensor] = {}
         was_training = module.training
         with torch.no_grad():
-            named_params = dict(get_named_trainable_parameters(module))
             for name, shadow in self.shadow.items():
                 param = named_params.get(name)
                 if param is None:
@@ -123,10 +128,88 @@ class AdapterEma:
                     param.copy_(backup.to(device=param.device, dtype=param.dtype))
                 module.train(was_training)
 
+    def _can_swap_without_copy(self, named_params: dict[str, torch.nn.Parameter]) -> bool:
+        if self.backup_device is not None:
+            return False
+
+        for name, shadow in self.shadow.items():
+            param = named_params.get(name)
+            if param is None:
+                continue
+            if shadow.device != param.device or shadow.dtype != param.dtype or shadow.shape != param.shape:
+                return False
+        return True
+
+    @contextmanager
+    def _swap_ema_weights(self, module: torch.nn.Module, named_params: dict[str, torch.nn.Parameter]) -> Iterator[None]:
+        swapped_names: list[str] = []
+        was_training = module.training
+        with torch.no_grad():
+            for name, shadow in self.shadow.items():
+                param = named_params.get(name)
+                if param is None:
+                    continue
+                student_data = param.data
+                param.data = shadow
+                self.shadow[name] = student_data
+                swapped_names.append(name)
+            module.eval()
+        try:
+            yield
+        finally:
+            with torch.no_grad():
+                named_params = dict(get_named_trainable_parameters(module))
+                for name in swapped_names:
+                    param = named_params[name]
+                    ema_data = param.data
+                    param.data = self.shadow[name]
+                    self.shadow[name] = ema_data
+                module.train(was_training)
+
 
 DopsdPredictFn = Callable[[dict[str, torch.Tensor], torch.Tensor, torch.Tensor], torch.Tensor]
 DopsdTeacherBatchFn = Callable[[dict[str, torch.Tensor]], dict[str, torch.Tensor]]
 DopsdRolloutStepFn = Callable[[torch.Tensor, torch.Tensor, torch.Tensor, int], torch.Tensor]
+DopsdLossFn = Callable[[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int], torch.Tensor]
+
+
+def dopsd_velocity_loss(
+    state: torch.Tensor,
+    student_pred: torch.Tensor,
+    teacher_pred: torch.Tensor,
+    sigmas: torch.Tensor,
+    step_index: int,
+) -> torch.Tensor:
+    del state, sigmas, step_index
+    return F.mse_loss(student_pred.float(), teacher_pred.float().detach(), reduction="mean")
+
+
+def dopsd_x0_loss(
+    state: torch.Tensor,
+    student_pred: torch.Tensor,
+    teacher_pred: torch.Tensor,
+    sigmas: torch.Tensor,
+    step_index: int,
+) -> torch.Tensor:
+    sigma = sigmas[step_index].to(device=state.device, dtype=torch.float32)
+    state = state.float()
+    x0_student = state + sigma * student_pred.float()
+    x0_teacher = state + sigma * teacher_pred.float()
+    return F.mse_loss(x0_student, x0_teacher.detach(), reduction="mean")
+
+
+def dopsd_flow_x0_loss(
+    state: torch.Tensor,
+    student_pred: torch.Tensor,
+    teacher_pred: torch.Tensor,
+    sigmas: torch.Tensor,
+    step_index: int,
+) -> torch.Tensor:
+    sigma = sigmas[step_index].to(device=state.device, dtype=torch.float32)
+    state = state.float()
+    x0_student = state - sigma * student_pred.float()
+    x0_teacher = state - sigma * teacher_pred.float()
+    return F.mse_loss(x0_student, x0_teacher.detach(), reduction="mean")
 
 
 def run_dopsd_stepwise_backward(
@@ -142,8 +225,11 @@ def run_dopsd_stepwise_backward(
     predict_fn: DopsdPredictFn,
     make_teacher_batch_fn: DopsdTeacherBatchFn,
     rollout_step_fn: DopsdRolloutStepFn,
+    loss_fn: DopsdLossFn | None = None,
 ) -> tuple[torch.Tensor, int]:
     teacher_batch = make_teacher_batch_fn(batch)
+    if loss_fn is None:
+        loss_fn = dopsd_velocity_loss
     device = accelerator.device
     state_dtype = latents.dtype if latents.is_floating_point() else torch.float32
     state = torch.randn(latents.shape, device=device, dtype=state_dtype)
@@ -156,11 +242,12 @@ def run_dopsd_stepwise_backward(
         step_timesteps = timesteps[step_index].expand(batch_size).to(device=device, dtype=torch.float32)
 
         with ema.use_ema_weights(unwrapped_network):
-            with torch.no_grad():
-                teacher_pred = predict_fn(teacher_batch, state, step_timesteps).detach()
+            with torch.inference_mode():
+                teacher_pred = predict_fn(teacher_batch, state, step_timesteps)
+        teacher_pred = teacher_pred.clone().detach()
 
         student_pred = predict_fn(batch, state, step_timesteps)
-        step_loss = F.mse_loss(student_pred.float(), teacher_pred.float(), reduction="mean")
+        step_loss = loss_fn(state, student_pred, teacher_pred, sigmas, step_index)
         scaled_loss = step_loss * (float(args.dopsd_loss_weight) / float(step_count))
         accelerator.backward(scaled_loss)
 

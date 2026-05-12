@@ -48,6 +48,7 @@ from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_HUNYUAN_VIDEO,
 from musubi_tuner.dopsd_train_utils import (
     AdapterEma,
     add_dopsd_arguments,
+    dopsd_velocity_loss,
     is_dopsd_enabled,
     run_dopsd_stepwise_backward,
     update_dopsd_metadata,
@@ -1319,6 +1320,16 @@ class NetworkTrainer:
     ) -> torch.Tensor:
         raise NotImplementedError(f"{self.__class__.__name__} does not implement D-OPSD rollout")
 
+    def dopsd_loss(
+        self,
+        state: torch.Tensor,
+        student_pred: torch.Tensor,
+        teacher_pred: torch.Tensor,
+        sigmas: torch.Tensor,
+        step_index: int,
+    ) -> torch.Tensor:
+        return dopsd_velocity_loss(state, student_pred, teacher_pred, sigmas, step_index)
+
     @property
     def architecture(self) -> str:
         return ARCHITECTURE_HUNYUAN_VIDEO
@@ -2275,6 +2286,7 @@ class NetworkTrainer:
                             predict_fn=dopsd_predict_fn,
                             make_teacher_batch_fn=lambda dopsd_batch: self.make_dopsd_teacher_batch(args, dopsd_batch),
                             rollout_step_fn=self.dopsd_rollout_step,
+                            loss_fn=self.dopsd_loss,
                         )
                     else:
                         # Sample noise that we'll add to the latents

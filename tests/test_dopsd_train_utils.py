@@ -1,12 +1,19 @@
 import argparse
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import torch
 from safetensors.torch import load_file
 
 from musubi_tuner.dopsd_cache_utils import (
+    DOPSD_QWEN3_VL_MAX_PIXELS,
+    DOPSD_QWEN3_VL_MIN_PIXELS,
+    extract_masked_hidden_state,
+    load_qwen3_vl_processor,
     normalize_qwen_vl_single_file_state_dict,
     prepare_qwen_vl_state_dict_for_load,
     qwen3_vl_processor_id_for_variant,
@@ -14,6 +21,8 @@ from musubi_tuner.dopsd_cache_utils import (
 from musubi_tuner.dopsd_train_utils import (
     AdapterEma,
     add_dopsd_arguments,
+    dopsd_flow_x0_loss,
+    dopsd_x0_loss,
     run_dopsd_stepwise_backward,
     validate_dopsd_args,
 )
@@ -48,6 +57,35 @@ class DopsdTrainUtilsTest(unittest.TestCase):
         self.assertEqual(qwen3_vl_processor_id_for_variant("8b"), "Qwen/Qwen3-VL-8B-Instruct")
         with self.assertRaises(ValueError):
             qwen3_vl_processor_id_for_variant("14B")
+
+    def test_qwen3_vl_processor_uses_official_pixel_bounds(self):
+        calls = {}
+
+        class FakeAutoProcessor:
+            @staticmethod
+            def from_pretrained(*args, **kwargs):
+                calls["args"] = args
+                calls["kwargs"] = kwargs
+                return "processor"
+
+        fake_transformers = types.SimpleNamespace(__version__="4.57.6", AutoProcessor=FakeAutoProcessor)
+        with patch.dict(sys.modules, {"transformers": fake_transformers}):
+            processor = load_qwen3_vl_processor("4B")
+
+        self.assertEqual(processor, "processor")
+        self.assertEqual(calls["args"], ("Qwen/Qwen3-VL-4B-Instruct",))
+        self.assertTrue(calls["kwargs"]["trust_remote_code"])
+        self.assertEqual(calls["kwargs"]["min_pixels"], DOPSD_QWEN3_VL_MIN_PIXELS)
+        self.assertEqual(calls["kwargs"]["max_pixels"], DOPSD_QWEN3_VL_MAX_PIXELS)
+
+    def test_masked_teacher_hidden_state_respects_sequence_cap(self):
+        hidden = torch.arange(30, dtype=torch.float32).reshape(10, 3)
+        mask = torch.tensor([True, True, False, True, True, True, True, True, True, True])
+
+        embed = extract_masked_hidden_state(hidden, mask, max_sequence_length=4)
+
+        self.assertEqual(embed.shape, (4, 3))
+        self.assertTrue(torch.equal(embed, hidden[mask][:4]))
 
     def test_qwen_vl_single_file_keys_normalize_to_transformers_format(self):
         state = {
@@ -114,6 +152,24 @@ class DopsdTrainUtilsTest(unittest.TestCase):
         ema.update(model, decay=0.5)
         self.assertEqual(ema.shadow["weight"].item(), 2.5)
 
+    def test_adapter_ema_uses_storage_swap_when_shadow_is_on_parameter_device(self):
+        model = torch.nn.Linear(1, 1, bias=False)
+        model.weight.data.fill_(2.0)
+        ema = AdapterEma(model)
+        ema_ptr = ema.shadow["weight"].data_ptr()
+        student_ptr = model.weight.data.data_ptr()
+        model.weight.data.fill_(3.0)
+
+        with ema.use_ema_weights(model):
+            self.assertEqual(model.weight.item(), 2.0)
+            self.assertEqual(model.weight.data_ptr(), ema_ptr)
+            self.assertEqual(ema.shadow["weight"].data_ptr(), student_ptr)
+            self.assertEqual(ema.shadow["weight"].item(), 3.0)
+
+        self.assertEqual(model.weight.item(), 3.0)
+        self.assertEqual(model.weight.data_ptr(), student_ptr)
+        self.assertEqual(ema.shadow["weight"].data_ptr(), ema_ptr)
+
     def test_adapter_ema_can_keep_shadow_and_backup_on_cpu(self):
         model = torch.nn.Linear(1, 1, bias=False)
         model.weight.data.fill_(2.0)
@@ -169,6 +225,28 @@ class DopsdTrainUtilsTest(unittest.TestCase):
         self.assertEqual(len(accelerator.backward_calls), 3)
         self.assertGreater(loss.item(), 0.0)
         self.assertIsNotNone(model.weight.grad)
+
+    def test_dopsd_x0_loss_matches_official_objective(self):
+        state = torch.tensor([[1.0, -2.0]])
+        student_pred = torch.tensor([[2.0, 0.5]])
+        teacher_pred = torch.tensor([[0.0, 4.0]])
+        sigmas = torch.tensor([0.25, 0.0])
+
+        loss = dopsd_x0_loss(state, student_pred, teacher_pred, sigmas, 0)
+        expected = torch.nn.functional.mse_loss(state + 0.25 * student_pred, state + 0.25 * teacher_pred)
+
+        self.assertTrue(torch.allclose(loss, expected))
+
+    def test_dopsd_flow_x0_loss_uses_flux_velocity_sign(self):
+        state = torch.tensor([[1.0, -2.0]])
+        student_pred = torch.tensor([[2.0, 0.5]])
+        teacher_pred = torch.tensor([[0.0, 4.0]])
+        sigmas = torch.tensor([0.25, 0.0])
+
+        loss = dopsd_flow_x0_loss(state, student_pred, teacher_pred, sigmas, 0)
+        expected = torch.nn.functional.mse_loss(state - 0.25 * student_pred, state - 0.25 * teacher_pred)
+
+        self.assertTrue(torch.allclose(loss, expected))
 
     def test_run_dopsd_stepwise_backward_uses_accelerator_device(self):
         args = argparse.Namespace(dopsd_loss_weight=1.0)

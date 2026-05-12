@@ -569,6 +569,7 @@ class ZImageTrainer(ZImageNetworkTrainer):
                             predict_fn=dopsd_predict_fn,
                             make_teacher_batch_fn=lambda dopsd_batch: self.make_dopsd_teacher_batch(args, dopsd_batch),
                             rollout_step_fn=self.dopsd_rollout_step,
+                            loss_fn=self.dopsd_loss,
                         )
                     else:
                         # Sample noise that we'll add to the latents
