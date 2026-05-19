@@ -401,6 +401,8 @@ class NetworkTrainer:
             logs["max_norm/average_key_norm"] = mean_norm
             logs["max_norm/max_key_norm"] = maximum_norm
 
+        logs.update(getattr(self, "_latest_aux_loss_logs", {}))
+
         lrs = lr_scheduler.get_last_lr()
         for i, lr in enumerate(lrs):
             if lr_descriptions is not None:
@@ -430,6 +432,21 @@ class NetworkTrainer:
                     logs[f"lr/d*eff_lr/{lr_desc}"] = optimizer.param_groups[i]["d"] * optimizer.param_groups[i]["effective_lr"]
 
         return logs
+
+    def apply_auxiliary_losses(
+        self,
+        args: argparse.Namespace,
+        accelerator: Accelerator,
+        loss: torch.Tensor,
+        model_pred: torch.Tensor,
+        target: torch.Tensor,
+        batch: dict[str, torch.Tensor],
+        latents: torch.Tensor,
+        timesteps: torch.Tensor,
+        network_dtype: torch.dtype,
+        global_step: int,
+    ) -> torch.Tensor:
+        return loss
 
     def get_optimizer(self, args, trainable_params: list[torch.nn.Parameter]) -> tuple[str, str, torch.optim.Optimizer]:
         # adamw, adamw8bit, adafactor
@@ -1302,6 +1319,15 @@ class NetworkTrainer:
     def control_training(self) -> bool:
         return self._control_training
 
+    def prepare_network_kwargs(
+        self,
+        args: argparse.Namespace,
+        train_dataset_group: Any,
+        network_module: Any,
+        net_kwargs: dict[str, Any],
+    ) -> dict[str, Any]:
+        return net_kwargs
+
     def convert_weight_keys(self, weights_sd: dict[str, torch.Tensor], network_module: lora_module):
         keys = list(weights_sd.keys())
         if keys[0].startswith("lora_"):
@@ -1806,6 +1832,7 @@ class NetworkTrainer:
             for net_arg in args.network_args:
                 key, value = net_arg.split("=")
                 net_kwargs[key] = value
+        net_kwargs = self.prepare_network_kwargs(args, train_dataset_group, network_module, net_kwargs)
 
         if args.dim_from_weights:
             logger.info(f"Loading network from weights: {args.dim_from_weights}")
@@ -2213,6 +2240,9 @@ class NetworkTrainer:
                     # loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
 
                     loss = loss.mean()  # mean loss over all elements in batch
+                    loss = self.apply_auxiliary_losses(
+                        args, accelerator, loss, model_pred, target, batch, latents, timesteps, network_dtype, global_step
+                    )
 
                     accelerator.backward(loss)
                     if accelerator.sync_gradients:
@@ -2648,6 +2678,7 @@ def setup_parser_common() -> argparse.ArgumentParser:
     )
 
     parser.add_argument("--fp8_base", action="store_true", help="use fp8 for base model / base modelにfp8を使う")
+    parser.set_defaults(fp8_scaled=False)
     # parser.add_argument("--full_fp16", action="store_true", help="fp16 training including gradients / 勾配も含めてfp16で学習する")
     # parser.add_argument("--full_bf16", action="store_true", help="bf16 training including gradients / 勾配も含めてbf16で学習する")
 
