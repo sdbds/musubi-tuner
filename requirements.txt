@@ -31,7 +31,7 @@ wandb
 prompt-toolkit==3.0.51
 
 # optimizer
-pytorch-optimizer
+pytorch-optimizer>=3.10.1
 prodigy-plus-schedule-free
 prodigyopt
 dadaptation
