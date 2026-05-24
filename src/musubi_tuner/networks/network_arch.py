@@ -30,6 +30,11 @@ def detect_arch_config(unet):
 
         return ZIMAGE_TARGET_REPLACE_MODULES, [r".*(_modulation|_refiner).*"]
 
+    if "Lance" in module_class_names:
+        from .lora_lance import LANCE_DEFAULT_EXCLUDE_PATTERNS, LANCE_TARGET_REPLACE_MODULES
+
+        return LANCE_TARGET_REPLACE_MODULES, LANCE_DEFAULT_EXCLUDE_PATTERNS
+
     if "HunyuanVideoTransformerBlock" in module_class_names:
         from .lora_framepack import FRAMEPACK_TARGET_REPLACE_MODULES
 

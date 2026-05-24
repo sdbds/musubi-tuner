@@ -93,6 +93,8 @@ ARCHITECTURE_HUNYUAN_VIDEO_1_5 = "hv15"
 ARCHITECTURE_HUNYUAN_VIDEO_1_5_FULL = "hunyuan_video_1_5"
 ARCHITECTURE_Z_IMAGE = "zi"
 ARCHITECTURE_Z_IMAGE_FULL = "z_image"
+ARCHITECTURE_LANCE = "la"
+ARCHITECTURE_LANCE_FULL = "lance"
 
 
 def glob_images(directory, base="*", caption_extension=None):
@@ -431,19 +433,59 @@ def save_latent_cache_z_image(item_info: ItemInfo, latent: torch.Tensor):
     save_latent_cache_common(item_info, sd, ARCHITECTURE_Z_IMAGE_FULL)
 
 
-def save_latent_cache_common(item_info: ItemInfo, sd: dict[str, torch.Tensor], arch_fullname: str):
+def save_latent_cache_lance(
+    item_info: ItemInfo,
+    latent: torch.Tensor,
+    control_latents: Optional[list[torch.Tensor]] = None,
+    latent_patch_size: tuple[int, int, int] = (1, 1, 1),
+    cache_role: str = "target",
+):
+    """Lance architecture. Latents are stored in official [t, h, w, c] layout."""
+    assert latent.dim() == 4, "latent should be 4D tensor (frame, height, width, channel)"
+    assert control_latents is None or all(cl.dim() == 4 for cl in control_latents), (
+        "control_latents should contain 4D tensors (frame, height, width, channel)"
+    )
+
+    T, H, W, C = latent.shape
+    latent_channels = C
+    dtype_str = dtype_to_str(latent.dtype)
+    sd = {f"latents_{T}x{H}x{W}_{dtype_str}": latent.detach().cpu().contiguous()}
+
+    if control_latents is not None:
+        for i, control_latent in enumerate(control_latents):
+            T, H, W, _ = control_latent.shape
+            sd[f"latents_control_{i}_{T}x{H}x{W}_{dtype_str}"] = control_latent.detach().cpu().contiguous()
+
+    extra_metadata = {
+        "cache_role": cache_role,
+        "latent_layout": "t,h,w,c",
+        "latent_channels": f"{latent_channels}",
+        "vae_downsample": "4,16,16",
+        "latent_patch_size": ",".join(str(v) for v in latent_patch_size),
+    }
+    save_latent_cache_common(item_info, sd, ARCHITECTURE_LANCE_FULL, extra_metadata=extra_metadata)
+
+
+def save_latent_cache_common(
+    item_info: ItemInfo,
+    sd: dict[str, torch.Tensor],
+    arch_fullname: str,
+    extra_metadata: Optional[dict[str, str]] = None,
+):
     metadata = {
         "architecture": arch_fullname,
         "width": f"{item_info.original_size[0]}",
         "height": f"{item_info.original_size[1]}",
         "format_version": "1.0.1",
     }
+    if extra_metadata is not None:
+        metadata.update(extra_metadata)
     if item_info.frame_count is not None:
         metadata["frame_count"] = f"{item_info.frame_count}"
 
     for key, value in sd.items():
         # NaN check and show warning, replace NaN with 0
-        if torch.isnan(value).any():
+        if torch.is_floating_point(value) and torch.isnan(value).any():
             logger.warning(f"{key} tensor has NaN: {item_info.item_key}, replace NaN with 0")
             value[torch.isnan(value)] = 0
 
@@ -559,10 +601,39 @@ def save_text_encoder_output_cache_z_image(item_info: ItemInfo, embed: torch.Ten
     save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_Z_IMAGE_FULL)
 
 
-def save_text_encoder_output_cache_common(item_info: ItemInfo, sd: dict[str, torch.Tensor], arch_fullname: str):
+def save_text_encoder_output_cache_lance(
+    item_info: ItemInfo,
+    token_ids: torch.Tensor,
+    attention_mask: Optional[torch.Tensor] = None,
+    special_token_ids: Optional[dict[str, int]] = None,
+):
+    """Lance architecture. Cache token ids so the packed sequence can be rebuilt."""
+    assert token_ids.dim() == 1 or token_ids.dim() == 2, f"token_ids should be 1D or 2D, got {token_ids.shape}"
+    assert attention_mask is None or attention_mask.shape == token_ids.shape, (
+        f"attention_mask shape should match token_ids: {attention_mask.shape} != {token_ids.shape}"
+    )
+
+    sd = {"text_ids_int64": token_ids.detach().cpu().to(torch.int64)}
+    if attention_mask is not None:
+        sd["text_attention_mask"] = attention_mask.detach().cpu().to(torch.bool)
+
+    extra_metadata = {"cache_layout": "token_ids"}
+    if special_token_ids is not None:
+        for key, value in special_token_ids.items():
+            extra_metadata[f"token_{key}"] = str(value)
+
+    save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_LANCE_FULL, extra_metadata=extra_metadata)
+
+
+def save_text_encoder_output_cache_common(
+    item_info: ItemInfo,
+    sd: dict[str, torch.Tensor],
+    arch_fullname: str,
+    extra_metadata: Optional[dict[str, str]] = None,
+):
     for key, value in sd.items():
         # NaN check and show warning, replace NaN with 0
-        if torch.isnan(value).any():
+        if torch.is_floating_point(value) and torch.isnan(value).any():
             logger.warning(f"{key} tensor has NaN: {item_info.item_key}, replace NaN with 0")
             value[torch.isnan(value)] = 0
 
@@ -571,6 +642,8 @@ def save_text_encoder_output_cache_common(item_info: ItemInfo, sd: dict[str, tor
         "caption1": item_info.caption,
         "format_version": "1.0.1",
     }
+    if extra_metadata is not None:
+        metadata.update(extra_metadata)
 
     if os.path.exists(item_info.text_encoder_output_cache_path):
         # load existing cache and update metadata
@@ -606,6 +679,7 @@ class BucketSelector:
     RESOLUTION_STEPS_KANDINSKY5 = 16
     RESOLUTION_STEPS_HUNYUAN_VIDEO_1_5 = 16
     RESOLUTION_STEPS_Z_IMAGE = 16
+    RESOLUTION_STEPS_LANCE = 16
 
     ARCHITECTURE_STEPS_MAP = {
         ARCHITECTURE_HUNYUAN_VIDEO: RESOLUTION_STEPS_HUNYUAN,
@@ -621,6 +695,7 @@ class BucketSelector:
         ARCHITECTURE_KANDINSKY5: RESOLUTION_STEPS_KANDINSKY5,
         ARCHITECTURE_HUNYUAN_VIDEO_1_5: RESOLUTION_STEPS_HUNYUAN_VIDEO_1_5,
         ARCHITECTURE_Z_IMAGE: RESOLUTION_STEPS_Z_IMAGE,
+        ARCHITECTURE_LANCE: RESOLUTION_STEPS_LANCE,
     }
 
     def __init__(
@@ -1829,6 +1904,8 @@ class ImageDataset(BaseDataset):
             control_count_per_image = None  # can be multiple control images
         elif self.architecture == ARCHITECTURE_QWEN_IMAGE_EDIT:
             control_count_per_image = None  # can be multiple control images
+        elif self.architecture == ARCHITECTURE_LANCE:
+            control_count_per_image = None  # Lance edit tasks can use multiple visual context items
 
         if image_directory is not None:
             self.datasource = ImageDirectoryDatasource(
@@ -2072,6 +2149,7 @@ class VideoDataset(BaseDataset):
     TARGET_FPS_FRAMEPACK = 30.0
     TARGET_FPS_FLUX_KONTEXT = 1.0  # VideoDataset is not used for Flux Kontext, but this is a placeholder
     TARGET_FPS_HUNYUAN_VIDEO_1_5 = 24.0
+    TARGET_FPS_LANCE = 12.0
 
     def __init__(
         self,
@@ -2129,6 +2207,8 @@ class VideoDataset(BaseDataset):
             self.target_fps = VideoDataset.TARGET_FPS_HUNYUAN
         elif self.architecture == ARCHITECTURE_HUNYUAN_VIDEO_1_5:
             self.target_fps = VideoDataset.TARGET_FPS_HUNYUAN_VIDEO_1_5
+        elif self.architecture == ARCHITECTURE_LANCE:
+            self.target_fps = VideoDataset.TARGET_FPS_LANCE
         else:
             raise ValueError(f"Unsupported architecture: {self.architecture}")
 
