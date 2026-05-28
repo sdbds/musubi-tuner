@@ -93,7 +93,7 @@ ARCH_KANDINSKY5 = "Kandinsky-5"
 ARCH_HUNYUAN_VIDEO_1_5 = "hunyuan-video-1.5"
 ARCH_Z_IMAGE = "Z-Image"
 ARCH_HIDREAM_O1 = "HiDream-O1-Image"
-ARCH_LENS = "Lens"
+ARCH_LENS = "lens"
 
 ADAPTER_LORA = "lora"
 
