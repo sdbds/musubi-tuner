@@ -33,6 +33,7 @@ from musubi_tuner.dataset.architectures import (  # explicit imports for local u
     ARCHITECTURE_HUNYUAN_VIDEO_1_5,
     ARCHITECTURE_KANDINSKY5,
     ARCHITECTURE_LONGCAT,
+    ARCHITECTURE_LENS,
     ARCHITECTURE_QWEN_IMAGE_EDIT,
     ARCHITECTURE_WAN,
 )
@@ -325,6 +326,8 @@ class ImageDataset(BaseDataset):
             control_count_per_image = None  # can be multiple control images
         elif self.architecture == ARCHITECTURE_QWEN_IMAGE_EDIT:
             control_count_per_image = None  # can be multiple control images
+        elif self.architecture == ARCHITECTURE_LENS:
+            control_count_per_image = 0
 
         if image_directory is not None:
             self.datasource = ImageDirectoryDatasource(
@@ -341,6 +344,8 @@ class ImageDataset(BaseDataset):
         self.batch_manager = None
         self.num_train_items = 0
         self.has_control = self.datasource.has_control
+        if self.architecture == ARCHITECTURE_LENS and self.has_control:
+            raise ValueError("Lens MVP supports text-to-image only; control images are not supported.")
 
     def get_metadata(self):
         metadata = super().get_metadata()
@@ -630,6 +635,8 @@ class VideoDataset(BaseDataset):
             self.target_fps = VideoDataset.TARGET_FPS_HUNYUAN
         elif self.architecture == ARCHITECTURE_HUNYUAN_VIDEO_1_5:
             self.target_fps = VideoDataset.TARGET_FPS_HUNYUAN_VIDEO_1_5
+        elif self.architecture == ARCHITECTURE_LENS:
+            raise ValueError("Lens MVP supports image datasets only; video datasets are not supported.")
         else:
             raise ValueError(f"Unsupported architecture: {self.architecture}")
 
