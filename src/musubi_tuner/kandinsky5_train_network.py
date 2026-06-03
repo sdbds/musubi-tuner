@@ -29,6 +29,7 @@ from musubi_tuner.kandinsky5.models.utils import fast_sta_nabla
 from musubi_tuner.kandinsky5.generation_utils import get_first_frame_from_image
 from musubi_tuner.kandinsky5.models import attention as k5_attention
 from musubi_tuner.kandinsky5.models import nn as k5_nn
+from musubi_tuner.modules.colored_noise import build_colored_noise_shaper_from_args
 from musubi_tuner.modules.fp8_optimization_utils import (
     optimize_state_dict_with_fp8,
     apply_fp8_monkey_patch,
@@ -360,6 +361,7 @@ class Kandinsky5NetworkTrainer(NetworkTrainer):
                         device=accelerator.device,
                         conf=conf_ns,
                         progress=False,
+                        colored_noise_shaper=build_colored_noise_shaper_from_args(args),
                     )
 
                 # offload DiT between steps if requested
@@ -489,6 +491,7 @@ class Kandinsky5NetworkTrainer(NetworkTrainer):
             text_embedder_device=accelerator.device,
             progress=False,
             offload=False,
+            colored_noise_shaper=build_colored_noise_shaper_from_args(args),
         )
 
         return images

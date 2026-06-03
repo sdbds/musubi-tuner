@@ -19,6 +19,7 @@ from musubi_tuner.hv_train_network import (
     read_config_from_file,
 )
 from musubi_tuner.utils.device_utils import synchronize_device
+from musubi_tuner.modules.colored_noise import apply_colored_noise_from_args
 from musubi_tuner.modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
 from musubi_tuner.wan_generate_video import parse_one_frame_inference_args
 
@@ -375,6 +376,7 @@ class WanNetworkTrainer(NetworkTrainer):
         noise = torch.randn(16, latent_video_length, lat_h, lat_w, dtype=torch.float32, generator=generator, device=device).to(
             "cpu"
         )
+        noise = apply_colored_noise_from_args(args, noise, total_steps=sample_steps)
 
         # prepare the model input
         max_seq_len = latent_video_length * lat_h * lat_w // (self.config.patch_size[1] * self.config.patch_size[2])

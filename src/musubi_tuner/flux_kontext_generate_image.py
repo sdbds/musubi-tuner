@@ -16,6 +16,11 @@ from musubi_tuner.flux import flux_utils
 from musubi_tuner.flux.flux_utils import load_flow_model
 from musubi_tuner.flux import flux_models
 from musubi_tuner.utils import model_utils
+from musubi_tuner.modules.colored_noise import (
+    add_colored_noise_args,
+    apply_colored_noise_to_packed_2x2_from_args,
+    validate_colored_noise_args,
+)
 
 lycoris_available = find_spec("lycoris") is not None
 
@@ -92,6 +97,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Shift factor for flow matching schedulers. Default is None (FLUX.1 default).",
     )
+    add_colored_noise_args(parser)
 
     parser.add_argument("--fp8", action="store_true", help="use fp8 for DiT model")
     parser.add_argument("--fp8_scaled", action="store_true", help="use scaled fp8 for DiT, only for fp8")
@@ -144,6 +150,8 @@ def parse_args() -> argparse.Namespace:
 
     if args.lycoris and not lycoris_available:
         raise ValueError("install lycoris: https://github.com/KohakuBlueleaf/LyCORIS")
+
+    validate_colored_noise_args(args, parser)
 
     return args
 
@@ -619,6 +627,13 @@ def generate(
         generator=seed_g,
         device="cpu",
     ).to(device, dtype=torch.bfloat16)
+    noise = apply_colored_noise_to_packed_2x2_from_args(
+        args,
+        noise,
+        packed_height=packed_latent_height,
+        packed_width=packed_latent_width,
+        total_steps=args.infer_steps,
+    )
 
     img_ids = flux_utils.prepare_img_ids(1, packed_latent_height, packed_latent_width).to(device)
 

@@ -26,6 +26,7 @@ from musubi_tuner.hunyuan_model.text_encoder import PROMPT_TEMPLATE
 from musubi_tuner.hunyuan_model.vae import load_vae
 from musubi_tuner.hunyuan_model.models import load_transformer, get_rotary_pos_embed
 from musubi_tuner.hunyuan_model.fp8_optimization import convert_fp8_linear
+from musubi_tuner.modules.colored_noise import add_colored_noise_args, apply_colored_noise_from_args, validate_colored_noise_args
 from musubi_tuner.modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
 from musubi_tuner.networks import lora
 
@@ -472,6 +473,7 @@ def parse_args():
 
     # Flow Matching
     parser.add_argument("--flow_shift", type=float, default=7.0, help="Shift factor for flow matching schedulers.")
+    add_colored_noise_args(parser)
 
     parser.add_argument("--fp8", action="store_true", help="use fp8 for DiT model")
     parser.add_argument("--fp8_llm", action="store_true", help="use fp8 for Text Encoder 1 (LLM)")
@@ -527,6 +529,8 @@ def parse_args():
 
     if args.lycoris and not lycoris_available:
         raise ValueError("install lycoris: https://github.com/KohakuBlueleaf/LyCORIS")
+
+    validate_colored_noise_args(args, parser)
 
     return args
 
@@ -801,6 +805,7 @@ def main():
         for i in range(latent_video_length):
             latents.append(randn_tensor(shape_of_frame, generator=generator, device=device, dtype=dit_dtype))
         latents = torch.cat(latents, dim=2)
+        latents = apply_colored_noise_from_args(args, latents, total_steps=num_inference_steps)
 
         # pad image_latents to match the length of video_latents
         if image_latents is not None:

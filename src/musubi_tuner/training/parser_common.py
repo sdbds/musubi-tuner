@@ -13,6 +13,8 @@ import pathlib
 import toml
 from accelerate.utils import DynamoBackend
 
+from musubi_tuner.modules.colored_noise import add_colored_noise_args, validate_colored_noise_args
+
 
 logger = logging.getLogger(__name__)
 
@@ -288,6 +290,7 @@ def _add_sampling_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="file for prompts to generate sample images / 学習中モデルのサンプル出力用プロンプトのファイル",
     )
+    add_colored_noise_args(parser)
 
 
 def _add_optimizer_args(parser: argparse.ArgumentParser) -> None:
@@ -750,6 +753,7 @@ def setup_parser_common() -> argparse.ArgumentParser:
 
 def read_config_from_file(args: argparse.Namespace, parser: argparse.ArgumentParser):
     if not args.config_file:
+        validate_colored_noise_args(args, parser)
         return args
 
     config_path = args.config_file + ".toml" if not args.config_file.endswith(".toml") else args.config_file
@@ -778,5 +782,6 @@ def read_config_from_file(args: argparse.Namespace, parser: argparse.ArgumentPar
     args = parser.parse_args(namespace=config_args)
     args.config_file = os.path.splitext(args.config_file)[0]
     logger.info(args.config_file)
+    validate_colored_noise_args(args, parser)
 
     return args

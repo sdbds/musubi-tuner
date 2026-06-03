@@ -16,6 +16,7 @@ from musubi_tuner.hv_train_network import (
     setup_parser_common,
     read_config_from_file,
 )
+from musubi_tuner.modules.colored_noise import apply_colored_noise_from_args
 from musubi_tuner.utils import model_utils
 
 import logging
@@ -163,6 +164,7 @@ class ZImageNetworkTrainer(NetworkTrainer):
         shape = (1, model.in_channels, height_latent, width_latent)
 
         latents = torch.randn(shape, generator=generator, device=device, dtype=torch.float32).to(device)
+        latents = apply_colored_noise_from_args(args, latents, total_steps=sample_steps)
 
         # Trim embeddings
         image_sequence_length = (height_latent // model.all_patch_size[0]) * (width_latent // model.all_patch_size[0])

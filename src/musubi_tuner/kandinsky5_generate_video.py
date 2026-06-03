@@ -14,6 +14,7 @@ from musubi_tuner.kandinsky5_train_network import Kandinsky5NetworkTrainer
 from musubi_tuner.hv_train_network import clean_memory_on_device
 from musubi_tuner.hv_generate_video import save_videos_grid
 from musubi_tuner.networks import lora_kandinsky
+from musubi_tuner.modules.colored_noise import add_colored_noise_args, build_colored_noise_shaper_from_args, validate_colored_noise_args
 
 
 def _get_device(device_arg: Optional[str]) -> torch.device:
@@ -62,7 +63,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--lora_multiplier", type=float, nargs="*", default=None, help="LoRA multiplier(s), align with lora_weight order"
     )
-    return parser.parse_args()
+    add_colored_noise_args(parser)
+    args = parser.parse_args()
+    validate_colored_noise_args(args, parser)
+    return args
 
 
 def main():
@@ -265,6 +269,7 @@ def main():
                 conf=conf_ns,
                 progress=True,
                 i2v_mode=i2v_mode,
+                colored_noise_shaper=build_colored_noise_shaper_from_args(args),
             )
         # free DiT
         dit.to("cpu")

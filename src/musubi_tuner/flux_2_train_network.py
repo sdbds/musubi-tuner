@@ -16,6 +16,7 @@ from musubi_tuner.hv_train_network import (
     setup_parser_common,
     read_config_from_file,
 )
+from musubi_tuner.modules.colored_noise import apply_colored_noise_from_args
 
 import logging
 
@@ -142,6 +143,7 @@ class Flux2NetworkTrainer(NetworkTrainer):
             device=device,
             dtype=torch.bfloat16,
         )
+        latents = apply_colored_noise_from_args(args, latents, total_steps=sample_steps)
         x, x_ids = flux2_utils.prc_img(latents)  # [1, 4056, 128], [1, 4056, 4]
 
         # prepare control latent

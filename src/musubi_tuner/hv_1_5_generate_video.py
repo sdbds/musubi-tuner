@@ -31,6 +31,7 @@ from musubi_tuner.networks import lora_wan
 from musubi_tuner.qwen_image import qwen_image_utils
 from musubi_tuner.utils import model_utils
 from musubi_tuner.utils.lora_utils import filter_lora_state_dict
+from musubi_tuner.modules.colored_noise import add_colored_noise_args, apply_colored_noise_from_args, validate_colored_noise_args
 
 lycoris_available = find_spec("lycoris") is not None
 
@@ -128,6 +129,7 @@ def parse_args() -> argparse.Namespace:
         default=7.0,
         help="Shift factor for flow matching schedulers. Default ",
     )
+    add_colored_noise_args(parser)
 
     parser.add_argument("--fp8", action="store_true", help="use fp8 for DiT model")
     parser.add_argument("--fp8_scaled", action="store_true", help="use scaled fp8 for DiT, only for fp8")
@@ -182,6 +184,8 @@ def parse_args() -> argparse.Namespace:
 
     if args.lycoris and not lycoris_available:
         raise ValueError("install lycoris: https://github.com/KohakuBlueleaf/LyCORIS")
+
+    validate_colored_noise_args(args, parser)
 
     return args
 
@@ -695,6 +699,7 @@ def generate(
     else:
         noise = torch.randn(noise_shape, generator=seed_g, device="cpu", dtype=dit_dtype)
     noise = noise.to(device)
+    noise = apply_colored_noise_from_args(args, noise, total_steps=args.infer_steps)
 
     # run sampling
     logger.info("Starting generation...")

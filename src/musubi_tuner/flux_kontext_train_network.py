@@ -17,6 +17,7 @@ from musubi_tuner.hv_train_network import (
     setup_parser_common,
     read_config_from_file,
 )
+from musubi_tuner.modules.colored_noise import apply_colored_noise_to_packed_2x2_from_args
 
 import logging
 
@@ -163,6 +164,13 @@ class FluxKontextNetworkTrainer(NetworkTrainer):
             dtype=noise_dtype,
             device=device,
         ).to(device, dtype=torch.bfloat16)
+        noise = apply_colored_noise_to_packed_2x2_from_args(
+            args,
+            noise,
+            packed_height=packed_latent_height,
+            packed_width=packed_latent_width,
+            total_steps=sample_steps,
+        )
 
         img_ids = flux_utils.prepare_img_ids(1, packed_latent_height, packed_latent_width).to(device)
 

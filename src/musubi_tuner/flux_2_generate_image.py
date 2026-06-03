@@ -15,6 +15,7 @@ from musubi_tuner.flux_2 import flux2_utils
 from musubi_tuner.flux_2 import flux2_models
 from musubi_tuner.utils import model_utils
 from musubi_tuner.utils.lora_utils import filter_lora_state_dict
+from musubi_tuner.modules.colored_noise import add_colored_noise_args, apply_colored_noise_from_args, validate_colored_noise_args
 
 lycoris_available = find_spec("lycoris") is not None
 
@@ -114,6 +115,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Shift factor for flow matching schedulers. Default is None (FLUX.2 default).",
     )
+    add_colored_noise_args(parser)
 
     parser.add_argument("--fp8", action="store_true", help="use fp8 for DiT model")
     parser.add_argument("--fp8_scaled", action="store_true", help="use scaled fp8 for DiT, only for fp8")
@@ -167,6 +169,8 @@ def parse_args() -> argparse.Namespace:
 
     if args.lycoris and not lycoris_available:
         raise ValueError("install lycoris: https://github.com/KohakuBlueleaf/LyCORIS")
+
+    validate_colored_noise_args(args, parser)
 
     return args
 
@@ -663,6 +667,7 @@ def generate(
     noise = torch.randn(1, 128, packed_latent_height, packed_latent_width, dtype=noise_dtype, generator=seed_g, device="cpu").to(
         device, dtype=torch.bfloat16
     )
+    noise = apply_colored_noise_from_args(args, noise, total_steps=args.infer_steps)
     x, x_ids = flux2_utils.prc_img(noise)
 
     # prompt upsampling is not supported

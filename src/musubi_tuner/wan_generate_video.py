@@ -31,6 +31,12 @@ from musubi_tuner.wan.modules.model import WanModel, load_wan_model, detect_wan_
 from musubi_tuner.wan.modules.vae import WanVAE
 from musubi_tuner.wan.modules.t5 import T5EncoderModel
 from musubi_tuner.wan.modules.clip import CLIPModel
+from musubi_tuner.modules.colored_noise import (
+    add_colored_noise_args,
+    apply_colored_noise_from_args,
+    build_colored_noise_shaper_from_args,
+    validate_colored_noise_args,
+)
 from musubi_tuner.modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
 from musubi_tuner.wan.utils.fm_solvers import FlowDPMSolverMultistepScheduler, get_sampling_sigmas, retrieve_timesteps
 from musubi_tuner.wan.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
@@ -70,6 +76,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--task", type=str, default="t2v-14B", choices=list(WAN_CONFIGS.keys()), help="The task to run.")
     parser.add_argument(
         "--sample_solver", type=str, default="unipc", choices=["unipc", "dpm++", "vanilla"], help="The solver used to sample."
+    )
+    parser.add_argument(
+        "--dpm_algorithm_type",
+        type=str,
+        default="dpmsolver++",
+        choices=["dpmsolver++", "sde-dpmsolver++"],
+        help="Algorithm type for --sample_solver dpm++. sde-dpmsolver++ also colors CNS step noise.",
+    )
+    parser.add_argument("--dpm_solver_order", type=int, default=2, help="Solver order for --sample_solver dpm++.")
+    parser.add_argument(
+        "--dpm_solver_type",
+        type=str,
+        default="midpoint",
+        choices=["midpoint", "heun"],
+        help="Second-order solver type for --sample_solver dpm++.",
     )
 
     parser.add_argument("--dit", type=str, default=None, help="DiT checkpoint path")
@@ -199,6 +220,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Shift factor for flow matching schedulers. Default depends on task.",
     )
+    add_colored_noise_args(parser)
 
     parser.add_argument("--fp8", action="store_true", help="use fp8 for DiT model")
     parser.add_argument("--fp8_scaled", action="store_true", help="use scaled fp8 for DiT, only for fp8")
@@ -254,6 +276,8 @@ def parse_args() -> argparse.Namespace:
 
     if args.prompt is None and not args.from_file and not args.interactive and args.latent_path is None:
         raise ValueError("Either --prompt, --from_file, --interactive, or --latent_path must be specified")
+
+    validate_colored_noise_args(args, parser)
 
     assert (args.latent_path is None or len(args.latent_path) == 0) or (
         args.output_type == "images" or args.output_type == "video"
@@ -900,6 +924,7 @@ def prepare_t2v_inputs(
     # generate noise
     noise = torch.randn(target_shape, dtype=torch.float32, generator=seed_g, device=device if not args.cpu_noise else "cpu")
     noise = noise.to(device)
+    noise = apply_colored_noise_from_args(args, noise, total_steps=args.infer_steps)
 
     # prepare model input arguments
     arg_c = {"context": context, "seq_len": seq_len}
@@ -1208,6 +1233,7 @@ def prepare_i2v_inputs(
         device=device if not args.cpu_noise else "cpu",
     )
     noise = noise.to(device)
+    noise = apply_colored_noise_from_args(args, noise, total_steps=args.infer_steps)
 
     # prepare model input arguments
     arg_c = {
@@ -1271,10 +1297,17 @@ def setup_scheduler(args: argparse.Namespace, config, device: torch.device) -> T
         timesteps = scheduler.timesteps
     elif args.sample_solver == "dpm++":
         scheduler = FlowDPMSolverMultistepScheduler(
-            num_train_timesteps=config.num_train_timesteps, shift=1, use_dynamic_shifting=False
+            num_train_timesteps=config.num_train_timesteps,
+            solver_order=args.dpm_solver_order,
+            shift=1,
+            use_dynamic_shifting=False,
+            algorithm_type=args.dpm_algorithm_type,
+            solver_type=args.dpm_solver_type,
         )
         sampling_sigmas = get_sampling_sigmas(args.infer_steps, args.flow_shift)
         timesteps, _ = retrieve_timesteps(scheduler, device=device, sigmas=sampling_sigmas)
+        if args.cns:
+            scheduler.set_colored_noise_shaper(build_colored_noise_shaper_from_args(args))
     elif args.sample_solver == "vanilla":
         scheduler = FlowMatchDiscreteScheduler(num_train_timesteps=config.num_train_timesteps, shift=args.flow_shift)
         scheduler.set_timesteps(args.infer_steps, device=device)

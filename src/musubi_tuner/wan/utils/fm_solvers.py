@@ -14,6 +14,7 @@ from diffusers.schedulers.scheduling_utils import (KarrasDiffusionSchedulers,
                                                    SchedulerOutput)
 from diffusers.utils import deprecate, is_scipy_available
 from diffusers.utils.torch_utils import randn_tensor
+from musubi_tuner.modules.colored_noise import ColoredNoiseShaper
 
 if is_scipy_available():
     pass
@@ -175,6 +176,7 @@ class FlowDPMSolverMultistepScheduler(SchedulerMixin, ConfigMixin):
 
         # setable values
         self.num_inference_steps = None
+        self.colored_noise_shaper: Optional[ColoredNoiseShaper] = None
         alphas = np.linspace(1, 1 / num_train_timesteps,
                              num_train_timesteps)[::-1].copy()
         sigmas = 1.0 - alphas
@@ -197,6 +199,9 @@ class FlowDPMSolverMultistepScheduler(SchedulerMixin, ConfigMixin):
         #     "cpu")  # to avoid too much CPU/GPU communication
         self.sigma_min = self.sigmas[-1].item()
         self.sigma_max = self.sigmas[0].item()
+
+    def set_colored_noise_shaper(self, colored_noise_shaper: Optional[ColoredNoiseShaper]) -> None:
+        self.colored_noise_shaper = colored_noise_shaper
 
     @property
     def step_index(self):
@@ -771,6 +776,9 @@ class FlowDPMSolverMultistepScheduler(SchedulerMixin, ConfigMixin):
                 dtype=torch.float32)  # pyright: ignore
         else:
             noise = None
+
+        if noise is not None and self.colored_noise_shaper is not None:
+            noise = self.colored_noise_shaper.shape(noise, self.step_index, len(self.timesteps))
 
         if self.config.solver_order == 1 or self.lower_order_nums < 1 or lower_order_final:
             prev_sample = self.dpm_solver_first_order_update(

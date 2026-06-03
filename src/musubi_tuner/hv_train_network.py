@@ -62,6 +62,7 @@ from musubi_tuner.dataset.image_video_dataset import (
     ARCHITECTURE_HUNYUAN_VIDEO_FULL,
 )
 from musubi_tuner.hv_generate_video import resize_image_to_bucket, encode_to_latents
+from musubi_tuner.modules.colored_noise import apply_colored_noise_from_args
 from musubi_tuner.utils import model_utils
 
 # accelerate.set_seed is re-exported because qwen_image_train.py and
@@ -272,6 +273,7 @@ class HunyuanVideoNetworkTrainer(NetworkTrainer):
         for _ in range(latent_video_length):
             latents.append(torch.randn(shape_or_frame, generator=generator, device=device, dtype=dit_dtype))
         latents = torch.cat(latents, dim=2)
+        latents = apply_colored_noise_from_args(args, latents, total_steps=sample_steps)
 
         if self.i2v_training:
             # Move VAE to the appropriate device for sampling

@@ -26,6 +26,7 @@ from musubi_tuner.frame_pack.k_diffusion_hunyuan import sample_hunyuan
 from musubi_tuner.dataset import image_video_dataset
 from musubi_tuner.utils import model_utils
 from musubi_tuner.utils.lora_utils import filter_lora_state_dict
+from musubi_tuner.modules.colored_noise import add_colored_noise_args, build_colored_noise_shaper_from_args, validate_colored_noise_args
 
 lycoris_available = find_spec("lycoris") is not None
 
@@ -220,6 +221,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Shift factor for flow matching schedulers. Default is None (FramePack default).",
     )
+    add_colored_noise_args(parser)
 
     parser.add_argument("--fp8", action="store_true", help="use fp8 for DiT model")
     parser.add_argument("--fp8_scaled", action="store_true", help="use scaled fp8 for DiT, only for fp8")
@@ -305,6 +307,8 @@ def parse_args() -> argparse.Namespace:
 
     if args.lycoris and not lycoris_available:
         raise ValueError("install lycoris: https://github.com/KohakuBlueleaf/LyCORIS")
+
+    validate_colored_noise_args(args, parser)
 
     return args
 
@@ -1437,6 +1441,8 @@ def generate(
                 clean_latent_2x_indices=clean_latent_2x_indices,
                 clean_latents_4x=clean_latents_4x,
                 clean_latent_4x_indices=clean_latent_4x_indices,
+                colored_noise_shaper=build_colored_noise_shaper_from_args(args),
+                colored_noise_total_steps=args.infer_steps,
             )
             postprocess_magcache(args, model)
 
@@ -1637,6 +1643,8 @@ def generate_with_one_frame_inference(
         clean_latent_2x_indices=clean_latent_2x_indices,
         clean_latents_4x=clean_latents_4x,
         clean_latent_4x_indices=clean_latent_4x_indices,
+        colored_noise_shaper=build_colored_noise_shaper_from_args(args),
+        colored_noise_total_steps=args.infer_steps,
     )
 
     postprocess_magcache(args, model)

@@ -241,6 +241,7 @@ def generate_sample_latents_only(
     conf=None,
     progress=False,
     i2v_mode=None,  # unused; kept for call-site compatibility
+    colored_noise_shaper=None,
 ):
     """Minimal sampler that returns latents only (no VAE decode)."""
     bs, duration, height, width, dim = shape
@@ -248,6 +249,8 @@ def generate_sample_latents_only(
     g = torch.Generator(device=device)
     g.manual_seed(seed)
     img = torch.randn(bs * duration, height, width, dim, device=device, generator=g, dtype=torch.bfloat16)
+    if colored_noise_shaper is not None:
+        img = colored_noise_shaper.shape(img, 0, num_steps, spatial_dims=(1, 2))
 
     # Normalize text shapes; squeeze singleton batch to packed (S, D) when present, reshape/trim masks accordingly.
     if text_embeds.dim() == 3 and text_embeds.shape[0] == 1:
@@ -452,12 +455,15 @@ def generate_sample(
     progress=True,
     offload=False,
     tp_mesh=None,
+    colored_noise_shaper=None,
 ):
     bs, duration, height, width, dim = shape
 
     g = torch.Generator(device="cuda")
     g.manual_seed(seed)
     img = torch.randn(bs * duration, height, width, dim, device=device, generator=g, dtype=torch.bfloat16)
+    if colored_noise_shaper is not None:
+        img = colored_noise_shaper.shape(img, 0, num_steps, spatial_dims=(1, 2))
 
     # Use the dedicated image-to-video prompt template for both text and negative text.
     type_of_content = "image2video"
@@ -565,12 +571,15 @@ def generate_sample_ti2i(
     offload=False,
     image_vae=False,
     image=None,
+    colored_noise_shaper=None,
 ):
     bs, duration, height, width, dim = shape
 
     g = torch.Generator(device="cuda")
     g.manual_seed(seed)
     img = torch.randn(bs * duration, height, width, dim, device=device, generator=g, dtype=torch.bfloat16)
+    if colored_noise_shaper is not None:
+        img = colored_noise_shaper.shape(img, 0, num_steps, spatial_dims=(1, 2))
 
     if duration == 1:
         if image is None:
@@ -695,6 +704,7 @@ def generate_sample_i2v(
     offload=False,
     tp_mesh=None,
     i2v_mode="first",
+    colored_noise_shaper=None,
 ):
     text_embedder.embedder.mode = "i2v"
     bs, duration, height, width, dim = shape
@@ -702,6 +712,8 @@ def generate_sample_i2v(
     g = torch.Generator(device="cuda")
     g.manual_seed(seed)
     img = torch.randn(bs * duration, height, width, dim, device=device, generator=g, dtype=torch.bfloat16)
+    if colored_noise_shaper is not None:
+        img = colored_noise_shaper.shape(img, 0, num_steps, spatial_dims=(1, 2))
 
     if duration == 1:
         type_of_content = "image"

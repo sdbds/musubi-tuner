@@ -20,6 +20,7 @@ from musubi_tuner.frame_pack.framepack_utils import load_vae as load_framepack_v
 from musubi_tuner.frame_pack.hunyuan_video_packed import HunyuanVideoTransformer3DModelPacked, load_packed_model
 from musubi_tuner.frame_pack.k_diffusion_hunyuan import sample_hunyuan
 from musubi_tuner.frame_pack.utils import crop_or_pad_yield_mask
+from musubi_tuner.modules.colored_noise import build_colored_noise_shaper_from_args
 from musubi_tuner.dataset.image_video_dataset import resize_image_to_bucket
 from musubi_tuner.hv_train_network import (
     DiTOutput,
@@ -337,6 +338,8 @@ class FramePackNetworkTrainer(NetworkTrainer):
                     clean_latent_2x_indices=clean_latent_2x_indices,
                     clean_latents_4x=clean_latents_4x,
                     clean_latent_4x_indices=clean_latent_4x_indices,
+                    colored_noise_shaper=build_colored_noise_shaper_from_args(args),
+                    colored_noise_total_steps=sample_steps,
                 )
 
                 total_generated_latent_frames += int(generated_latents.shape[2])
@@ -466,6 +469,8 @@ class FramePackNetworkTrainer(NetworkTrainer):
                 clean_latent_2x_indices=clean_latent_2x_indices,
                 clean_latents_4x=clean_latents_4x,
                 clean_latent_4x_indices=clean_latent_4x_indices,
+                colored_noise_shaper=build_colored_noise_shaper_from_args(args),
+                colored_noise_total_steps=sample_steps,
             )
 
             real_history_latents = generated_latents.to(clean_latents)

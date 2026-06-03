@@ -21,6 +21,11 @@ from musubi_tuner.qwen_image.qwen_image_autoencoder_kl import AutoencoderKLQwenI
 from musubi_tuner.qwen_image.qwen_image_utils import VAE_SCALE_FACTOR
 from musubi_tuner.utils import model_utils
 from musubi_tuner.utils.lora_utils import filter_lora_state_dict
+from musubi_tuner.modules.colored_noise import (
+    add_colored_noise_args,
+    apply_colored_noise_to_packed_2x2_from_args,
+    validate_colored_noise_args,
+)
 
 
 lycoris_available = find_spec("lycoris") is not None
@@ -124,6 +129,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Shift factor for flow matching schedulers. Default is None (use dynamic shifting based on image resolution).",
     )
+    add_colored_noise_args(parser)
 
     parser.add_argument("--fp8", action="store_true", help="use fp8 for DiT model")
     parser.add_argument("--fp8_scaled", action="store_true", help="use scaled fp8 for DiT, only for fp8")
@@ -207,6 +213,8 @@ def parse_args() -> argparse.Namespace:
 
     if args.lycoris and not lycoris_available:
         raise ValueError("install lycoris: https://github.com/KohakuBlueleaf/LyCORIS")
+
+    validate_colored_noise_args(args, parser)
 
     return args
 
@@ -754,6 +762,14 @@ def generate(
     # subsequent latents correspond to the individual layers.
     latents = qwen_image_utils.prepare_latents(
         1, num_layers + 1, num_channels_latents, height, width, torch.bfloat16, device, seed_g
+    )
+    latents = apply_colored_noise_to_packed_2x2_from_args(
+        args,
+        latents,
+        packed_height=height // VAE_SCALE_FACTOR // 2,
+        packed_width=width // VAE_SCALE_FACTOR // 2,
+        layers=num_layers + 1,
+        total_steps=args.infer_steps,
     )
 
     if not (args.is_edit or args.is_layered):

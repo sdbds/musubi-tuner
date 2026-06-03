@@ -27,6 +27,7 @@ from musubi_tuner.hv_train_network import (
 )
 from musubi_tuner.utils import model_utils
 from musubi_tuner.utils.sai_model_spec import CUSTOM_ARCH_QWEN_IMAGE_EDIT_PLUS, CUSTOM_ARCH_QWEN_IMAGE_EDIT_2511
+from musubi_tuner.modules.colored_noise import apply_colored_noise_to_packed_2x2_from_args
 
 import logging
 
@@ -242,6 +243,14 @@ class QwenImageNetworkTrainer(NetworkTrainer):
         # latents is packed
         latents = qwen_image_utils.prepare_latents(
             1, num_layers + 1, num_channels_latents, height, width, torch.bfloat16, device, generator
+        )
+        latents = apply_colored_noise_to_packed_2x2_from_args(
+            args,
+            latents,
+            packed_height=height // qwen_image_utils.VAE_SCALE_FACTOR // 2,
+            packed_width=width // qwen_image_utils.VAE_SCALE_FACTOR // 2,
+            layers=num_layers + 1,
+            total_steps=sample_steps,
         )
         img_shapes = [(1, height // qwen_image_utils.VAE_SCALE_FACTOR // 2, width // qwen_image_utils.VAE_SCALE_FACTOR // 2)]
         if args.is_layered:

@@ -36,6 +36,7 @@ from musubi_tuner.hv_train_network import (
     setup_parser_common,
 )
 from musubi_tuner.qwen_image import qwen_image_utils
+from musubi_tuner.modules.colored_noise import apply_colored_noise_from_args
 from musubi_tuner.utils import model_utils
 
 logger = logging.getLogger(__name__)
@@ -261,6 +262,7 @@ class HunyuanVideo15NetworkTrainer(NetworkTrainer):
         latents = torch.randn(
             (1, hunyuan_video_1_5_vae.VAE_LATENT_CHANNELS, lat_f, lat_h, lat_w), generator=generator, device=device, dtype=dit_dtype
         )
+        latents = apply_colored_noise_from_args(args, latents, total_steps=sample_steps)
 
         vl_embed = sample_parameter["vl_embed"].to(device, dtype=torch.bfloat16)
         vl_mask = sample_parameter["vl_mask"].to(device, dtype=torch.bool)

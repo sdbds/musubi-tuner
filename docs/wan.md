@@ -317,6 +317,8 @@ Specifying `--fp8` runs DiT in fp8 mode. fp8 can significantly reduce memory con
 
 `--flow_shift` can be used to specify the flow shift (default 3.0 for I2V with 480p, 5.0 for others).
 
+Colored Noise Sampling (CNS) can be enabled with `--cns --cns_gamma_matrix_path path/to/gamma.pt`. CNS colors the initial latent noise for all Wan solvers. If you also use `--sample_solver dpm++ --dpm_algorithm_type sde-dpmsolver++`, the SDE step noise is colored as well. It requires a gamma matrix that matches your sampling setup and is disabled by default.
+
 `--guidance_scale` can be used to specify the guidance scale for classifier free guidance (default 5.0). For Wan2.2, `--guidance_scale_high_noise` also can be specified to set a different scale for the high-noise model.
 
 `--blocks_to_swap` is the number of blocks to swap during inference. The default value is None (no block swap). The maximum value is 39 for 14B model and 29 for 1.3B model.
@@ -371,6 +373,8 @@ Wan2.2モデルの場合、`--dit`に低ノイズ用モデルを、`--dit_high_n
 `--negative_prompt` でネガティブプロンプトを指定できます。省略した場合はデフォルトのネガティブプロンプトが使用されます。
 
 `--flow_shift` でflow shiftを指定できます（480pのI2Vの場合はデフォルト3.0、それ以外は5.0）。
+
+Colored Noise Sampling (CNS) は `--cns --cns_gamma_matrix_path path/to/gamma.pt` で有効にできます。CNSはすべてのWan solverで初期latent noiseを色付きノイズにします。さらに `--sample_solver dpm++ --dpm_algorithm_type sde-dpmsolver++` を指定した場合は、SDE step noiseも色付きノイズになります。サンプリング設定に合ったgamma matrixが必要で、デフォルトでは無効です。
 
 `--guidance_scale` でclassifier free guianceのガイダンススケールを指定できます（デフォルト5.0）。Wan2.2の場合は、`--guidance_scale_high_noise` で高ノイズ用モデルのガイダンススケールを別に指定できます。
 

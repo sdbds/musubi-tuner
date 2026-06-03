@@ -17,6 +17,7 @@ from musubi_tuner.utils.lora_utils import filter_lora_state_dict
 from musubi_tuner.zimage import zimage_config, zimage_model, zimage_utils
 from musubi_tuner.zimage import zimage_autoencoder
 from musubi_tuner.zimage.zimage_autoencoder import AutoencoderKL
+from musubi_tuner.modules.colored_noise import add_colored_noise_args, apply_colored_noise_from_args, validate_colored_noise_args
 
 
 lycoris_available = find_spec("lycoris") is not None
@@ -88,6 +89,7 @@ def parse_args() -> argparse.Namespace:
         default=3.0,
         help="Shift factor for flow matching schedulers. Default is 3.0.",
     )
+    add_colored_noise_args(parser)
 
     parser.add_argument("--fp8", action="store_true", help="use fp8 for DiT model")
     parser.add_argument("--fp8_scaled", action="store_true", help="use scaled fp8 for DiT, only for fp8")
@@ -149,6 +151,8 @@ def parse_args() -> argparse.Namespace:
 
     if args.lycoris and not lycoris_available:
         raise ValueError("install lycoris: https://github.com/KohakuBlueleaf/LyCORIS")
+
+    validate_colored_noise_args(args, parser)
 
     return args
 
@@ -558,6 +562,7 @@ def generate(
     shape = (1, model.in_channels, height_latent, width_latent)
 
     latents = torch.randn(shape, generator=seed_g, device="cpu" if args.cpu_noise else device, dtype=torch.float32).to(device)
+    latents = apply_colored_noise_from_args(args, latents, total_steps=args.infer_steps)
     image_sequence_length = (height_latent // model.all_patch_size[0]) * (width_latent // model.all_patch_size[0])
 
     # The batch size is 1, so we can trim embeds as the length of the prompt

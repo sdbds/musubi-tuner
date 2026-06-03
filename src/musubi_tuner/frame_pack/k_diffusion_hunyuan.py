@@ -57,6 +57,8 @@ def sample_hunyuan(
     device=None,
     negative_kwargs=None,
     callback=None,
+    colored_noise_shaper=None,
+    colored_noise_total_steps=None,
     **kwargs,
 ):
     device = device or transformer.device
@@ -67,6 +69,8 @@ def sample_hunyuan(
     latents = torch.randn(
         (batch_size, 16, (frames + 3) // 4, height // 8, width // 8), generator=generator, device=generator.device
     ).to(device=device, dtype=torch.float32)
+    if colored_noise_shaper is not None:
+        latents = colored_noise_shaper.shape(latents, 0, colored_noise_total_steps or num_inference_steps)
 
     B, C, T, H, W = latents.shape
     seq_length = T * H * W // 4  # 9*80*80//4 = 14400
