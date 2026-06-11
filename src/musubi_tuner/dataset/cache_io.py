@@ -521,8 +521,8 @@ def save_text_encoder_output_cache_common(
     item_info: ItemInfo,
     sd: dict[str, torch.Tensor],
     arch_fullname: str,
-    extra_metadata: Optional[dict[str, str]] = None,
     merge_existing: bool = True,
+    extra_metadata: Optional[dict[str, str]] = None,
 ):
     # merge_existing keeps keys written by previous passes (e.g. HunyuanVideo caches LLM and CLIP separately).
     # Single-pass architectures that write their full key set at once should pass merge_existing=False so the
