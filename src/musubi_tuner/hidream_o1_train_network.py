@@ -1,6 +1,8 @@
 import argparse
 import logging
-from typing import Any, Optional
+import os
+import time
+from typing import Optional
 
 import numpy as np
 import torch
@@ -11,7 +13,14 @@ from musubi_tuner.hidream_o1 import hidream_o1_utils
 from musubi_tuner.hidream_o1.pipeline import TIMESTEP_TOKEN_NUM, generate_image
 from musubi_tuner.hidream_o1.utils import get_rope_index_fix_point
 from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
-from musubi_tuner.hv_train_network import NetworkTrainer, get_sigmas, load_prompts, read_config_from_file, setup_parser_common
+from musubi_tuner.hv_train_network import (
+    DiTOutput,
+    NetworkTrainer,
+    get_sigmas,
+    load_prompts,
+    read_config_from_file,
+    setup_parser_common,
+)
 from musubi_tuner.utils import model_utils
 
 logger = logging.getLogger(__name__)
@@ -51,7 +60,6 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
         self.use_flash_attn = False
         self.model_type = "full"
         self.dino_loss_fn = None
-        self._latest_aux_loss_logs: dict[str, float] = {}
 
     @property
     def architecture(self) -> str:
@@ -65,7 +73,11 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
         self.dit_dtype = torch.bfloat16
         args.dit_dtype = model_utils.dtype_to_str(self.dit_dtype)
         self._i2v_training = False
+        # control_training in the base class means video-control training, which makes sample image
+        # generation require control_video_path. HiDream-O1 is an image model that takes control images
+        # (control_image_path), like FLUX.2/Kontext, so keep this False and track i2i separately.
         self._control_training = False
+        self._i2i_training = args.task == "i2i"
         self.use_flash_attn = getattr(args, "flash_attn", False)
         self.model_type = args.model_type
         self.default_guidance_scale = 0.0 if self.model_type == "dev" else 5.0
@@ -83,22 +95,8 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
 
         if args.weighting_scheme != "none":
             raise ValueError("HiDream-O1 currently supports --weighting_scheme none only.")
-        if args.fp8_base and not getattr(args, "fp8_scaled", False):
+        if args.fp8_base and not args.fp8_scaled:
             raise ValueError("HiDream-O1 supports --fp8_base only together with --fp8_scaled.")
-
-    def prepare_network_kwargs(
-        self,
-        args: argparse.Namespace,
-        train_dataset_group: Any,
-        network_module: Any,
-        net_kwargs: dict[str, Any],
-    ) -> dict[str, Any]:
-        has_control = any(getattr(dataset, "has_control", False) for dataset in train_dataset_group.datasets)
-        net_kwargs = dict(net_kwargs)
-        net_kwargs["hidream_has_control"] = str(has_control)
-        target = "I2I/control" if has_control else "T2I"
-        logger.info(f"HiDream-O1 LoRA target is selected from dataset: {target}")
-        return net_kwargs
 
     def process_sample_prompts(self, args: argparse.Namespace, accelerator: Accelerator, sample_prompts: str):
         return load_prompts(sample_prompts)
@@ -113,7 +111,7 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
             choices = ", ".join(name.lower() for name in enum_class.__members__.keys())
             raise ValueError(f"Invalid DINO model type '{model_type}'. Available choices: {choices}")
 
-    def _get_dino_loss_fn(self, args: argparse.Namespace, accelerator: Accelerator) -> torch.nn.Module:
+    def _get_dino_loss_fn(self, args: argparse.Namespace, device: torch.device) -> torch.nn.Module:
         if self.dino_loss_fn is not None:
             return self.dino_loss_fn
 
@@ -151,7 +149,7 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
                 'HiDream-O1 DINO auxiliary loss requires SenseCraft with DINOv3 support. Install it with: uv pip install ".[hidream_o1]"'
             ) from e
 
-        self.dino_loss_fn.requires_grad_(False).eval().to(accelerator.device)
+        self.dino_loss_fn.requires_grad_(False).eval().to(device)
         logger.info(
             "HiDream-O1 DINO auxiliary loss enabled: "
             "backend=%s, model_type=%s, layer=%s, feature_mode=%s, weight=%s, resize=%s, use_norm=%s, use_gram=%s",
@@ -303,7 +301,7 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
         dtype = dit_weight_dtype or torch.bfloat16
         model = hidream_o1_utils.load_model(dit_path, dtype=dtype, device=loading_device, model_type=args.model_type)
 
-        if getattr(args, "fp8_scaled", False):
+        if args.fp8_scaled:
             logger.info("Applying HiDream-O1 scaled fp8 optimization.")
             state_dict = model.state_dict()
             quant_device = accelerator.device
@@ -320,12 +318,45 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
             logger.info(f"Loaded HiDream-O1 scaled fp8 optimized weights: {info}")
 
         if not hasattr(model, "enable_gradient_checkpointing"):
-            model.enable_gradient_checkpointing = lambda cpu_offload=False: model.gradient_checkpointing_enable()
+            # The decoder loop passes keyword arguments to the checkpointed layer, which reentrant
+            # checkpointing rejects, so non-reentrant checkpointing must be requested explicitly.
+            model.enable_gradient_checkpointing = lambda cpu_offload=False: model.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs={"use_reentrant": False}
+            )
+
+        # The t2i dummy visual-encoder forward (Qwen3VLModel._forward_generation) exists only to keep FSDP
+        # grad collectives symmetric across t2i/i2i ranks. It runs every t2i step and includes .item() syncs,
+        # so it is pure overhead for single-process training. Allow skipping it (numerically a zero-add no-op).
+        if args.skip_t2i_visual_dummy:
+            inner = getattr(model, "model", None)
+            if inner is not None and hasattr(inner, "skip_t2i_visual_dummy"):
+                inner.skip_t2i_visual_dummy = True
+                logger.info("HiDream-O1: skipping t2i dummy visual-encoder forward (skip_t2i_visual_dummy=True).")
+
+        # Tag the model with the training task so the LoRA factory can pick target modules from it.
+        model.hidream_o1_task = args.task
 
         return model
 
     def compile_transformer(self, args, transformer):
-        return transformer
+        # HiDream-O1's transformer is a Qwen3VL model. The bulk of the compute is the language-model decoder
+        # stack (Qwen3VLTextDecoderLayer x N), which is a plain nn.ModuleList, so it compiles per-block exactly
+        # like every other architecture. The vision blocks only run for i2i / reference inputs and bring their
+        # own dynamic shapes, so they are intentionally left out of this minimal pass. disable_linear skips the
+        # Linear submodules that block swap moves between CPU/GPU mid-forward.
+        target_blocks = [transformer.model.language_model.layers]
+
+        # The decoder sequence length changes from step to step (variable-length text prefix + image-size
+        # buckets), so static compilation recompiles on nearly every step and is typically a net slowdown.
+        # dynamic=true is effectively required for usable performance here.
+        if args.compile_dynamic is None or args.compile_dynamic.lower() != "true":
+            logger.warning(
+                "HiDream-O1: --compile is enabled but --compile_dynamic is not 'true'. The decoder sequence length "
+                "varies per step (variable text length + image-size buckets), so static compilation will recompile "
+                "frequently and is likely to run slower than no compile. Pass --compile_dynamic true."
+            )
+
+        return model_utils.compile_transformer(args, transformer, target_blocks, disable_linear=self.blocks_to_swap > 0)
 
     def scale_shift_latents(self, latents):
         return latents
@@ -479,6 +510,29 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
         timesteps: torch.Tensor,
         network_dtype: torch.dtype,
     ):
+        # [DEBUG-TIMING] per-step timing/sync, gated by HIDREAM_TIMING=1 (off by default -> clean hot path, true GPU util)
+        _timing = os.environ.get("HIDREAM_TIMING") == "1"
+        if _timing:
+            self._dbg_fwd_time = 0.0
+            if accelerator.device.type == "cuda":
+                torch.cuda.synchronize(accelerator.device)
+            _t_call_dit = time.perf_counter()
+            _c_call_dit = time.process_time()  # process CPU time, to tell CPU-bound from GPU-wait
+
+        # [DEBUG-TIMING] optionally profile the forward on one step: HIDREAM_PROFILE=1 (HIDREAM_PROFILE_STEP=N, default 3)
+        self._dbg_step = getattr(self, "_dbg_step", 0) + 1
+        _do_profile = os.environ.get("HIDREAM_PROFILE") == "1" and self._dbg_step == int(
+            os.environ.get("HIDREAM_PROFILE_STEP", "3")
+        )
+        _prof = None
+        if _do_profile:
+            _prof = torch.profiler.profile(
+                activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+                record_shapes=False,
+                with_stack=False,
+            )
+            _prof.__enter__()
+
         model_config = accelerator.unwrap_model(transformer).config
         input_ids_list = batch["input_ids"]
         if torch.is_tensor(input_ids_list):
@@ -490,7 +544,6 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
             noisy_model_input.shape[0], height_patches * width_patches, noisy_model_input.shape[-1]
         )
 
-        model_preds = []
         input_embeds_list = batch.get("input_embeds", None)
         if torch.is_tensor(input_embeds_list):
             input_embeds_list = list(input_embeds_list)
@@ -504,6 +557,219 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
             [key for key in batch.keys() if key.startswith("latents_control")],
             key=lambda key: int(key.rsplit("_", 1)[-1]) if key.rsplit("_", 1)[-1].isdigit() else 0,
         )
+
+        # Validate the declared task against the data actually present in the batch.
+        if self._i2i_training and not control_keys:
+            raise ValueError(
+                "HiDream-O1 --task i2i was specified, but the dataset has no control data (latents_control_* "
+                "tensors). Add control images to the dataset, or use --task t2i."
+            )
+        if not self._i2i_training and control_keys:
+            raise ValueError(
+                "HiDream-O1 dataset provides control data (latents_control_* tensors), but --task is t2i. "
+                "Use --task i2i to train with control/reference images."
+            )
+
+        # Validate cache consistency once for every forward path (batched t2i, per-sample i2i, per-sample flash t2i):
+        # the control latents (pixel cache) and the VLM conditioning inputs (pixel_values/image_grid_thw in the text
+        # cache) must be present together or absent together. The batched path otherwise silently ignores stale
+        # pixel_values/image_grid_thw from an old i2i text cache and trains on placeholder tokens with no features.
+        if control_keys and (pixel_values_list is None or image_grid_thw_list is None):
+            raise ValueError(
+                "HiDream-O1 control pixel cache was found (latents_control_*), but the text cache has no "
+                "pixel_values/image_grid_thw. Rebuild the text encoder cache."
+            )
+        if not control_keys and (pixel_values_list is not None or image_grid_thw_list is not None):
+            raise ValueError(
+                "HiDream-O1 control text cache was found (pixel_values/image_grid_thw), but the pixel cache has no "
+                "latents_control_* tensors. Rebuild the pixel cache."
+            )
+
+        # The per-sample loop runs an effective batch size of 1 (one transformer forward per image),
+        # which makes the Linear layers launch-bound. For t2i we instead pad the variable-length text
+        # prefix to a common length, assemble one padded batch, and call the transformer once so the
+        # Linears see [B, L, D]. The flash path still assumes a uniform per-batch layout (idx_ar from
+        # token_types[0]), so it keeps the per-sample path until the split+trim+2-pass module lands.
+        use_batched_t2i = (not control_keys) and (not self.use_flash_attn)
+
+        # Block swap requires a single decoder forward+backward per step: the offloader's backward hooks restore the
+        # initial block placement, so a second forward in the same step starts with the front blocks already offloaded
+        # to CPU and crashes with a device mismatch. The batched t2i path runs one forward for the whole batch, so it is
+        # compatible with any batch size. The per-sample path (i2i / flash) still runs one forward per sample, so it
+        # remains restricted to batch_size=1 under block swap.
+        if self.blocks_to_swap and len(input_ids_list) > 1 and not use_batched_t2i:
+            raise ValueError(
+                "HiDream-O1 --blocks_to_swap with a dataset batch_size > 1 "
+                f"(got {len(input_ids_list)} samples) is only supported by the batched t2i path. "
+                "The i2i / flash path runs one transformer forward per sample, which is incompatible with block swap. "
+                "Set the dataset batch_size to 1, or train without --blocks_to_swap."
+            )
+
+        if use_batched_t2i:
+            device = accelerator.device
+            img_tokens = height_patches * width_patches
+            batch_size = len(input_ids_list)
+
+            # The text prefix is the only variable-length part; the image block is fixed within a bucket. txt_lens
+            # come straight from the cached text token ids (_build_layout_tensors returns the text unchanged), so the
+            # padded buffers can be sized up front and filled in a single pass without intermediate per-sample lists.
+            txt_lens = [input_ids.shape[-1] for input_ids in input_ids_list]
+            txt_max = max(txt_lens)
+            total_len = txt_max + img_tokens
+
+            # Padded-batch layout per sample: [text(0:t)] [padding(t:txt_max)] [image(txt_max:total_len)].
+            # position_ids keep each sample's original image position *values* (continuing from t), so the
+            # text<->image relative distances match the unbatched forward; padding is masked via attn_validity.
+            # token_types is long to match _build_layout_tensors (it casts token_types to the input_ids dtype).
+            input_ids_pad = torch.zeros((batch_size, txt_max), dtype=torch.long, device=device)
+            position_ids = torch.ones((3, batch_size, total_len), dtype=torch.long, device=device)
+            token_types = torch.zeros((batch_size, total_len), dtype=torch.long, device=device)
+            vinput_mask = torch.zeros((batch_size, total_len), dtype=torch.bool, device=device)
+            attn_validity = torch.zeros((batch_size, total_len), dtype=torch.long, device=device)
+            input_embeds = None
+            if input_embeds_list is not None:
+                input_embeds = torch.zeros(
+                    (batch_size, txt_max, input_embeds_list[0].shape[-1]), dtype=network_dtype, device=device
+                )
+
+            for i, input_ids in enumerate(input_ids_list):
+                # Per-sample layout (tensor construction only, no model forward), scattered into the padded buffers.
+                input_ids_b, position_ids_i, token_types_i, vinput_mask_i = self._build_layout_tensors(
+                    input_ids,
+                    height_patches,
+                    width_patches,
+                    model_config,
+                    device,
+                    control_patch_shapes=[],
+                    processor_image_grid_thw=None,
+                )
+                t = txt_lens[i]
+                input_ids_pad[i, :t] = input_ids_b[0]
+                position_ids[:, i, :t] = position_ids_i[:, 0, :t]
+                position_ids[:, i, txt_max:] = position_ids_i[:, 0, t:]
+                token_types[i, :t] = token_types_i[0, :t]
+                token_types[i, txt_max:] = token_types_i[0, t:]
+                vinput_mask[i, :t] = vinput_mask_i[0, :t]
+                vinput_mask[i, txt_max:] = vinput_mask_i[0, t:]
+                attn_validity[i, :t] = 1
+                attn_validity[i, txt_max:] = 1
+                if input_embeds is not None:
+                    input_embeds[i, :t] = input_embeds_list[i].to(device=device, dtype=network_dtype)
+
+            vinputs = noisy_model_input_seq.to(device=device, dtype=network_dtype)  # [B, img_tokens, D]
+            if args.gradient_checkpointing:
+                vinputs.requires_grad_(True)
+
+            raw_timestep = timesteps.to(device=device, dtype=network_dtype)
+            if args.timestep_sampling in NOISE_COEFFICIENT_TIMESTEP_SAMPLINGS:
+                timestep = ((1001.0 - raw_timestep) / 1000.0).clamp(0.0, 1.0).reshape(-1)
+            else:
+                timestep = (1.0 - raw_timestep / 1000.0).clamp(0.0, 1.0).reshape(-1)
+
+            if _timing:
+                _t_fwd = time.perf_counter()
+            with accelerator.autocast():
+                outputs = transformer(
+                    input_ids=input_ids_pad,
+                    inputs_embeds=input_embeds,
+                    position_ids=position_ids,
+                    vinputs=vinputs,
+                    timestep=timestep,
+                    token_types=token_types,
+                    pixel_values=None,
+                    image_grid_thw=None,
+                    attention_mask=attn_validity,
+                    use_flash_attn=self.use_flash_attn,
+                )
+            if _timing:
+                if accelerator.device.type == "cuda":
+                    torch.cuda.synchronize(accelerator.device)
+                self._dbg_fwd_time += time.perf_counter() - _t_fwd
+
+            # Each row has exactly img_tokens gen positions; gather them back to [B, img_tokens, out_dim].
+            model_pred = outputs.x_pred[vinput_mask].reshape(batch_size, img_tokens, -1)
+            target = latents_seq.to(device=accelerator.device, dtype=network_dtype)
+
+            # Stash the pixel patch grid so compute_loss can unpatchify pred/target back to RGB for the
+            # DINO auxiliary loss without needing the latents tensor itself.
+            dit_output = DiTOutput(pred=model_pred, target=target, extra={"pixel_grid_hw": (height_patches, width_patches)})
+        else:
+            dit_output = self._call_dit_per_sample(
+                args,
+                accelerator,
+                transformer,
+                model_config,
+                batch,
+                latents_seq,
+                noisy_model_input_seq,
+                timesteps,
+                network_dtype,
+                input_ids_list,
+                input_embeds_list,
+                pixel_values_list,
+                image_grid_thw_list,
+                control_keys,
+                height_patches,
+                width_patches,
+            )
+
+        # [DEBUG-TIMING] dump profiler tables for this one step (HIDREAM_PROFILE=1)
+        if _prof is not None:
+            if accelerator.device.type == "cuda":
+                torch.cuda.synchronize(accelerator.device)
+            _prof.__exit__(None, None, None)
+            ka = _prof.key_averages()
+            logger.info("[HiDream-O1 profile] top ops by self CPU time:\n%s", ka.table(sort_by="self_cpu_time_total", row_limit=25))
+            logger.info(
+                "[HiDream-O1 profile] top ops by self CUDA time:\n%s", ka.table(sort_by="self_cuda_time_total", row_limit=25)
+            )
+
+        # [DEBUG-TIMING] decompose call_dit into forward (GPU) vs CPU prep, plus CPU-vs-wall (HIDREAM_TIMING=1)
+        if _timing:
+            if accelerator.device.type == "cuda":
+                torch.cuda.synchronize(accelerator.device)
+            _dit_ms = (time.perf_counter() - _t_call_dit) * 1000.0
+            _cpu_ms = (time.process_time() - _c_call_dit) * 1000.0
+            _fwd_ms = self._dbg_fwd_time * 1000.0
+            _prep_ms = _dit_ms - _fwd_ms  # everything that is not the transformer forward
+            logger.info(
+                "[HiDream-O1 timing] batch=%d res=%dx%d patches | call_dit=%.1fms (cpu=%.1fms) | "
+                "fwd(sync)=%.1fms (%.0f%%) | prep/other=%.1fms (%.0f%%)",
+                len(input_ids_list),
+                height_patches,
+                width_patches,
+                _dit_ms,
+                _cpu_ms,
+                _fwd_ms,
+                (_fwd_ms / _dit_ms * 100.0) if _dit_ms > 0 else 0.0,
+                _prep_ms,
+                (_prep_ms / _dit_ms * 100.0) if _dit_ms > 0 else 0.0,
+            )
+
+        return dit_output
+
+    def _call_dit_per_sample(
+        self,
+        args,
+        accelerator,
+        transformer,
+        model_config,
+        batch,
+        latents_seq,
+        noisy_model_input_seq,
+        timesteps,
+        network_dtype,
+        input_ids_list,
+        input_embeds_list,
+        pixel_values_list,
+        image_grid_thw_list,
+        control_keys,
+        height_patches,
+        width_patches,
+    ):
+        # Effective batch size 1: one transformer forward per image. Used for i2i (control data, whose
+        # visual-encoder batching is deferred) and the flash path. Kept verbatim from the original loop.
+        model_preds = []
         for i, input_ids in enumerate(input_ids_list):
             control_patch_shapes = []
             control_sequences = []
@@ -512,17 +778,7 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
                 control_patch_shapes.append((control.shape[0], control.shape[1]))
                 control_sequences.append(control.reshape(1, control.shape[0] * control.shape[1], control.shape[-1]))
 
-            if control_sequences and (pixel_values_list is None or image_grid_thw_list is None):
-                raise ValueError(
-                    "HiDream-O1 control pixel cache was found, but text cache has no pixel_values/image_grid_thw. "
-                    "Rebuild the text encoder cache."
-                )
-            if not control_sequences and (pixel_values_list is not None or image_grid_thw_list is not None):
-                raise ValueError(
-                    "HiDream-O1 control text cache was found, but pixel cache has no latents_control_* tensors. "
-                    "Rebuild the pixel cache."
-                )
-
+            # Cache consistency (control latents <-> pixel_values/image_grid_thw) is validated once in call_dit.
             processor_image_grid_thw = None
             if image_grid_thw_list is not None:
                 processor_image_grid_thw = image_grid_thw_list[i]
@@ -559,6 +815,9 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
             if image_grid_thw_list is not None:
                 image_grid_thw = image_grid_thw_list[i].to(device=accelerator.device, dtype=torch.int64)
 
+            _timing = os.environ.get("HIDREAM_TIMING") == "1"
+            if _timing:
+                _t_fwd = time.perf_counter()
             with accelerator.autocast():
                 outputs = transformer(
                     input_ids=input_ids,
@@ -571,60 +830,85 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
                     image_grid_thw=image_grid_thw,
                     use_flash_attn=self.use_flash_attn,
                 )
+            if _timing:
+                if accelerator.device.type == "cuda":
+                    torch.cuda.synchronize(accelerator.device)
+                self._dbg_fwd_time = getattr(self, "_dbg_fwd_time", 0.0) + (time.perf_counter() - _t_fwd)
 
             pred = outputs.x_pred[0, vinput_mask[0]][: latents_seq.shape[1]].unsqueeze(0)
             model_preds.append(pred)
 
         model_pred = torch.cat(model_preds, dim=0)
         target = latents_seq.to(device=accelerator.device, dtype=network_dtype)
-        return model_pred, target
+        # Stash the pixel patch grid so compute_loss can unpatchify pred/target back to RGB for the
+        # DINO auxiliary loss without needing the latents tensor itself.
+        return DiTOutput(pred=model_pred, target=target, extra={"pixel_grid_hw": (height_patches, width_patches)})
+
+    def compute_loss(
+        self,
+        args: argparse.Namespace,
+        output: DiTOutput,
+        timesteps: torch.Tensor,
+        noise_scheduler,
+        dit_dtype: torch.dtype,
+        network_dtype: torch.dtype,
+        global_step: int,
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        loss, metrics = super().compute_loss(args, output, timesteps, noise_scheduler, dit_dtype, network_dtype, global_step)
+        loss, dino_logs = self.apply_dino_loss(args, loss, output.pred, output.target, output.extra["pixel_grid_hw"], global_step)
+        if dino_logs:
+            metrics = {**metrics, **dino_logs}
+        return loss, metrics
 
     def prepare_dino_loss_images(
         self,
-        args: argparse.Namespace,
         model_pred: torch.Tensor,
         target: torch.Tensor,
-        batch: dict[str, torch.Tensor],
-        latents: torch.Tensor,
-        timesteps: torch.Tensor,
-        network_dtype: torch.dtype,
+        pixel_grid_hw: tuple[int, int],
     ) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
-        if model_pred.ndim == 3 and target.ndim == 3 and latents.ndim == 4:
-            height = latents.shape[1] * hidream_o1_utils.PATCH_SIZE
-            width = latents.shape[2] * hidream_o1_utils.PATCH_SIZE
-            pred_images = hidream_o1_utils.unpatchify_pixels(model_pred, height, width)
-            target_images = hidream_o1_utils.unpatchify_pixels(target, height, width)
-            return pred_images, target_images
+        if model_pred.ndim != 3 or target.ndim != 3:
+            return None
+        height_patches, width_patches = pixel_grid_hw
+        height = height_patches * hidream_o1_utils.PATCH_SIZE
+        width = width_patches * hidream_o1_utils.PATCH_SIZE
+        pred_images = hidream_o1_utils.unpatchify_pixels(model_pred, height, width)
+        target_images = hidream_o1_utils.unpatchify_pixels(target, height, width)
+        return pred_images, target_images
 
-        return None
-
-    def apply_auxiliary_losses(
+    def apply_dino_loss(
         self,
         args: argparse.Namespace,
-        accelerator: Accelerator,
         loss: torch.Tensor,
         model_pred: torch.Tensor,
         target: torch.Tensor,
-        batch: dict[str, torch.Tensor],
-        latents: torch.Tensor,
-        timesteps: torch.Tensor,
-        network_dtype: torch.dtype,
+        pixel_grid_hw: tuple[int, int],
         global_step: int,
-    ) -> torch.Tensor:
-        self._latest_aux_loss_logs = {}
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        """Add the optional SenseCraft DINOv3 perceptual loss to ``loss``.
+
+        Shared by the LoRA trainer (via ``compute_loss``) and the full-finetune
+        loop. Returns ``(possibly_augmented_loss, logs)``; ``logs`` is empty when
+        the DINO term is disabled or skipped for this step.
+
+        The DINO perceptual loss is not inherently HiDream-O1 specific and could
+        in principle be reused by other architectures; it is scoped to HiDream-O1
+        here to keep the surface area small. If a second consumer appears, this
+        helper (and ``prepare_dino_loss_images`` / RGB reconstruction) is a
+        candidate to lift into shared training infrastructure.
+        """
         if args.dino_loss_weight <= 0:
-            return loss
+            return loss, {}
         if args.dino_loss_every_n_steps < 1:
             raise ValueError("--dino_loss_every_n_steps must be >= 1")
         if args.dino_loss_every_n_steps > 1 and global_step % args.dino_loss_every_n_steps != 0:
-            return loss
+            return loss, {}
 
-        images = self.prepare_dino_loss_images(args, model_pred, target, batch, latents, timesteps, network_dtype)
+        images = self.prepare_dino_loss_images(model_pred, target, pixel_grid_hw)
         if images is None:
             raise ValueError(
                 "HiDream-O1 DINO auxiliary loss is enabled, but RGB image tensors could not be prepared. "
                 f"model_pred shape={tuple(model_pred.shape)}, target shape={tuple(target.shape)}, "
-                f"latents shape={tuple(latents.shape)}."
+                f"pixel_grid_hw={pixel_grid_hw}."
             )
 
         pred_images, target_images = images
@@ -636,7 +920,7 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
             pred_images = torch.nn.functional.interpolate(pred_images, size=size, mode="bilinear", align_corners=False)
             target_images = torch.nn.functional.interpolate(target_images, size=size, mode="bilinear", align_corners=False)
 
-        dino_loss_fn = self._get_dino_loss_fn(args, accelerator)
+        dino_loss_fn = self._get_dino_loss_fn(args, model_pred.device)
         if args.dino_loss_backend == "vit" and args.dino_loss_feature_mode != "all":
             dino_loss = self._compute_vit_dino_feature_loss(
                 dino_loss_fn,
@@ -651,16 +935,24 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
         weighted_dino_loss = dino_loss * args.dino_loss_weight
         total_loss = loss + weighted_dino_loss.to(dtype=loss.dtype)
 
-        self._latest_aux_loss_logs = {
+        logs = {
             "loss/base": float(loss.detach().item()),
             "loss/dino": float(dino_loss.detach().item()),
             "loss/dino_weighted": float(weighted_dino_loss.detach().item()),
         }
-        return total_loss
+        return total_loss, logs
 
 
 def hidream_o1_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--model_type", type=str, default="full", choices=["full", "dev"], help="HiDream-O1 model variant")
+    parser.add_argument(
+        "--task",
+        type=str,
+        default="t2i",
+        choices=["t2i", "i2i"],
+        help="HiDream-O1 training task: 't2i' (text-to-image) or 'i2i' (image/control-conditioned). "
+        "'i2i' makes the visual encoder trainable and adds the visual modules to the LoRA target.",
+    )
     parser.add_argument(
         "--noise_scale_start",
         type=float,
@@ -683,6 +975,12 @@ def hidream_o1_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argumen
         "--fp8_scaled",
         action="store_true",
         help="use scaled fp8 for HiDream-O1 DiT weights / HiDream-O1 DiTにスケーリングされたfp8を使う",
+    )
+    parser.add_argument(
+        "--skip_t2i_visual_dummy",
+        action="store_true",
+        help="skip the t2i dummy visual-encoder forward (needed only for FSDP grad symmetry). "
+        "Removes per-step overhead and .item() syncs in single-process t2i training.",
     )
     parser.add_argument(
         "--dino_loss_weight",
