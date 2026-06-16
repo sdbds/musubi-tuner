@@ -201,6 +201,14 @@ def _add_training_args(parser: argparse.ArgumentParser) -> None:
         choices=["no", "fp16", "bf16"],
         help="use mixed precision / 混合精度を使う場合、その精度",
     )
+    parser.add_argument(
+        "--save_precision",
+        type=str,
+        default=None,
+        choices=["float", "fp32", "fp16", "bf16"],
+        help="precision for saving network weights, default: fp32 (the precision network weights are trained in)"
+        " / ネットワークの重みを保存する際の精度、省略時はfp32（ネットワークの重みはfp32で学習されるため）",
+    )
 
 
 def _add_logging_args(parser: argparse.ArgumentParser) -> None:
@@ -391,6 +399,21 @@ def _add_memory_args(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="use pinned memory for block swapping, which may speed up data transfer between CPU and GPU but uses more shared GPU memory on Windows"
         " / ブロックスワッピングにピン留めメモリを使用する。これによりCPUとGPU間のデータ転送が高速化される可能性があるが、Windowsではより多くの共有GPUメモリを使用する。",
+    )
+    parser.add_argument(
+        "--block_swap_h2d_only",
+        action="store_true",
+        help="(experimental, frozen-base / LoRA training only) use H2D-only block swap:"
+        " keep a CPU master copy of streamed weights and only copy Host->Device, never back. Removes the D2H transfer."
+        " / (実験的、ベース凍結＝LoRA学習専用) H2DのみのブロックスワップでD2H転送を行わない。",
+    )
+    parser.add_argument(
+        "--block_swap_ring_size",
+        type=int,
+        default=2,
+        help="(used with --block_swap_h2d_only) number of GPU ring buffers for streamed blocks. 2 = double buffering"
+        " (one computed on, one prefetched); 1 = minimal memory but no transfer/compute overlap."
+        " / (--block_swap_h2d_only用) ストリーミング用GPUリングバッファ数。2でダブルバッファ、1で最小メモリ(オーバーラップなし)。",
     )
     parser.add_argument(
         "--img_in_txt_in_offloading",

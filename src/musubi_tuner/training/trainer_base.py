@@ -39,6 +39,7 @@ from diffusers.optimization import (
 from transformers.optimization import SchedulerType, TYPE_TO_SCHEDULER_FUNCTION
 
 from musubi_tuner.dataset import config_utils
+from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig
 from musubi_tuner.modules.lr_schedulers import RexLR
 from musubi_tuner.modules.scheduling_flow_match_discrete import FlowMatchDiscreteScheduler
 import musubi_tuner.networks.lora as lora_module
@@ -1531,12 +1532,12 @@ class NetworkTrainer:
         transformer.requires_grad_(False)
 
         if blocks_to_swap > 0:
+            swap_config = BlockSwapConfig.from_args(args, accelerator.device, supports_backward=True)
             logger.info(
-                f"enable swap {blocks_to_swap} blocks to CPU from device: {accelerator.device}, use pinned memory: {args.use_pinned_memory_for_block_swap}"
+                f"enable swap {blocks_to_swap} blocks to CPU from device: {accelerator.device}, "
+                f"use pinned memory: {swap_config.use_pinned_memory}, H2D-only: {swap_config.h2d_only}"
             )
-            transformer.enable_block_swap(
-                blocks_to_swap, accelerator.device, supports_backward=True, use_pinned_memory=args.use_pinned_memory_for_block_swap
-            )
+            transformer.enable_block_swap(blocks_to_swap, swap_config)
             transformer.move_to_device_except_swap_blocks(accelerator.device)
         return transformer
 
@@ -1939,7 +1940,13 @@ class NetworkTrainer:
         del train_dataset_group
 
         # function for saving/removing
-        save_dtype = dit_dtype
+        save_dtype = train_utils.resolve_save_dtype(
+            args.save_precision, getattr(args, "full_fp16", False), getattr(args, "full_bf16", False)
+        )
+        logger.info(
+            f"network weights will be saved as {save_dtype}"
+            + (f" (--save_precision {args.save_precision})" if args.save_precision is not None else " (default)")
+        )
 
         def save_model(ckpt_name: str, unwrapped_nw, steps, epoch_no, force_sync_upload=False):
             os.makedirs(args.output_dir, exist_ok=True)
