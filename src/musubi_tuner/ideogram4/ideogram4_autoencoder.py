@@ -339,7 +339,7 @@ class AutoEncoder(nn.Module):
     mean = torch.chunk(moments, 2, dim=1)[0]
     return rearrange(
       mean,
-      "... c (i pi) (j pj) -> ... (c pi pj) i j",
+      "... c (i pi) (j pj) -> ... (pi pj c) i j",
       pi=self.ps[0],
       pj=self.ps[1],
     )
@@ -347,7 +347,7 @@ class AutoEncoder(nn.Module):
   def decode(self, z: Tensor) -> Tensor:
     z = rearrange(
       z,
-      "... (c pi pj) i j -> ... c (i pi) (j pj)",
+      "... (pi pj c) i j -> ... c (i pi) (j pj)",
       pi=self.ps[0],
       pj=self.ps[1],
     )
