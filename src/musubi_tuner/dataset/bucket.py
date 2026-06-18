@@ -28,6 +28,7 @@ from musubi_tuner.dataset.architectures import (
     ARCHITECTURE_Z_IMAGE,
 )
 from musubi_tuner.dataset.media_utils import divisible_by
+from musubi_tuner.longcat_video.text_utils import collate_longcat_text_encoder
 from musubi_tuner.utils.model_utils import remove_dtype_suffix
 
 if TYPE_CHECKING:
@@ -253,7 +254,12 @@ class BucketBatchManager:
         varlen_keys = set()
         for item_info in bucket[start:end]:
             sd_latent = load_file(item_info.latent_cache_path)
-            sd_te = load_file(item_info.text_encoder_output_cache_path)
+            if self.architecture == ARCHITECTURE_LENS:
+                from musubi_tuner.lens.lens_text_cache import load_lens_text_cache
+
+                sd_te = load_lens_text_cache(item_info.text_encoder_output_cache_path)
+            else:
+                sd_te = load_file(item_info.text_encoder_output_cache_path)
             sd = {**sd_latent, **sd_te}
 
             # TODO refactor this

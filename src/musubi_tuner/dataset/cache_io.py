@@ -486,17 +486,11 @@ def save_text_encoder_output_cache_hidream_o1(
     save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_HIDREAM_O1_FULL, merge_existing=False)
 
 
-def save_text_encoder_output_cache_lens(item_info: ItemInfo, embeds: list[torch.Tensor]):
+def save_text_encoder_output_cache_lens(item_info: ItemInfo, embeds: list[torch.Tensor], cache_precision: str = "auto"):
     """Lens architecture. Saves selected GPT-OSS layer features as varlen tensors."""
-    assert len(embeds) > 0, "embeds should not be empty"
+    from musubi_tuner.lens.lens_text_cache import save_lens_text_cache
 
-    sd = {}
-    for i, embed in enumerate(embeds):
-        assert embed.dim() == 2, f"embed should be 2D tensor (feature, hidden_size), got {embed.shape}"
-        dtype_str = dtype_to_str(embed.dtype)
-        sd[f"varlen_lens_ctx_{i}_{dtype_str}"] = embed.detach().cpu()
-
-    save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_LENS_FULL)
+    save_lens_text_cache(item_info, embeds, cache_precision)
 
 
 def save_text_encoder_output_cache_ideogram4(item_info: ItemInfo, features: torch.Tensor, cache_dtype: str):
