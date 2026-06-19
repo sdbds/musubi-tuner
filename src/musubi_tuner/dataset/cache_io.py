@@ -460,6 +460,15 @@ def save_text_encoder_output_cache_z_image(item_info: ItemInfo, embed: torch.Ten
     save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_Z_IMAGE_FULL)
 
 
+def save_text_encoder_output_cache_ideogram4(item_info: ItemInfo, features: torch.Tensor):
+    """Ideogram 4 architecture."""
+    sd = {}
+    dtype_str = dtype_to_str(features.dtype)
+    sd[f"varlen_i4_llm_features_{dtype_str}"] = features.detach().cpu()
+
+    save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_IDEOGRAM4_FULL)
+
+
 def save_text_encoder_output_cache_hidream_o1(
     item_info: ItemInfo,
     input_ids: torch.Tensor,

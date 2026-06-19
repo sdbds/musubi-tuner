@@ -118,10 +118,17 @@ class LoRAModule(torch.nn.Module):
             return x.to(target_dtype)
         return x
 
-    def _match_org_dtype(self, delta, org_forwarded):
-        if delta.is_floating_point() and org_forwarded.is_floating_point() and delta.dtype != org_forwarded.dtype:
-            return delta.to(org_forwarded.dtype)
-        return delta
+    def _match_org_dtype(self, value, org_forwarded):
+        """Round ``value`` to the base output dtype.
+
+        Used to bring the LoRA-augmented output back to ``org_forwarded``'s dtype in the
+        autocast-free mixed-dtype regime (e.g. fp32 LoRA on a bf16 base). Callers pass the
+        full ``org_forwarded + delta`` sum here so the (possibly higher-precision) delta is
+        kept through the addition and the result is rounded only once. A no-op when dtypes
+        already match (autocast-on / all-fp32 regimes)."""
+        if value.is_floating_point() and org_forwarded.is_floating_point() and value.dtype != org_forwarded.dtype:
+            return value.to(org_forwarded.dtype)
+        return value
 
     def apply_to(self):
         self.org_forward = self.org_module.forward
@@ -162,8 +169,8 @@ class LoRAModule(torch.nn.Module):
 
             lx = self.lora_up(lx)
 
-            delta = self._match_org_dtype(lx * self.multiplier * scale, org_forwarded)
-            return org_forwarded + delta
+            # Add in the (possibly higher-precision) delta dtype, then round the sum once.
+            return self._match_org_dtype(org_forwarded + lx * self.multiplier * scale, org_forwarded)
         else:
             lxs = [lora_down(lora_input) for lora_down in self.lora_down]
 
@@ -188,8 +195,8 @@ class LoRAModule(torch.nn.Module):
 
             lxs = [lora_up(lx) for lora_up, lx in zip(self.lora_up, lxs)]
 
-            delta = self._match_org_dtype(torch.cat(lxs, dim=-1) * self.multiplier * scale, org_forwarded)
-            return org_forwarded + delta
+            # Add in the (possibly higher-precision) delta dtype, then round the sum once.
+            return self._match_org_dtype(org_forwarded + torch.cat(lxs, dim=-1) * self.multiplier * scale, org_forwarded)
 
 
 class LoRAInfModule(LoRAModule):
@@ -339,14 +346,14 @@ class LoRAInfModule(LoRAModule):
             lx = self.lora_down(lora_input)
             lx = self.lora_up(lx)
             org_forwarded = self.org_forward(x)
-            delta = self._match_org_dtype(lx * self.multiplier * self.scale, org_forwarded)
-            return org_forwarded + delta
+            # Add in the (possibly higher-precision) delta dtype, then round the sum once.
+            return self._match_org_dtype(org_forwarded + lx * self.multiplier * self.scale, org_forwarded)
         else:
             lxs = [lora_down(lora_input) for lora_down in self.lora_down]
             lxs = [lora_up(lx) for lora_up, lx in zip(self.lora_up, lxs)]
             org_forwarded = self.org_forward(x)
-            delta = self._match_org_dtype(torch.cat(lxs, dim=-1) * self.multiplier * self.scale, org_forwarded)
-            return org_forwarded + delta
+            # Add in the (possibly higher-precision) delta dtype, then round the sum once.
+            return self._match_org_dtype(org_forwarded + torch.cat(lxs, dim=-1) * self.multiplier * self.scale, org_forwarded)
 
     def forward(self, x):
         if not self.enabled:
@@ -402,7 +409,6 @@ def create_network(
     neuron_dropout: Optional[float] = None,
     module_class: Type[object] = None,
     module_kwargs: Optional[Dict[str, Any]] = None,
-    linear_module_class_names: Optional[tuple[str, ...]] = None,
     **kwargs,
 ):
     """architecture independent network creation"""
@@ -463,7 +469,6 @@ def create_network(
         conv_alpha=conv_alpha,
         module_class=module_class,
         module_kwargs=module_kwargs,
-        linear_module_class_names=linear_module_class_names,
         exclude_patterns=exclude_patterns,
         include_patterns=include_patterns,
         verbose=verbose,
@@ -502,7 +507,6 @@ class LoRANetwork(torch.nn.Module):
         module_kwargs: Optional[Dict[str, Any]] = None,
         modules_dim: Optional[Dict[str, int]] = None,
         modules_alpha: Optional[Dict[str, int]] = None,
-        linear_module_class_names: Optional[tuple[str, ...]] = None,
         exclude_patterns: Optional[List[str]] = None,
         include_patterns: Optional[List[str]] = None,
         verbose: Optional[bool] = False,
@@ -520,7 +524,6 @@ class LoRANetwork(torch.nn.Module):
         self.target_replace_modules = target_replace_modules
         self.prefix = prefix
         self.module_kwargs = module_kwargs or {}
-        self.linear_module_class_names = linear_module_class_names or ("Linear",)
 
         self.loraplus_lr_ratio = None
         # self.loraplus_unet_lr_ratio = None
@@ -578,7 +581,7 @@ class LoRANetwork(torch.nn.Module):
                         module = root_module  # search all modules
 
                     for child_name, child_module in module.named_modules():
-                        is_linear = child_module.__class__.__name__ in self.linear_module_class_names
+                        is_linear = child_module.__class__.__name__ == "Linear"
                         is_conv2d = child_module.__class__.__name__ == "Conv2d"
                         is_conv3d = child_module.__class__.__name__ == "Conv3d"
                         is_conv2d_1x1 = is_conv2d and child_module.kernel_size == (1, 1)
@@ -974,7 +977,6 @@ def create_network_from_weights(
     for_inference: bool = False,
     module_class: Optional[Type[object]] = None,
     module_kwargs: Optional[Dict[str, Any]] = None,
-    linear_module_class_names: Optional[tuple[str, ...]] = None,
     **kwargs,
 ) -> LoRANetwork:
     # get dim/alpha mapping
@@ -1005,6 +1007,5 @@ def create_network_from_weights(
         modules_alpha=modules_alpha,
         module_class=module_class,
         module_kwargs=module_kwargs,
-        linear_module_class_names=linear_module_class_names,
     )
     return network

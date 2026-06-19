@@ -1,5 +1,4 @@
 import argparse
-from contextlib import nullcontext
 import gc
 import logging
 from typing import Optional
@@ -39,6 +38,10 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
     def __init__(self):
         super().__init__()
         self.unconditional_transformer = None
+        # Attention backend selected for the conditional DiT, reused for the unconditional DiT so both
+        # share the same attention path during asymmetric-CFG LoRA sampling.
+        self._attn_mode = "torch"
+        self._split_attn = False
 
     @property
     def architecture(self) -> str:
@@ -57,6 +60,10 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
             raise ValueError("--blocks_to_swap for Ideogram 4 must be <= 33")
         if args.sample_prompts and (args.text_encoder is None or args.vae is None):
             raise ValueError("--sample_prompts for Ideogram 4 requires --text_encoder and --vae")
+        # compute_loss() uses a plain mean MSE and intentionally ignores the SD3 timestep
+        # weighting, so reject a non-default --weighting_scheme rather than silently dropping it.
+        if args.weighting_scheme != "none":
+            raise ValueError("Ideogram 4 currently supports --weighting_scheme none only.")
 
     def process_sample_prompts(
         self,
@@ -127,6 +134,8 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
                 dtype=dit_dtype,
                 expected_model_type=ideogram4_utils.IDEOGRAM4_UNCOND_MODEL_TYPE,
                 disable_mmap=args.disable_numpy_memmap,
+                attn_mode=self._attn_mode,
+                split_attn=self._split_attn,
             )
 
     def on_after_sample_images(
@@ -178,31 +187,25 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
         vae.to(accelerator.device)
         vae.eval()
         conditional_transformer = accelerator.unwrap_model(transformer, keep_fp32_wrapper=False)
-        # The shared trainer wraps sampling in accelerator.autocast(), but
-        # the prepared transformer also carries Accelerate's mixed-precision
-        # forward wrapper. Ideogram 4 FP8 modules already manage their compute
-        # dtype internally, so sampling must use the unwrapped model and disable
-        # autocast; otherwise samples collapse into a flat checkerboard.
-        autocast_context = (
-            torch.autocast(device_type=accelerator.device.type, enabled=False)
-            if accelerator.device.type in ("cuda", "cpu", "xpu", "hpu")
-            else nullcontext()
+        # Sampling runs under the caller's accelerator.autocast() (see NetworkTrainer.sample_images), so
+        # it follows --mixed_precision exactly like training's call_dit(). This used to force autocast off
+        # to dodge a checkerboard, but the real cause was Ideogram4MRoPE losing precision under autocast;
+        # now that MRoPE pins its frequency matmul to fp32, autocast sampling is safe and we let the
+        # mixed-precision regime match between training and sampling.
+        images = ideogram4_utils.generate_images(
+            conditional_transformer=conditional_transformer,
+            unconditional_transformer=self.unconditional_transformer,
+            autoencoder=vae,
+            text_features=[features],
+            unconditional_text_features=[unconditional_features] if unconditional_features is not None else None,
+            height=height,
+            width=width,
+            sampler_preset=sampler_preset,
+            device=accelerator.device,
+            seed=sample_parameter.get("seed", None),
+            show_progress=True,
+            initial_sigma=args.initial_sigma,
         )
-        with autocast_context:
-            images = ideogram4_utils.generate_images(
-                conditional_transformer=conditional_transformer,
-                unconditional_transformer=self.unconditional_transformer,
-                autoencoder=vae,
-                text_features=[features],
-                unconditional_text_features=[unconditional_features] if unconditional_features is not None else None,
-                height=height,
-                width=width,
-                sampler_preset=sampler_preset,
-                device=accelerator.device,
-                seed=sample_parameter.get("seed", None),
-                show_progress=True,
-                initial_sigma=args.initial_sigma,
-            )
         arr = np.asarray(images[0]).astype(np.float32) / 255.0
         tensor = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0).unsqueeze(2)
         return tensor
@@ -229,61 +232,109 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
         loading_device: str,
         dit_weight_dtype: Optional[torch.dtype],
     ):
-        del accelerator, attn_mode, split_attn, dit_weight_dtype
+        del accelerator, dit_weight_dtype
+        self._attn_mode = attn_mode
+        self._split_attn = split_attn
         return ideogram4_utils.load_ideogram4_transformer(
             dit_path,
             device=loading_device,
             dtype=model_utils.str_to_dtype(args.dit_dtype),
             expected_model_type=ideogram4_utils.IDEOGRAM4_COND_MODEL_TYPE,
             disable_mmap=args.disable_numpy_memmap,
+            attn_mode=attn_mode,
+            split_attn=split_attn,
         )
 
     def compile_transformer(self, args, transformer):
         return model_utils.compile_transformer(args, transformer, [transformer.layers], disable_linear=self.blocks_to_swap > 0)
 
     def scale_shift_latents(self, latents):
-        return latents
+        # Transform raw VAE latents into the model's normalized token-grid space
+        # (per-channel (latents - shift) / scale). This is the designated latents-transform
+        # hook (cf. Z-Image), called by the base training loop before noise sampling, so the
+        # base process_batch can build the noisy input directly in model space. Keeping the
+        # transform here lets this trainer override only call_dit and compute_loss instead of
+        # reimplementing the whole batch flow.
+        return ideogram4_utils.normalize_token_grid(latents)
 
-    def process_batch(
+    def call_dit(
         self,
         args: argparse.Namespace,
         accelerator: Accelerator,
         transformer,
-        network,
-        batch: dict[str, torch.Tensor],
         latents: torch.Tensor,
+        batch: dict[str, torch.Tensor],
         noise: torch.Tensor,
+        noisy_model_input: torch.Tensor,
+        timesteps: torch.Tensor,
+        network_dtype: torch.dtype,
+        **kwargs,
+    ) -> DiTOutput:
+        del kwargs
+        model = transformer
+        bsize, _, grid_h, grid_w = noisy_model_input.shape
+        text_features = [x.to(dtype=network_dtype) for x in batch["i4_llm_features"]]
+        image_height = grid_h * ideogram4_utils.IDEOGRAM4_IMAGE_PATCH
+        image_width = grid_w * ideogram4_utils.IDEOGRAM4_IMAGE_PATCH
+        inputs = ideogram4_utils.build_sequence_inputs_from_features(
+            text_features, image_height, image_width, device=accelerator.device
+        )
+
+        image_tokens = ideogram4_utils.flatten_token_grid(noisy_model_input).to(device=accelerator.device, dtype=network_dtype)
+        text_padding = torch.zeros(
+            bsize,
+            int(inputs["max_text_tokens"]),
+            model.config.in_channels,
+            dtype=network_dtype,
+            device=accelerator.device,
+        )
+        x = torch.cat([image_tokens, text_padding], dim=1)
+        llm_features = inputs["llm_features"].to(dtype=network_dtype)
+        if args.gradient_checkpointing:
+            x.requires_grad_(True)
+            llm_features.requires_grad_(True)
+
+        # Training samples use t=0 as clean and t=1 as noise. The Ideogram 4
+        # transformer uses the inverse convention: t=0 is noise and t=1 is clean.
+        raw_timestep = timesteps.to(accelerator.device, dtype=torch.float32)
+        if getattr(args, "timestep_sampling", "sigma") in NOISE_COEFFICIENT_TIMESTEP_SAMPLINGS:
+            model_t = ((1001.0 - raw_timestep) / 1000.0).clamp(0.0, 1.0)
+        else:
+            model_t = (1.0 - raw_timestep / 1000.0).clamp(0.0, 1.0)
+        # Run the DiT under accelerator.autocast() like every other architecture, so --mixed_precision
+        # selects the compute regime: bf16 -> autocast mixed precision (LoRA computed in bf16), and the
+        # default 'no' -> a true no-op, i.e. fp32 LoRA over the bf16 base (the previous Ideogram 4
+        # behaviour, unchanged). This is only safe because Ideogram4MRoPE forces its frequency matmul to
+        # fp32 internally; without that guard autocast would collapse the image RoPE positions to a single
+        # value (offset 2**16, below bf16 resolution) and produce a flat checkerboard.
+        with accelerator.autocast():
+            model_pred = model(
+                llm_features=llm_features,
+                x=x,
+                t=model_t,
+                position_ids=inputs["position_ids"],
+                attention_mask=inputs["attention_mask"],
+                indicator=inputs["indicator"],
+            )
+        model_pred = model_pred[:, : int(inputs["num_image_tokens"])]
+        model_pred = ideogram4_utils.unflatten_token_grid(model_pred, grid_h, grid_w)
+        target = latents - noise
+        return DiTOutput(pred=model_pred, target=target)
+
+    def compute_loss(
+        self,
+        args: argparse.Namespace,
+        output: DiTOutput,
+        timesteps: torch.Tensor,
         noise_scheduler,
         dit_dtype: torch.dtype,
         network_dtype: torch.dtype,
-        vae,
         global_step: int,
     ) -> tuple[torch.Tensor, dict[str, float]]:
-        del network, noise, vae, global_step
-        latents = latents.to(device=accelerator.device, dtype=dit_dtype)
-        token_grid = ideogram4_utils.normalize_token_grid(latents)
-        noise = torch.randn_like(token_grid)
-        noisy_model_input, timesteps = self.get_noisy_model_input_and_timesteps(
-            args,
-            noise,
-            token_grid,
-            batch.get("timesteps"),
-            noise_scheduler,
-            accelerator.device,
-            dit_dtype,
-        )
-
-        output = self.call_dit(
-            args,
-            accelerator,
-            transformer,
-            token_grid,
-            batch,
-            noise,
-            noisy_model_input,
-            timesteps,
-            network_dtype,
-        )
+        # Plain mean MSE in flow-matching velocity space. Ideogram 4 does not use the
+        # SD3 weighting_scheme, so this owns the full loss formulation rather than
+        # augmenting super().compute_loss (which would apply that weighting).
+        del noise_scheduler, dit_dtype, global_step
         pred = output.pred.to(network_dtype)
         target = output.target.to(network_dtype)
         loss = torch.nn.functional.mse_loss(pred, target, reduction="mean")
@@ -308,61 +359,6 @@ class Ideogram4NetworkTrainer(NetworkTrainer):
                 }
         return loss, loss_metrics
 
-    def call_dit(
-        self,
-        args: argparse.Namespace,
-        accelerator: Accelerator,
-        transformer,
-        latents: torch.Tensor,
-        batch: dict[str, torch.Tensor],
-        noise: torch.Tensor,
-        noisy_model_input: torch.Tensor,
-        timesteps: torch.Tensor,
-        network_dtype: torch.dtype,
-        **kwargs,
-    ) -> DiTOutput:
-        del kwargs
-        model = transformer
-        bsize, _, grid_h, grid_w = noisy_model_input.shape
-        text_features = [x.to(dtype=network_dtype) for x in batch["i4_llm_features"]]
-        image_height = grid_h * ideogram4_utils.IDEOGRAM4_IMAGE_PATCH
-        image_width = grid_w * ideogram4_utils.IDEOGRAM4_IMAGE_PATCH
-        inputs = ideogram4_utils.build_sequence_inputs_from_features(text_features, image_height, image_width, device=accelerator.device)
-
-        image_tokens = ideogram4_utils.flatten_token_grid(noisy_model_input).to(device=accelerator.device, dtype=network_dtype)
-        text_padding = torch.zeros(
-            bsize,
-            int(inputs["max_text_tokens"]),
-            model.config.in_channels,
-            dtype=network_dtype,
-            device=accelerator.device,
-        )
-        x = torch.cat([text_padding, image_tokens], dim=1)
-        llm_features = inputs["llm_features"].to(dtype=network_dtype)
-        if args.gradient_checkpointing:
-            x.requires_grad_(True)
-            llm_features.requires_grad_(True)
-
-        # Training samples use t=0 as clean and t=1 as noise. The Ideogram 4
-        # transformer uses the inverse convention: t=0 is noise and t=1 is clean.
-        raw_timestep = timesteps.to(accelerator.device, dtype=torch.float32)
-        if getattr(args, "timestep_sampling", "sigma") in NOISE_COEFFICIENT_TIMESTEP_SAMPLINGS:
-            model_t = ((1001.0 - raw_timestep) / 1000.0).clamp(0.0, 1.0)
-        else:
-            model_t = (1.0 - raw_timestep / 1000.0).clamp(0.0, 1.0)
-        model_pred = model(
-            llm_features=llm_features,
-            x=x,
-            t=model_t,
-            position_ids=inputs["position_ids"],
-            segment_ids=inputs["segment_ids"],
-            indicator=inputs["indicator"],
-        )
-        model_pred = model_pred[:, int(inputs["max_text_tokens"]) :]
-        model_pred = ideogram4_utils.unflatten_token_grid(model_pred, grid_h, grid_w)
-        target = latents - noise
-        return DiTOutput(pred=model_pred, target=target)
-
 
 def ideogram4_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.set_defaults(timestep_sampling="ideogram4_shift")
@@ -375,11 +371,15 @@ def ideogram4_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argument
             "because only the conditional DiT is trained"
         ),
     )
-    parser.add_argument("--text_encoder", type=str, default=None, help="Qwen3-VL BF16 text encoder safetensors path; only needed for sampling")
+    parser.add_argument(
+        "--text_encoder", type=str, default=None, help="Qwen3-VL BF16 text encoder safetensors path; only needed for sampling"
+    )
     parser.add_argument("--dit_dtype", type=str, default=None, help="data type for Ideogram 4 DiT, default is bfloat16")
     parser.add_argument("--sampler_preset", type=str, default="V4_DEFAULT_20", choices=sorted(PRESETS.keys()))
     parser.add_argument("--initial_sigma", type=float, default=1.004, help="override the first denoising sigma for sampling")
-    parser.add_argument("--log_loss_stats", action="store_true", help="log Ideogram 4 prediction/target diagnostics during training")
+    parser.add_argument(
+        "--log_loss_stats", action="store_true", help="log Ideogram 4 prediction/target diagnostics during training"
+    )
     # Deprecated compatibility knobs. Ideogram 4 now uses the shared
     # --timestep_sampling path, so these legacy values are intentionally ignored.
     parser.add_argument("--ideogram4_timestep_mu", type=float, default=0.0, help=argparse.SUPPRESS)

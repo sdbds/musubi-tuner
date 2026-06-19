@@ -10,19 +10,6 @@ import musubi_tuner.networks.lora as lora
 
 
 IDEOGRAM4_TARGET_REPLACE_MODULES = ["Ideogram4TransformerBlock"]
-IDEOGRAM4_TARGET_INCLUDE_PATTERNS = [
-    r".*attention\.(qkv|o)",
-    r".*feed_forward\.w[123]",
-]
-IDEOGRAM4_LINEAR_CLASS_NAMES = ("Linear", "Fp8Linear")
-
-
-def _parse_patterns(value):
-    if value is None:
-        return []
-    if isinstance(value, str):
-        return ast.literal_eval(value)
-    return value
 
 
 def create_arch_network(
@@ -35,14 +22,17 @@ def create_arch_network(
     neuron_dropout: Optional[float] = None,
     **kwargs,
 ):
-    exclude_patterns = _parse_patterns(kwargs.get("exclude_patterns", None))
-    include_patterns = _parse_patterns(kwargs.get("include_patterns", None))
+    # add default exclude patterns
+    exclude_patterns = kwargs.get("exclude_patterns", None)
+    if exclude_patterns is None:
+        exclude_patterns = []
+    else:
+        exclude_patterns = ast.literal_eval(exclude_patterns)
 
-    exclude_patterns.append(r".*")
-    include_patterns.extend(IDEOGRAM4_TARGET_INCLUDE_PATTERNS)
+    # exclude adaln_modulation (per-block modulation): keep attention.{qkv,o} and feed_forward.w{1,2,3}
+    exclude_patterns.append(r".*adaln_modulation.*")
 
     kwargs["exclude_patterns"] = exclude_patterns
-    kwargs["include_patterns"] = include_patterns
 
     network = lora.create_network(
         IDEOGRAM4_TARGET_REPLACE_MODULES,
@@ -54,11 +44,10 @@ def create_arch_network(
         text_encoders,
         unet,
         neuron_dropout=neuron_dropout,
-        linear_module_class_names=IDEOGRAM4_LINEAR_CLASS_NAMES,
         **kwargs,
     )
     if len(network.unet_loras) == 0:
-        raise RuntimeError("Ideogram 4 LoRA found zero target modules. Check Fp8Linear discovery and include patterns.")
+        raise RuntimeError("Ideogram 4 LoRA found zero target modules. Check the include/exclude patterns and target modules.")
     return network
 
 
@@ -77,6 +66,5 @@ def create_arch_network_from_weights(
         text_encoders,
         unet,
         for_inference,
-        linear_module_class_names=IDEOGRAM4_LINEAR_CLASS_NAMES,
         **kwargs,
     )
