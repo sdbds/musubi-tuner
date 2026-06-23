@@ -463,14 +463,14 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
             item = DummyItem()
             item.text_encoder_output_cache_path = os.path.join(tmp, "sample_i4_te.safetensors")
             features = torch.ones(4, 53248, dtype=torch.bfloat16)
-            save_text_encoder_output_cache_ideogram4(item, features)
+            save_text_encoder_output_cache_ideogram4(item, features, "bf16")
             with safe_open(item.text_encoder_output_cache_path, framework="pt") as f:
                 metadata = f.metadata()
                 self.assertEqual(metadata["architecture"], "ideogram4")
                 self.assertIn("varlen_i4_llm_features_bfloat16", f.keys())
 
             features_fp32 = torch.ones(2, 53248, dtype=torch.float32)
-            save_text_encoder_output_cache_ideogram4(item, features_fp32)
+            save_text_encoder_output_cache_ideogram4(item, features_fp32, "float32")
             with safe_open(item.text_encoder_output_cache_path, framework="pt") as f:
                 keys = set(f.keys())
                 self.assertIn("varlen_i4_llm_features_float32", keys)
