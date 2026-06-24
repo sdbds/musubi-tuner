@@ -199,8 +199,13 @@ def save_latent_cache_qwen_image(item_info: ItemInfo, latent: torch.Tensor, cont
 
 
 def save_latent_cache_krea2(item_info: ItemInfo, latent: torch.Tensor):
-    """Krea 2 architecture. Same latent format as Qwen-Image (F, C, H, W) but no control latents."""
-    assert latent.dim() == 4, "latent should be 4D tensor (frame, channel, height, width)"
+    """Krea 2 (K2) architecture. Single image (F=1), Qwen-Image VAE latents (normalized).
+
+    The latent uses the *same* normalization as the Qwen-Image VAE
+    (`(raw - mean) / std`), which is exactly what K2's decoder inverts, so the
+    Qwen-Image latent caching is reused as-is. No control latent for plain t2i.
+    """
+    assert latent.dim() == 4, "latent should be 4D tensor (channel, frame, height, width)"
 
     _, F, H, W = latent.shape
     dtype_str = dtype_to_str(latent.dtype)
@@ -437,6 +442,25 @@ def save_text_encoder_output_cache_qwen_image(item_info: ItemInfo, embed: torch.
     sd[f"varlen_vl_embed_{dtype_str}"] = embed.detach().cpu()
 
     save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_QWEN_IMAGE_FULL)
+
+
+def save_text_encoder_output_cache_krea2(item_info: ItemInfo, embed: torch.Tensor):
+    """Krea 2 (K2) architecture.
+
+    `embed` is the per-item stack of *selected* Qwen3-VL hidden-state layers for the
+    valid (non-padding) tokens only: shape (valid_len, num_select_layers, hidden).
+    Stored varlen (no padding, no mask): K2 gives text tokens zero RoPE position and
+    masks padding in attention, so dropping padding is lossless for the image outputs.
+    The layerwise fusion (TextFusionTransformer) is trainable and lives in the DiT, so
+    the raw selected-layer stack is what gets cached.
+    """
+    assert embed.dim() == 3, "embed should be 3D tensor (valid_len, num_select_layers, hidden)"
+
+    sd = {}
+    dtype_str = dtype_to_str(embed.dtype)
+    sd[f"varlen_krea2_vl_embed_{dtype_str}"] = embed.detach().cpu()
+
+    save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_KREA2_FULL)
 
 
 def save_text_encoder_output_cache_kandinsky5(
