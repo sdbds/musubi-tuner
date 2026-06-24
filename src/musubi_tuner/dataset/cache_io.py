@@ -545,20 +545,6 @@ def save_text_encoder_output_cache_ideogram4(item_info: ItemInfo, features: torc
             "num_text_tokens": str(features.shape[0]),
         },
     )
-def save_text_encoder_output_cache_krea2(item_info: ItemInfo, hidden_states: torch.Tensor):
-    """Krea 2 architecture. Stores multi-layer hidden states stacked as (T, num_layers, hidden_dim).
-
-    The tensor is already trimmed to the valid token length by the caller, so the attention mask
-    is reconstructed from the per-sample length at training time (same convention as Qwen-Image).
-    The ``varlen_`` prefix keeps these per-item tensors out of the batch ``torch.stack`` (see
-    ``BucketBatchManager.__getitem__``); the loader strips ``varlen_`` and the dtype suffix, so the
-    batch key becomes ``vl_embed`` to match ``Krea2NetworkTrainer.call_dit``.
-    """
-    sd = {}
-    dtype_str = dtype_to_str(hidden_states.dtype)
-    sd[f"varlen_vl_embed_{dtype_str}"] = hidden_states.detach().cpu()
-
-    save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_KREA2_FULL, merge_existing=False)
 
 
 def save_text_encoder_output_cache_common(
