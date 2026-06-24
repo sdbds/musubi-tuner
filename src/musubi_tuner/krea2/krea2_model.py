@@ -43,18 +43,10 @@ FP8_OPTIMIZATION_EXCLUDE_KEYS = ["norm", "qknorm", "mod", "tproj", "tmlp", "txtf
 # region helpers
 
 
-def get_timestep_embedding(timesteps, num_channels=256, max_period=10000, tfactor=1000.0):
-    """Sinusoidal timestep embedding, matching official krea-2 mmdit.py ``temb``.
-
-    ``timesteps`` is in [0, 1] (flow-matching sigma). The official code scales it by
-    ``tfactor=1e3`` before the sinusoid, so the effective argument spans [0, 1000].
-    Omitting this scale silently shifts the entire time conditioning and corrupts the
-    denoise schedule, so it must be applied here (the trainer feeds t/1000 and inference
-    feeds t in [0,1] — both rely on this internal rescale).
-    """
+def get_timestep_embedding(timesteps, num_channels=256, max_period=10000):
     half = num_channels // 2
     freqs = torch.exp(-math.log(max_period) * torch.arange(half, dtype=torch.float32, device=timesteps.device) / half)
-    args = (timesteps.float() * tfactor)[:, None] * freqs[None]
+    args = timesteps[:, None].float() * freqs[None]
     embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
     if num_channels % 2 == 1:
         embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
@@ -62,25 +54,18 @@ def get_timestep_embedding(timesteps, num_channels=256, max_period=10000, tfacto
 
 
 class RMSNorm(nn.Module):
-    """Zero-centered (Gemma-style) RMSNorm, matching official krea-2 mmdit.py.
-
-    The learnable ``scale`` is stored centered around 0 and applied as ``(scale + 1.0)``.
-    Loading the checkpoint's near-zero ``scale`` into a plain ``x * scale`` path would
-    multiply activations by ~0 and destroy the signal, so the ``+ 1.0`` is mandatory.
-    """
-
-    def __init__(self, dim, eps=1e-5):
+    def __init__(self, dim, eps=1e-6):
         super().__init__()
         self.eps = eps
-        self.scale = nn.Parameter(torch.zeros(dim))
+        self.scale = nn.Parameter(torch.ones(dim))
 
     def forward(self, x):
         input_dtype = x.dtype
         variance = x.to(torch.float32).pow(2).mean(-1, keepdim=True)
         x = x * torch.rsqrt(variance + self.eps)
-        # Zero-centered: weight = scale + 1.0. `scale` stays in (b)float (norm keys are
-        # excluded from FP8), so a single cast-and-scale path is correct.
-        x = x * (self.scale.to(torch.float32) + 1.0)
+        # `scale` is always kept in (b)float (norm keys are in FP8_OPTIMIZATION_EXCLUDE_KEYS),
+        # so a single cast-and-scale path is correct.
+        x = x.to(self.scale.dtype) * self.scale
         return x.to(input_dtype)
 
 
@@ -408,32 +393,29 @@ class SingleStreamBlock(nn.Module):
 
 
 class LastLayer(nn.Module):
-    """Final layer, matching official krea-2 mmdit.py ``LastLayer`` + ``SimpleModulation``.
+    """Final layer: norm + modulation + residual MLP + linear projection.
 
-    Official:
-        scale, shift = modulation(t)        # t = tmlp(temb), shape (B, DIM); NOT tvec
-        x = (1 + scale) * norm(x) + shift
-        x = linear(x)                       # DIM -> patch*patch*channels
-
-    ``SimpleModulation`` adds the per-output learnable bias ``lin (2, DIM)`` to ``t`` and
-    splits it into (scale, shift). There is NO up/down residual in the official model
-    (the spec §11 appendix listing ``last.up/down`` is wrong — official ``strict=True``
-    has only norm/linear/modulation).
+    From spec §12.2:
+    scale,shift = modulation(t)  # t is the timestep embedding (B, DIM), not tvec
+    x = (1+scale)*norm(x) + shift + up(down(x))
+    x = linear(x)  # 6144 -> 64
     """
 
     def __init__(self, dim=DIM, out_channels=IN_CHANNELS):
         super().__init__()
         self.norm = RMSNorm(dim)
         self.modulation = nn.Module()
-        self.modulation.lin = nn.Parameter(torch.zeros(2, dim))  # (2, DIM): scale and shift bias
+        self.modulation.lin = nn.Parameter(torch.zeros(2, dim))  # (2, DIM) for scale and shift
         self.linear = nn.Linear(dim, out_channels, bias=True)
+        self.up = nn.Linear(dim, dim, bias=False)
+        self.down = nn.Linear(dim, dim, bias=False)
 
     def forward(self, x, t):
-        """x: (B, L, DIM), t: (B, DIM) timestep embedding (tmlp output)."""
-        # SimpleModulation: out = t + lin -> chunk into (scale, shift), each (B, 1, DIM).
-        out = t.unsqueeze(1) + self.modulation.lin.unsqueeze(0)  # (B, 2, DIM)
-        scale, shift = out.chunk(2, dim=1)  # each (B, 1, DIM)
-        x = (1 + scale) * self.norm(x) + shift
+        """x: (B, L, DIM), t: (B, DIM) timestep embedding"""
+        scale, shift = self.modulation.lin  # each (DIM,)
+        x_norm = self.norm(x)
+        x = x_norm * (1 + scale.unsqueeze(0).unsqueeze(0)) + shift.unsqueeze(0).unsqueeze(0)
+        x = x + self.up(self.down(x))
         x = self.linear(x)
         return x
 
