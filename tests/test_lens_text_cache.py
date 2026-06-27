@@ -57,13 +57,13 @@ def test_lens_cache_precision_parser_accepts_new_values():
             "gpt_oss_20b_nvfp4.safetensors",
             "--text_encoder_dtype",
             "fp8",
-            "--text_encoder_cache_precision",
+            "--text_cache_dtype",
             "fp8",
         ]
     )
 
     assert args.text_encoder_dtype == "fp8"
-    assert args.text_encoder_cache_precision == "fp8"
+    assert args.text_cache_dtype == "fp8"
     assert not hasattr(args, "fp8_text_encoder")
 
 

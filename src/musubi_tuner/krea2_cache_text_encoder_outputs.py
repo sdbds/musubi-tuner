@@ -20,12 +20,29 @@ from musubi_tuner.dataset.architectures import ARCHITECTURE_KREA2
 from musubi_tuner.krea2 import krea2_utils
 
 import musubi_tuner.cache_text_encoder_outputs as cache_text_encoder_outputs
+from musubi_tuner.utils.model_utils import str_to_dtype
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 
-def encode_and_save_batch(encoder, batch: list[ItemInfo]):
+def _resolve_cache_dtype(name: str) -> torch.dtype:
+    if name == "bf16":
+        return torch.bfloat16
+    if name == "fp16":
+        return torch.float16
+    if name == "float32":
+        return torch.float32
+    if name == "fp8_e4m3fn":
+        fp8_dtype = getattr(torch, "float8_e4m3fn", None)
+        if fp8_dtype is None:
+            raise RuntimeError("torch.float8_e4m3fn is not available in this environment")
+        return fp8_dtype
+    raise ValueError(f"Unsupported text cache dtype: {name}")
+
+
+def encode_and_save_batch(encoder, batch: list[ItemInfo], cache_dtype_name: str):
+    cache_dtype = _resolve_cache_dtype(cache_dtype_name)
     prompts = [item.caption for item in batch]
     for i, item in enumerate(batch):
         print(f"Item {i}: {item.item_key}, prompt: {item.caption}")
@@ -36,7 +53,8 @@ def encode_and_save_batch(encoder, batch: list[ItemInfo]):
     for item, hidden_i, mask_i in zip(batch, hiddens, mask):
         valid = mask_i.bool()
         embed_i = hidden_i[valid]  # (valid_len, L, D)
-        save_text_encoder_output_cache_krea2(item, embed_i)
+        embed_i = embed_i.to(cache_dtype)
+        save_text_encoder_output_cache_krea2(item, embed_i, cache_dtype_name)
 
 
 def krea2_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -47,6 +65,13 @@ def krea2_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentPars
         help="Qwen3-VL-4B text encoder safetensors path (official or ComfyUI key layout)",
     )
     parser.add_argument("--text_encoder_dtype", type=str, default=None, help="data type for the text encoder, default is bfloat16")
+    parser.add_argument(
+        "--text_cache_dtype",
+        type=str,
+        default="bf16",
+        choices=["bf16", "fp16", "fp8_e4m3fn", "float32"],
+        help="dtype for cached Krea 2 text features",
+    )
     return parser
 
 
@@ -61,8 +86,6 @@ def main():
 
     te_dtype = torch.bfloat16
     if args.text_encoder_dtype is not None:
-        from musubi_tuner.utils.model_utils import str_to_dtype
-
         te_dtype = str_to_dtype(args.text_encoder_dtype)
 
     # Load dataset config
@@ -82,7 +105,7 @@ def main():
 
     def encode_for_text_encoder(batch: list[ItemInfo]):
         nonlocal encoder
-        encode_and_save_batch(encoder, batch)
+        encode_and_save_batch(encoder, batch, args.text_cache_dtype)
 
     cache_text_encoder_outputs.process_text_encoder_batches(
         args.num_workers,

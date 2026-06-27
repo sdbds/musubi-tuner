@@ -49,7 +49,7 @@ def main():
     parser = lens_setup_parser(parser)
 
     args = parser.parse_args()
-    args.text_encoder_cache_precision = normalize_lens_cache_precision(args.text_encoder_cache_precision)
+    args.text_cache_dtype = normalize_lens_cache_precision(args.text_cache_dtype)
 
     device = args.device if args.device is not None else "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(device)
@@ -72,7 +72,7 @@ def main():
     )
 
     def encode_for_text_encoder(batch: list[ItemInfo], _text_embedder=text_embedder):
-        encode_and_save_batch(_text_embedder, batch, device, args.text_encoder_cache_precision)
+        encode_and_save_batch(_text_embedder, batch, device, args.text_cache_dtype)
 
     cache_text_encoder_outputs.process_text_encoder_batches(
         args.num_workers,
@@ -94,11 +94,11 @@ def lens_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParse
     parser.add_argument("--text_encoder", type=str, required=True, help="Lens Comfy GPT-OSS text encoder safetensors path")
     parser.add_argument("--text_encoder_dtype", type=str, default=None, help="text encoder dtype, default bfloat16")
     parser.add_argument(
-        "--text_encoder_cache_precision",
+        "--text_cache_dtype",
         type=str,
         default="auto",
         choices=LENS_TEXT_CACHE_PRECISIONS,
-        help="Lens text encoder output cache precision: auto preserves text_encoder_dtype output, fp8 uses float8_e4m3fn, nvfp4 is experimental",
+        help="Lens text encoder output cache dtype: auto preserves text_encoder_dtype output, fp8 uses float8_e4m3fn, nvfp4 is experimental",
     )
     parser.add_argument("--disable_numpy_memmap", action="store_true", help="Disable numpy memmap when loading safetensors")
     return parser

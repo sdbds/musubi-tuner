@@ -444,7 +444,7 @@ def save_text_encoder_output_cache_qwen_image(item_info: ItemInfo, embed: torch.
     save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_QWEN_IMAGE_FULL)
 
 
-def save_text_encoder_output_cache_krea2(item_info: ItemInfo, embed: torch.Tensor):
+def save_text_encoder_output_cache_krea2(item_info: ItemInfo, embed: torch.Tensor, cache_dtype: str = "bf16"):
     """Krea 2 (K2) architecture.
 
     `embed` is the per-item stack of *selected* Qwen3-VL hidden-state layers for the
@@ -460,7 +460,12 @@ def save_text_encoder_output_cache_krea2(item_info: ItemInfo, embed: torch.Tenso
     dtype_str = dtype_to_str(embed.dtype)
     sd[f"varlen_krea2_vl_embed_{dtype_str}"] = embed.detach().cpu()
 
-    save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_KREA2_FULL)
+    save_text_encoder_output_cache_common(
+        item_info,
+        sd,
+        ARCHITECTURE_KREA2_FULL,
+        extra_metadata={"text_cache_dtype": cache_dtype},
+    )
 
 
 def save_text_encoder_output_cache_kandinsky5(
