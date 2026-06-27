@@ -345,9 +345,11 @@ def save_latent_cache_common(item_info: ItemInfo, sd: dict[str, torch.Tensor], a
 
     for key, value in sd.items():
         # NaN check and show warning, replace NaN with 0
-        if torch.isnan(value).any():
-            logger.warning(f"{key} tensor has NaN: {item_info.item_key}, replace NaN with 0")
-            value[torch.isnan(value)] = 0
+        # fp8 dtypes don't support torch.isnan, skip the check for those
+        if value.dtype not in (torch.float8_e4m3fn, torch.float8_e5m2):
+            if torch.isnan(value).any():
+                logger.warning(f"{key} tensor has NaN: {item_info.item_key}, replace NaN with 0")
+                value[torch.isnan(value)] = 0
 
     latent_dir = os.path.dirname(item_info.latent_cache_path)
     os.makedirs(latent_dir, exist_ok=True)
@@ -564,9 +566,11 @@ def save_text_encoder_output_cache_common(
     # cache is overwritten fresh, dropping any stale keys (e.g. optionals/dtypes) left from an earlier run.
     for key, value in sd.items():
         # NaN check and show warning, replace NaN with 0
-        if torch.isnan(value).any():
-            logger.warning(f"{key} tensor has NaN: {item_info.item_key}, replace NaN with 0")
-            value[torch.isnan(value)] = 0
+        # fp8 dtypes don't support torch.isnan, skip the check for those
+        if value.dtype not in (torch.float8_e4m3fn, torch.float8_e5m2):
+            if torch.isnan(value).any():
+                logger.warning(f"{key} tensor has NaN: {item_info.item_key}, replace NaN with 0")
+                value[torch.isnan(value)] = 0
 
     metadata = {
         "architecture": arch_fullname,
