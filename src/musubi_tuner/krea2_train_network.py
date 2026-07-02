@@ -123,7 +123,8 @@ class Krea2NetworkTrainer(NetworkTrainer):
                         continue
                     hiddens, mask = krea2_utils.get_krea2_prompt_embeds(encoder, [p])  # (1, seq, L, D), (1, seq)
                     embed = hiddens[0][mask[0]]  # gather valid tokens -> (valid_len, L, D), drops padding
-                    te_outputs[p] = embed.to("cpu")
+                    te_outputs[p] = embed.detach().cpu()
+                    del hiddens, mask, embed
 
         del encoder
         gc.collect()
@@ -225,15 +226,26 @@ class Krea2NetworkTrainer(NetworkTrainer):
         # Unpatchify token sequence back to a latent (1, C, 1, H, W) for the VAE.
         latent = rearrange(img, "b (h w) (c ph pw) -> b c (h ph) (w pw)", ph=patch, pw=patch, h=lat_h // patch, w=lat_w // patch)
         latent = latent.unsqueeze(2)  # (1, C, 1, H, W)
+        del img, noise, txt, txtmask, pos, mask
+        if do_cfg:
+            del untxt, untxtmask, unpos, unmask
+        if "t" in locals():
+            del t
+        if "cond" in locals():
+            del cond
+        if "uncond" in locals():
+            del uncond
+        if "v" in locals():
+            del v
 
         vae.to(device)
         vae.eval()
         with torch.no_grad():
             pixels = vae.decode_to_pixels(latent.to(vae.dtype))  # (1, C, H, W) in [0, 1]
+        pixels = pixels.unsqueeze(2).to(torch.float32).cpu()  # (1, C, 1, H, W) for the grid saver
+        del latent
         vae.to("cpu")
         clean_memory_on_device(device)
-
-        pixels = pixels.unsqueeze(2).to(torch.float32).cpu()  # (1, C, 1, H, W) for the grid saver
         return pixels
 
     # region RAW-train / Turbo-sample (base-weight swap)
