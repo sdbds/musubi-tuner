@@ -58,6 +58,10 @@
 
 GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- 2026/07/14
+    - 勾配ノルムの診断メトリクス（`grad/norm`, `grad/mean_norm`, `grad/max`、勾配クリッピング前の値）をトラッカーに出力する `--log_grad_metrics` オプションを追加しました。[PR #988](https://github.com/kohya-ss/musubi-tuner/pull/988) rockerBOO氏に感謝します。
+        - 勾配の爆発・消失の診断や、適切な `--max_grad_norm` の値を決める際に役立ちます。デフォルトでは無効です。詳細は[高度な設定のドキュメント](./docs/advanced_config.md#log-gradient-metrics--勾配メトリクスのログ出力)を参照してください。
+
 - 2026/06/24
     - Krea 2に実験的に対応しました（LoRA学習、推論）。[PR #980](https://github.com/kohya-ss/musubi-tuner/pull/980)
         - 詳細は[ドキュメント](./docs/krea2.md)を参照してください。

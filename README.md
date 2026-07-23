@@ -63,6 +63,10 @@ If you find this project helpful, please consider supporting its development via
 
 GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- July 14, 2026
+    - Added the `--log_grad_metrics` option to log gradient norm diagnostics (`grad/norm`, `grad/mean_norm`, `grad/max`, measured before gradient clipping) to the tracker. Thank you rockerBOO [PR #988](https://github.com/kohya-ss/musubi-tuner/pull/988).
+        - Useful for diagnosing gradient explosion / vanishing and for choosing an appropriate `--max_grad_norm` value. Disabled by default. See the [advanced configuration documentation](./docs/advanced_config.md#log-gradient-metrics--勾配メトリクスのログ出力) for details.
+
 - June 24, 2026
     - Added experimental support for Krea 2 (LoRA training and inference). See [PR #980](https://github.com/kohya-ss/musubi-tuner/pull/980) for details.
         - For details, please refer to the [documentation](./docs/krea2.md).
