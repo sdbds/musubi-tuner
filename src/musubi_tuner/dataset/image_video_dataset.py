@@ -16,6 +16,7 @@ import torch
 from PIL import Image
 
 from musubi_tuner.utils import safetensors_utils
+from musubi_tuner.utils.model_utils import remove_dtype_suffix
 
 import logging
 
@@ -35,11 +36,33 @@ from musubi_tuner.dataset.architectures import (  # explicit imports for local u
     ARCHITECTURE_KANDINSKY5,
     ARCHITECTURE_LONGCAT,
     ARCHITECTURE_LENS,
+    ARCHITECTURE_MAGE_FLOW,
+    ARCHITECTURE_MAGE_FLOW_EDIT,
+    ARCHITECTURE_MAGE_FLOW_EDIT_FULL,
+    ARCHITECTURE_MAGE_FLOW_FULL,
     ARCHITECTURE_QWEN_IMAGE_EDIT,
     ARCHITECTURE_WAN,
 )
+from musubi_tuner.dataset.cache_io import CACHE_FORMAT_VERSION
 from musubi_tuner.dataset.media_utils import *  # noqa: F401,F403
 from musubi_tuner.dataset.media_utils import resize_image_to_bucket  # explicit import for local use
+
+
+def _validate_mage_cache_metadata(path: str, expected_architecture: str) -> None:
+    with safetensors_utils.MemoryEfficientSafeOpen(path) as handle:
+        metadata = handle.metadata() or {}
+    actual_architecture = metadata.get("architecture")
+    if actual_architecture != expected_architecture:
+        raise ValueError(
+            f"Mage-Flow cache architecture mismatch for {path}: "
+            f"expected {expected_architecture}, got {actual_architecture or '<missing>'}"
+        )
+    actual_format_version = metadata.get("format_version")
+    if actual_format_version != CACHE_FORMAT_VERSION:
+        raise ValueError(
+            f"Mage-Flow cache format version mismatch for {path}: "
+            f"expected {CACHE_FORMAT_VERSION}, got {actual_format_version or '<missing>'}"
+        )
 
 
 class ItemInfo:
@@ -325,7 +348,7 @@ class ImageDataset(BaseDataset):
             or self.architecture == ARCHITECTURE_FLUX_2_KLEIN_9B
         ):
             control_count_per_image = None  # can be multiple control images
-        elif self.architecture == ARCHITECTURE_QWEN_IMAGE_EDIT:
+        elif self.architecture == ARCHITECTURE_QWEN_IMAGE_EDIT or self.architecture == ARCHITECTURE_MAGE_FLOW_EDIT:
             control_count_per_image = None  # can be multiple control images
         elif self.architecture == ARCHITECTURE_LENS:
             control_count_per_image = 0
@@ -411,12 +434,11 @@ class ImageDataset(BaseDataset):
 
                     if controls is not None:
                         item_info.control_content = controls
-                        if self.no_resize_control or self.control_resolution is not None:
-                            # Add control size to bucket_reso to make different control resolutions to different batch
-                            bucket_reso = list(bucket_reso)
-                            for control in controls:
-                                bucket_reso = bucket_reso + list(control.shape[0:2])
-                            bucket_reso = tuple(bucket_reso)
+                        # Keep control count, order, and shapes homogeneous within a batch.
+                        bucket_reso = list(bucket_reso)
+                        for control in controls:
+                            bucket_reso = bucket_reso + list(control.shape[0:2])
+                        bucket_reso = tuple(bucket_reso)
 
                     if bucket_reso not in batches:
                         batches[bucket_reso] = []
@@ -505,6 +527,10 @@ class ImageDataset(BaseDataset):
 
     def prepare_for_training(self, num_timestep_buckets: Optional[int] = None):
         bucket_selector = BucketSelector(self.resolution, self.enable_bucket, self.bucket_no_upscale, self.architecture)
+        expected_cache_architecture = {
+            ARCHITECTURE_MAGE_FLOW: ARCHITECTURE_MAGE_FLOW_FULL,
+            ARCHITECTURE_MAGE_FLOW_EDIT: ARCHITECTURE_MAGE_FLOW_EDIT_FULL,
+        }.get(self.architecture)
 
         # glob cache files
         latent_cache_files = glob.glob(os.path.join(self.cache_directory, f"*_{self.architecture}.safetensors"))
@@ -524,6 +550,9 @@ class ImageDataset(BaseDataset):
             if not os.path.exists(text_encoder_output_cache_file):
                 logger.warning(f"Text encoder output cache file not found: {text_encoder_output_cache_file}")
                 continue
+            if expected_cache_architecture is not None:
+                _validate_mage_cache_metadata(cache_file, expected_cache_architecture)
+                _validate_mage_cache_metadata(text_encoder_output_cache_file, expected_cache_architecture)
 
             bucket_reso = bucket_selector.get_bucket_resolution(image_size)
 
@@ -534,12 +563,11 @@ class ImageDataset(BaseDataset):
                     bucket_reso.append(len(self.fp_1f_clean_indices))
                     bucket_reso.append(self.fp_1f_no_post)
                 bucket_reso = tuple(bucket_reso)
-            if self.no_resize_control or self.control_resolution is not None:
-                # we also need to split the bucket with control resolutions
-                control_key = safetensors_utils.find_key(cache_file, starts_with="latents_control_")  # latents_control_FxHxW_dtype
-                if control_key is not None:
-                    control_shape = control_key.rsplit("_", 3)[-2]  # FxHxW
-                    bucket_reso = tuple(list(bucket_reso) + [control_shape])  # (int, int, str)
+            control_keys = safetensors_utils.find_keys(cache_file, starts_with="latents_control_")
+            if control_keys:
+                # Preserve the index in each key so equal shapes in a different control order cannot collapse together.
+                control_shapes = [remove_dtype_suffix(key) for key in control_keys]
+                bucket_reso = tuple(list(bucket_reso) + control_shapes)
 
             item_info = ItemInfo(item_key, "", image_size, bucket_reso, latent_cache_path=cache_file)
             item_info.text_encoder_output_cache_path = text_encoder_output_cache_file
