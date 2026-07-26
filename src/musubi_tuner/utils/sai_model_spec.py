@@ -25,6 +25,8 @@ from musubi_tuner.dataset.image_video_dataset import (
     ARCHITECTURE_KANDINSKY5,
     ARCHITECTURE_LENS,
     ARCHITECTURE_KREA2,
+    ARCHITECTURE_MAGE_FLOW,
+    ARCHITECTURE_MAGE_FLOW_EDIT,
     ARCHITECTURE_Z_IMAGE,
 )
 
@@ -98,6 +100,8 @@ ARCH_HIDREAM_O1 = "HiDream-O1-Image"
 ARCH_LENS = "lens"
 ARCH_IDEOGRAM4 = "Ideogram-4"
 ARCH_KREA2 = "Krea-2"
+ARCH_MAGE_FLOW = "Mage-Flow"
+ARCH_MAGE_FLOW_EDIT = "Mage-Flow-Edit"
 
 ADAPTER_LORA = "lora"
 
@@ -117,6 +121,7 @@ IMPL_HIDREAM_O1 = "https://github.com/HiDream-ai/HiDream-O1-Image"
 IMPL_LENS = "https://github.com/microsoft/Lens"
 IMPL_IDEOGRAM4 = "https://huggingface.co/Comfy-Org/Ideogram-4"
 IMPL_KREA2 = "https://github.com/krea-ai/krea-2"
+IMPL_MAGE_FLOW = "https://github.com/microsoft/Mage"
 
 PRED_TYPE_EPSILON = "epsilon"
 # PRED_TYPE_V = "v"
@@ -243,6 +248,12 @@ def build_metadata(
     elif architecture == ARCHITECTURE_KREA2:
         arch = ARCH_KREA2
         impl = IMPL_KREA2
+    elif architecture == ARCHITECTURE_MAGE_FLOW:
+        arch = ARCH_MAGE_FLOW
+        impl = IMPL_MAGE_FLOW
+    elif architecture == ARCHITECTURE_MAGE_FLOW_EDIT:
+        arch = ARCH_MAGE_FLOW_EDIT
+        impl = IMPL_MAGE_FLOW
     else:
         raise ValueError(f"Unknown architecture: {architecture}")
 
