@@ -27,6 +27,7 @@ from musubi_tuner.dataset.image_video_dataset import (
     ARCHITECTURE_KREA2,
     ARCHITECTURE_MAGE_FLOW,
     ARCHITECTURE_MAGE_FLOW_EDIT,
+    ARCHITECTURE_MINIMAX_H3,
     ARCHITECTURE_Z_IMAGE,
 )
 
@@ -102,6 +103,7 @@ ARCH_IDEOGRAM4 = "Ideogram-4"
 ARCH_KREA2 = "Krea-2"
 ARCH_MAGE_FLOW = "Mage-Flow"
 ARCH_MAGE_FLOW_EDIT = "Mage-Flow-Edit"
+ARCH_MINIMAX_H3 = "MiniMax-H3"
 
 ADAPTER_LORA = "lora"
 
@@ -122,6 +124,7 @@ IMPL_LENS = "https://github.com/microsoft/Lens"
 IMPL_IDEOGRAM4 = "https://huggingface.co/Comfy-Org/Ideogram-4"
 IMPL_KREA2 = "https://github.com/krea-ai/krea-2"
 IMPL_MAGE_FLOW = "https://github.com/microsoft/Mage"
+IMPL_MINIMAX_H3 = "https://huggingface.co/MiniMaxAI/MiniMax-H3"
 
 PRED_TYPE_EPSILON = "epsilon"
 # PRED_TYPE_V = "v"
@@ -254,6 +257,9 @@ def build_metadata(
     elif architecture == ARCHITECTURE_MAGE_FLOW_EDIT:
         arch = ARCH_MAGE_FLOW_EDIT
         impl = IMPL_MAGE_FLOW
+    elif architecture == ARCHITECTURE_MINIMAX_H3:
+        arch = ARCH_MINIMAX_H3
+        impl = IMPL_MINIMAX_H3
     else:
         raise ValueError(f"Unknown architecture: {architecture}")
 
