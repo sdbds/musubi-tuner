@@ -10,7 +10,6 @@ CPU tests exercise the eager fallback (exact math up to rounding); CUDA tests
 exercise the fused Triton kernels when available.
 """
 
-import os
 from types import SimpleNamespace
 
 import pytest
