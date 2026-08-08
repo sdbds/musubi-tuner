@@ -20,11 +20,7 @@ from musubi_tuner.minimax_h3.sampling import (
     sample_joint_av,
     write_joint_av,
 )
-from musubi_tuner.minimax_h3_generate_video import (
-    load_cached_text_conditioning,
-    run_generation,
-    validate_generation_args,
-)
+from musubi_tuner.minimax_h3_generate_video import load_cached_text_conditioning, validate_generation_args
 
 
 def _layout():
@@ -266,6 +262,26 @@ def _generation_args(tmp_path, *, task="t2va", **overrides):
     return SimpleNamespace(**values)
 
 
+def test_generation_keeps_bf16_merge_but_attaches_lora_to_int8(monkeypatch):
+    import musubi_tuner.minimax_h3_generate_video as generate
+
+    calls = []
+    args = SimpleNamespace(lora_weight=["adapter.safetensors"])
+    attached = [object()]
+    monkeypatch.setattr(generate, "_merge_lora_weights", lambda transformer, args: calls.append(("merge", transformer)))
+    monkeypatch.setattr(
+        generate,
+        "_apply_lora_weights",
+        lambda transformer, args, device: calls.append(("attach", transformer, device)) or attached,
+    )
+    bf16 = SimpleNamespace(is_convrot_int8=False)
+    int8 = SimpleNamespace(is_convrot_int8=True)
+
+    assert generate._configure_lora_weights(bf16, args, torch.device("cpu")) == []
+    assert generate._configure_lora_weights(int8, args, torch.device("cpu")) is attached
+    assert calls == [("merge", bf16), ("attach", int8, torch.device("cpu"))]
+
+
 @pytest.mark.parametrize("field", ("width", "height"))
 def test_generation_validation_rejects_non_32_aligned_axes(tmp_path, field):
     with pytest.raises(ValueError, match="divisible by 32"):
@@ -434,7 +450,7 @@ def test_generation_orchestrates_t2va_sampling_decode_and_mux_without_co_residen
         lambda decoded, output: captured.update(decoded=decoded, output=output),
     )
 
-    output = run_generation(args)
+    output = generate.run_generation(args)
 
     assert output == Path(args.output)
     assert [event[0] for event in events] == [
