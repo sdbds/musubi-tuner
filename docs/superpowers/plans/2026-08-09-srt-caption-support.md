@@ -114,7 +114,7 @@ def test_malformed_srt_reports_cue_and_path(tmp_path: Path):
 
 - [ ] **Step 2: Run the tests and verify RED**
 
-Run: `pytest -q tests/test_caption_utils.py`
+Run: `& ..\.venv\Scripts\python.exe -m pytest -q tests/test_caption_utils.py`
 
 Expected: collection fails with `ModuleNotFoundError: No module named 'musubi_tuner.dataset.caption_utils'` because the production module does not exist.
 
@@ -164,7 +164,7 @@ def read_caption_file(caption_path: str) -> str:
 
 - [ ] **Step 4: Run the reader tests and verify GREEN**
 
-Run: `pytest -q tests/test_caption_utils.py`
+Run: `& ..\.venv\Scripts\python.exe -m pytest -q tests/test_caption_utils.py`
 
 Expected: `7 passed`.
 
@@ -231,7 +231,7 @@ def test_video_directory_datasource_reads_srt_caption(tmp_path: Path):
 
 - [ ] **Step 2: Run integration tests and verify RED**
 
-Run: `pytest -q tests/test_caption_utils.py::test_image_directory_datasource_reads_srt_caption tests/test_caption_utils.py::test_video_directory_datasource_reads_srt_caption`
+Run: `& ..\.venv\Scripts\python.exe -m pytest -q tests/test_caption_utils.py::test_image_directory_datasource_reads_srt_caption tests/test_caption_utils.py::test_video_directory_datasource_reads_srt_caption`
 
 Expected: both tests fail because the data sources return raw SRT content containing sequence numbers and timing lines.
 
@@ -253,7 +253,7 @@ Do not change caption path construction, globbing, or JSONL data sources.
 
 - [ ] **Step 4: Run integration and regression tests and verify GREEN**
 
-Run: `pytest -q tests/test_caption_utils.py tests/test_audio_dataset_seam.py`
+Run: `& ..\.venv\Scripts\python.exe -m pytest -q tests/test_caption_utils.py tests/test_audio_dataset_seam.py`
 
 Expected: `30 passed`.
 
@@ -300,13 +300,13 @@ After the corresponding Japanese caption paragraph, add:
 
 - [ ] **Step 3: Run the focused test suite**
 
-Run: `pytest -q tests/test_caption_utils.py tests/test_audio_dataset_seam.py`
+Run: `& ..\.venv\Scripts\python.exe -m pytest -q tests/test_caption_utils.py tests/test_audio_dataset_seam.py`
 
 Expected: `30 passed`.
 
 - [ ] **Step 4: Run the full test suite**
 
-Run: `pytest -q`
+Run: `& ..\.venv\Scripts\python.exe -m pytest -q`
 
 Expected: all collected tests pass with zero failures.
 
