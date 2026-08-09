@@ -58,10 +58,13 @@ from musubi_tuner.training.accelerator_setup import (
     prepare_accelerator,
 )
 from musubi_tuner.training.sampling_prompts import should_sample_images
+from musubi_tuner.training.explorative import create_candidate_generator, draw_candidate_noise, update_winners
 from musubi_tuner.training.timesteps import (
+    BASE_NOISE_COEFFICIENT_TIMESTEP_SAMPLINGS,
     compute_density_for_timestep_sampling,
     compute_ideogram4_shift_timestep,
     compute_loss_weighting_for_sd3,
+    get_noise_coefficients_from_timesteps,
     get_sigmas,
 )
 
@@ -82,26 +85,6 @@ SS_METADATA_MINIMUM_KEYS = [
     SS_METADATA_KEY_NETWORK_ALPHA,
     SS_METADATA_KEY_NETWORK_ARGS,
 ]
-
-# --timestep_sampling methods that draw t in [0, 1] directly (handled by
-# NetworkTrainer.sample_timesteps); anything else goes through the
-# weighting-scheme density path in get_noisy_model_input_and_timesteps
-DIRECT_TIMESTEP_SAMPLING_METHODS = frozenset(
-    {
-        "uniform",
-        "uniform_shift",
-        "sigmoid",
-        "shift",
-        "flux_shift",
-        "qwen_shift",
-        "krea2_shift",
-        "ideogram4_shift",
-        "logsnr",
-        "qinglong_flux",
-        "qinglong_qwen",
-        "flux2_shift",
-    }
-)
 
 
 @dataclass
@@ -131,6 +114,8 @@ class NetworkTrainer:
         self.num_timestep_buckets: Optional[int] = None  # for get_bucketed_timestep()
         self.vae_frame_stride = 4  # legacy frame-grid fallback; some architectures set 1 or use a custom formula
         self.default_discrete_flow_shift = 14.5  # default value for discrete flow shift for all models TODO may be None is better
+        self._best_of_k_count = 1
+        self._best_of_k_enabled = False
 
     # TODO 他のスクリプトと共通化する
     def generate_step_logs(
@@ -558,7 +543,7 @@ class NetworkTrainer:
         distribution instead of drawing fresh randomness. ``latents`` is only
         consulted for its spatial shape by the resolution-dependent shift methods.
 
-        Only valid for DIRECT_TIMESTEP_SAMPLING_METHODS; weighting-scheme based
+        Only valid for BASE_NOISE_COEFFICIENT_TIMESTEP_SAMPLINGS; weighting-scheme based
         sampling cannot be expressed as a plain t draw and raises here.
         """
         if timesteps is not None:
@@ -596,7 +581,7 @@ class NetworkTrainer:
             logsnr = mean + std * math.sqrt(2.0) * torch.erfinv(term)
             return logsnr
 
-        if args.timestep_sampling in DIRECT_TIMESTEP_SAMPLING_METHODS:
+        if args.timestep_sampling in BASE_NOISE_COEFFICIENT_TIMESTEP_SAMPLINGS:
 
             def compute_sampling_timesteps(org_timesteps: Optional[torch.Tensor]) -> torch.Tensor:
                 def rand(bs: int, org_ts: Optional[torch.Tensor] = None) -> torch.Tensor:
@@ -763,7 +748,7 @@ class NetworkTrainer:
     ):
         batch_size = noise.shape[0]
 
-        if args.timestep_sampling in DIRECT_TIMESTEP_SAMPLING_METHODS:
+        if args.timestep_sampling in BASE_NOISE_COEFFICIENT_TIMESTEP_SAMPLINGS:
             t = self.sample_timesteps(args, batch_size, timesteps, latents, device)
 
             timesteps = t * 1000.0
@@ -1204,6 +1189,59 @@ class NetworkTrainer:
         """Optionally adjust network factory kwargs before creating the network."""
         return net_kwargs
 
+    def get_best_of_k_count(self, args: argparse.Namespace) -> int:
+        return args.xm_best_of_k
+
+    def get_best_of_k_option_name(self, args: argparse.Namespace) -> str:
+        return "--xm_best_of_k"
+
+    def get_best_of_k_incompatibility_reason(self, args: argparse.Namespace) -> Optional[str]:
+        del args
+        process_batch = getattr(self.process_batch, "__func__", self.process_batch)
+        if process_batch is not NetworkTrainer.process_batch:
+            return (
+                f"{self.architecture_full_name} overrides process_batch and has not confirmed "
+                "the standard Forward XM data-flow contract"
+            )
+        return None
+
+    def on_best_of_k_enabled(self, args: argparse.Namespace) -> None:
+        del args
+        multiplier = (self._best_of_k_count + 3) / 3
+        logger.info(
+            "Forward XM enabled for %s: K=%d, sequential memory-saving mode, approximate operation-count multiplier %.2fx",
+            self.architecture_full_name,
+            self._best_of_k_count,
+            multiplier,
+        )
+        logger.warning("Published Forward XM gains are pretraining results and have not been validated for LoRA fine-tuning.")
+
+    def _validate_and_init_best_of_k(self, args: argparse.Namespace) -> None:
+        option_name = self.get_best_of_k_option_name(args)
+        try:
+            count = self.get_best_of_k_count(args)
+            if type(count) is not int or count < 1:
+                raise ValueError(f"{option_name} must be an integer of at least 1, got {count!r}")
+            enabled = count > 1
+            if enabled:
+                reason = self.get_best_of_k_incompatibility_reason(args)
+                if reason is not None:
+                    raise ValueError(f"{option_name}={count} is not supported: {reason}")
+        except Exception:
+            self._best_of_k_count = 1
+            self._best_of_k_enabled = False
+            raise
+
+        self._best_of_k_count = count
+        self._best_of_k_enabled = enabled
+        if enabled:
+            self.on_best_of_k_enabled(args)
+
+    def _process_batch_for_training(self, *args, **kwargs):
+        if self._best_of_k_enabled:
+            return self.process_batch_best_of_k(*args, **kwargs)
+        return self.process_batch(*args, **kwargs)
+
     def process_batch(
         self,
         args: argparse.Namespace,
@@ -1243,6 +1281,126 @@ class NetworkTrainer:
 
         return self.compute_loss(args, output, timesteps, noise_scheduler, dit_dtype, network_dtype, global_step)
 
+    def process_batch_best_of_k(
+        self,
+        args: argparse.Namespace,
+        accelerator: Accelerator,
+        transformer,
+        network,
+        batch: dict[str, torch.Tensor],
+        latents: torch.Tensor,
+        noise: torch.Tensor,
+        noise_scheduler,
+        dit_dtype: torch.dtype,
+        network_dtype: torch.dtype,
+        sample_resources,
+        global_step: int,
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        del network, sample_resources
+        noisy_candidate_zero, timesteps = self.get_noisy_model_input_and_timesteps(
+            args,
+            noise,
+            latents,
+            batch["timesteps"],
+            noise_scheduler,
+            accelerator.device,
+            dit_dtype,
+        )
+        sigma = get_noise_coefficients_from_timesteps(
+            args.timestep_sampling,
+            noise_scheduler,
+            timesteps,
+            accelerator.device,
+            latents.ndim,
+            dit_dtype,
+        )
+        generator = create_candidate_generator(noise)
+        batch_size = latents.shape[0]
+        best_losses = torch.full((batch_size,), torch.inf, device=latents.device, dtype=torch.float32)
+        winner_noise = torch.empty_like(noise)
+        winner_indices = torch.full((batch_size,), -1, device=latents.device, dtype=torch.long)
+        candidate_loss_sum = torch.zeros((), device=latents.device, dtype=torch.float32)
+        candidate_zero_mean = None
+        device = torch.device(accelerator.device)
+        fork_devices = [device] if device.type == "cuda" else []
+
+        for candidate_index in range(self._best_of_k_count):
+            if candidate_index == 0:
+                candidate_noise = noise
+                candidate_input = noisy_candidate_zero
+            else:
+                candidate_noise = draw_candidate_noise(noise, generator)
+                candidate_input = (1.0 - sigma) * latents + sigma * candidate_noise
+
+            with torch.random.fork_rng(devices=fork_devices):
+                with torch.no_grad():
+                    output = self.call_dit(
+                        args,
+                        accelerator,
+                        transformer,
+                        latents,
+                        batch,
+                        candidate_noise,
+                        candidate_input,
+                        timesteps,
+                        network_dtype,
+                    )
+                    candidate_losses = self.compute_per_sample_loss(
+                        args,
+                        output,
+                        timesteps,
+                        noise_scheduler,
+                        dit_dtype,
+                        network_dtype,
+                        global_step,
+                    )
+            candidate_losses_f32 = candidate_losses.detach().float()
+            candidate_loss_sum = candidate_loss_sum + candidate_losses_f32.sum()
+            if candidate_index == 0:
+                candidate_zero_mean = candidate_losses_f32.mean()
+            try:
+                best_losses, winner_noise, winner_indices = update_winners(
+                    best_losses,
+                    winner_noise,
+                    winner_indices,
+                    candidate_losses_f32,
+                    candidate_noise,
+                    candidate_index,
+                )
+            except ValueError as error:
+                raise ValueError(f"{self.architecture_full_name}: {error}") from error
+
+        if candidate_zero_mean is None:
+            raise RuntimeError("internal error: best-of-K candidate loop ran zero iterations")
+
+        # Samples may choose different candidates because sigma is per sample and fixed across candidates.
+        winner_input = (1.0 - sigma) * latents + sigma * winner_noise
+        output = self.call_dit(
+            args,
+            accelerator,
+            transformer,
+            latents,
+            batch,
+            winner_noise,
+            winner_input,
+            timesteps,
+            network_dtype,
+        )
+        loss, metrics = self.compute_loss(
+            args,
+            output,
+            timesteps,
+            noise_scheduler,
+            dit_dtype,
+            network_dtype,
+            global_step,
+        )
+        return loss, {
+            **metrics,
+            "xm/candidate_loss_mean": (candidate_loss_sum / (self._best_of_k_count * batch_size)).item(),
+            "xm/selection_gain": (candidate_zero_mean - best_losses.detach().float().mean()).item(),
+        }
+
     def compute_loss(
         self,
         args: argparse.Namespace,
@@ -1255,24 +1413,65 @@ class NetworkTrainer:
     ) -> tuple[torch.Tensor, dict[str, float]]:
         """Reduce a ``DiTOutput`` to a scalar loss + per-step metrics dict.
 
-        Default implementation: weighted MSE between ``output.pred`` and
-        ``output.target`` with the SD3-style ``args.weighting_scheme`` applied,
-        then ``.mean()``. Override to swap the loss formulation entirely
-        (e.g. Self-Flow's L_gen + gamma * L_rep) or to add auxiliary terms
-        (e.g. HiDream-O1's step-gated DINO perceptual loss). Subclasses are
-        responsible for whatever weighting/reduction they need — this hook owns
-        the full loss computation, not just the per-element MSE.
+        Default implementation: the mean of the canonical weighted per-sample
+        MSE from ``compute_per_sample_loss``. Override that primitive to swap
+        the loss formulation entirely, or override this wrapper to add scalar
+        auxiliary terms and loss-decomposition metrics.
 
         ``global_step`` is provided for step-gated terms (e.g. computing an
         auxiliary loss only every N steps). ``loss_metrics`` defaults to empty;
         populate with named scalars for loss-decomposition logging
         (e.g. ``{"loss/gen": ..., "loss/rep": ...}``).
         """
+        per_sample = self.compute_per_sample_loss(args, output, timesteps, noise_scheduler, dit_dtype, network_dtype, global_step)
+        return per_sample.mean(), {}
+
+    def compute_per_sample_loss(
+        self,
+        args: argparse.Namespace,
+        output: DiTOutput,
+        timesteps: torch.Tensor,
+        noise_scheduler,
+        dit_dtype: torch.dtype,
+        network_dtype: torch.dtype,
+        global_step: int,
+    ) -> torch.Tensor:
+        """Reduce a ``DiTOutput`` to one weighted MSE loss per batch sample."""
+        del global_step
+        if output.pred.ndim < 1 or output.target.ndim < 1:
+            raise ValueError("per-sample loss requires a leading batch axis")
+
+        batch_size = output.pred.shape[0]
+        if output.target.shape[0] != batch_size:
+            raise ValueError("prediction and target batch sizes differ")
+        if output.pred.shape != output.target.shape:
+            raise ValueError("prediction and target shapes must match")
+        if output.pred.device != output.target.device:
+            raise ValueError("prediction and target devices must match")
+        if batch_size == 0:
+            raise ValueError("per-sample loss requires a non-empty batch")
+        if output.pred.numel() // batch_size == 0:
+            raise ValueError("per-sample loss requires at least one element per batch sample")
+
         weighting = compute_loss_weighting_for_sd3(args.weighting_scheme, noise_scheduler, timesteps, timesteps.device, dit_dtype)
-        loss = torch.nn.functional.mse_loss(output.pred.to(network_dtype), output.target, reduction="none")
+        elementwise = torch.nn.functional.mse_loss(output.pred.to(network_dtype), output.target, reduction="none")
         if weighting is not None:
-            loss = loss * weighting
-        return loss.mean(), {}
+            if weighting.device != elementwise.device:
+                raise ValueError("loss weighting and predictions must be on the same device")
+            if weighting.numel() != batch_size:
+                raise ValueError("loss weighting must contain exactly one value per batch sample")
+            if weighting.ndim < 1 or weighting.shape[0] != batch_size:
+                raise ValueError("loss weighting must be owned by the leading batch axis")
+            weighting = weighting.reshape(batch_size, *([1] * (elementwise.ndim - 1)))
+            weighted_elementwise = elementwise * weighting
+            if weighted_elementwise.shape != elementwise.shape:
+                raise ValueError("loss weighting must not expand the elementwise loss shape")
+            elementwise = weighted_elementwise
+
+        per_sample = elementwise.reshape(batch_size, -1).mean(dim=1)
+        if per_sample.shape != (batch_size,):
+            raise ValueError(f"per-sample loss must have shape [{batch_size}], got {tuple(per_sample.shape)}")
+        return per_sample
 
     def on_transformer_loaded(
         self,
@@ -1543,6 +1742,7 @@ class NetworkTrainer:
 
         # check model specific arguments
         self.handle_model_specific_args(args)
+        self._validate_and_init_best_of_k(args)
 
         # show timesteps for debugging
         if args.show_timesteps:
@@ -2169,7 +2369,7 @@ class NetworkTrainer:
                     # Sample noise that we'll add to the latents
                     noise = torch.randn_like(latents)
 
-                    loss, loss_metrics = self.process_batch(
+                    loss, loss_metrics = self._process_batch_for_training(
                         args,
                         accelerator,
                         transformer,
