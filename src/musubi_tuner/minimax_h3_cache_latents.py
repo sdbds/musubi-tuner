@@ -402,12 +402,10 @@ def fingerprint_file(path: str | Path) -> str:
 
 
 def fingerprint_checkpoint(path: str | Path) -> str:
-    path = Path(path).resolve()
-    files = resolve_safetensors_files(path)
+    files = resolve_safetensors_files(Path(path).resolve())
     digest = hashlib.sha256()
     for file in files:
-        relative_name = file.name if path.is_file() else file.relative_to(path).as_posix()
-        digest.update(relative_name.encode("utf-8"))
+        digest.update(file.name.encode("utf-8"))
         digest.update(b"\0")
         digest.update(fingerprint_file(file).encode("ascii"))
         digest.update(b"\0")
@@ -454,6 +452,11 @@ def log_audio_presence_summary(presence_counts: Mapping[bool, int]) -> None:
         missing_audio,
         fraction,
     )
+    if total and real_audio == 0:
+        logger.warning(
+            "No cached item has real audio: training with these caches keeps the audio loss at 0; "
+            "if this is intended, pass --video_only to the trainer explicitly"
+        )
 
 
 def setup_parser() -> argparse.ArgumentParser:
@@ -488,8 +491,15 @@ def main() -> None:
 
     records_by_dir: dict[str, list[H3Record]] = {}
     audio_sources_by_dir: dict[str, list] = {}
-    for dataset in datasets:
+    for dataset_index, dataset in enumerate(datasets):
         validate_h3_dataset(dataset)
+        if int(dataset.batch_size) != 1:
+            logger.warning(
+                "MiniMax-H3 dataset %d has batch_size=%d in the dataset config; training requires batch_size=1 "
+                "(use gradient accumulation for a larger effective batch) and will stop on the first training batch",
+                dataset_index,
+                int(dataset.batch_size),
+            )
         key = dataset_cache_dir_key(dataset.cache_directory)
         records_by_dir[key] = h3_records_from_datasource(dataset.datasource, args.task)
         audio_sources_by_dir[key] = dataset.datasource.audio_sources

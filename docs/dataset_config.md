@@ -170,6 +170,8 @@ max_frames = 45
 
 `video_directory` is the directory containing videos. The captions are stored in text files with the same filename as the video, but with the extension specified by `caption_extension` (for example, `video1.mp4` and `video1.txt`).
 
+You can also set `caption_extension = ".srt"`. For SRT captions, cue numbers and time ranges are removed, and all cue text is joined in order into one caption for the entire video. SRT timing is not matched to frames selected by `frame_extraction`.
+
 __In HunyuanVideo and Wan2.1, the number of `target_frames` must be "N\*4+1" (N=0,1,2,...).__ Otherwise, it will be truncated to the nearest "N*4+1".
 
 In FramePack, it is recommended to set `frame_extraction` to `full` and `max_frames` to a sufficiently large value, as it can handle longer videos. However, if the video is too long, an Out of Memory error may occur during VAE encoding. The videos in FramePack are trimmed to "N * latent_window_size * 4 + 1" frames (for example, 37, 73, 109... if `latent_window_size` is 9).
@@ -185,6 +187,8 @@ If `source_fps` is not specified (default), all frames of the video will be used
 動画固有のパラメータ（target_frames, frame_extraction, frame_stride, frame_sample, max_frames, source_fps）は、各datasetsセクションに設定する必要があります。
 
 `video_directory`は動画を含むディレクトリのパスです。キャプションは、動画と同じファイル名で、`caption_extension`で指定した拡張子のテキストファイルに格納してください（例：`video1.mp4`と`video1.txt`）。
+
+`caption_extension = ".srt"`も使用できます。SRTキャプションでは、字幕番号と時間範囲が取り除かれ、すべての字幕本文が順番に結合されて動画全体の1つのキャプションになります。SRTの時間情報は、`frame_extraction`で選択されたフレームとの対応付けには使用されません。
 
 __HunyuanVideoおよびWan2.1では、target_framesの数値は「N\*4+1」である必要があります。__ これ以外の値の場合は、最も近いN\*4+1の値に切り捨てられます。
 

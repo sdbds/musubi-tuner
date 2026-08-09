@@ -24,11 +24,13 @@ from musubi_tuner.minimax_h3.media import (
     audio_latent_frames,
     video_latent_frames,
 )
-from musubi_tuner.minimax_h3.checkpoint import inspect_safetensors_convrot_int8, resolve_safetensors_files
+from musubi_tuner.minimax_h3.checkpoint import resolve_safetensors_files
+from musubi_tuner.modules.convrot_int8_utils import has_comfy_quant_tensors
 from musubi_tuner.minimax_h3.model import load_h3_transformer
 from musubi_tuner.minimax_h3.packing import H3VideoGeometry, build_h3_layout
 from musubi_tuner.minimax_h3.sampling import (
     augment_condition_latents,
+    create_sampling_generator,
     initialize_target_latents,
     sample_joint_av,
     synchronize_decoded_av,
@@ -186,6 +188,9 @@ def _encode_text(args, record: H3Record, text_visuals, device: torch.device):
         device=device,
         dtype=torch.bfloat16,
         disable_mmap=args.disable_numpy_memmap,
+        nvfp4_scaled_mm=args.nvfp4_scaled_mm,
+        blocks_to_swap=args.text_encoder_blocks_to_swap,
+        attn_mode=args.text_encoder_attn_mode,
     )
     hidden_states, token_tags = encode_h3_presentation(processor, text_encoder, presentation)
     del processor, text_encoder
@@ -296,7 +301,26 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument("--video_vae", required=True, help="MiniMax-H3 video VAE safetensors path or directory")
     parser.add_argument("--audio_vae", required=True, help="MiniMax-H3 audio VAE safetensors path or directory")
     parser.add_argument(
-        "--text_encoder", default=None, help="MiniMax-H3 Qwen3-VL safetensors path (BF16 or ConvRot INT8, auto-detected)"
+        "--text_encoder", default=None, help="MiniMax-H3 Qwen3-VL safetensors path (BF16, ConvRot INT8 or NVFP4, auto-detected)"
+    )
+    parser.add_argument(
+        "--nvfp4_scaled_mm",
+        action="store_true",
+        help="use W4A4 scaled_mm for an NVFP4 text encoder (requires PyTorch 2.10+ and Blackwell; default is weight-only dequantization)",
+    )
+    parser.add_argument(
+        "--text_encoder_blocks_to_swap",
+        type=int,
+        default=0,
+        help="number of the 50 Qwen3-VL decoder layers to stream from CPU instead of keeping them on the GPU"
+        " (0 = disabled, 50 = minimum VRAM; requires CUDA)",
+    )
+    parser.add_argument(
+        "--text_encoder_attn_mode",
+        choices=("sdpa", "flash_attention_2", "eager"),
+        default=None,
+        help="attention implementation for the text encoder (default: transformers default, sdpa)."
+        " Use flash_attention_2 for long presentations: sdpa falls back to the O(L^2) math kernel and can OOM",
     )
     parser.add_argument("--text_cache", default=None, help="optional precomputed mmh3 text cache")
     parser.add_argument("--processor", default=DEFAULT_PROCESSOR_ID, help="Qwen3-VL processor repo or directory")
@@ -417,6 +441,7 @@ def run_generation(args: argparse.Namespace) -> Path:
         layout.text_length,
         layout.row_count,
     )
+    generator = create_sampling_generator(args.seed)
     initial_video, initial_audio = initialize_target_latents(
         video_shape=(
             1,
@@ -426,7 +451,7 @@ def run_generation(args: argparse.Namespace) -> Path:
             layout.target_video.width,
         ),
         audio_shape=(1, 32, 2, layout.target_audio_frames),
-        seed=args.seed,
+        generator=generator,
         device=device,
         video_dtype=torch.float32,
         audio_dtype=torch.float32,
@@ -434,7 +459,7 @@ def run_generation(args: argparse.Namespace) -> Path:
     visual_conditions, audio_conditions = augment_condition_latents(
         visual_conditions,
         audio_conditions,
-        seed=args.seed,
+        generator=generator,
         visual_clean=args.h3_visual_cond_clean,
         audio_clean=args.h3_audio_cond_clean,
         device=device,
@@ -445,9 +470,7 @@ def run_generation(args: argparse.Namespace) -> Path:
     # - Pre-quantized INT8 base (auto-detected): attach LoRAs as runtime additive branches;
     #   the INT8 tensors cannot be merged into.
     # - Plain BF16 base: one-time destructive CPU merge after loading (fastest inference).
-    prequantized = (
-        inspect_safetensors_convrot_int8(resolve_safetensors_files(args.dit), disable_mmap=args.disable_numpy_memmap) is not None
-    )
+    prequantized = has_comfy_quant_tensors(resolve_safetensors_files(args.dit), disable_numpy_memmap=args.disable_numpy_memmap)
     convrot_int8 = args.convrot_int8 or prequantized
     merge_at_load = bool(args.lora_weight) and args.convrot_int8 and not prequantized
     load_on_cpu = bool(args.blocks_to_swap or (args.lora_weight and not convrot_int8))
