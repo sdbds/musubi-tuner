@@ -7,6 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from musubi_tuner.dataset.caption_utils import read_caption_file
+from musubi_tuner.dataset.datasources import ImageDirectoryDatasource, VideoDirectoryDatasource
 
 
 def test_plain_caption_keeps_existing_trim_behavior(tmp_path: Path):
@@ -69,3 +70,29 @@ def test_malformed_srt_reports_cue_and_path(tmp_path: Path):
 
     assert "cue block 1" in str(error.value)
     assert str(caption_path) in str(error.value)
+
+
+def test_image_directory_datasource_reads_srt_caption(tmp_path: Path):
+    image_path = tmp_path / "frame.png"
+    image_path.touch()
+    (tmp_path / "frame.srt").write_text(
+        "1\n00:00:00,000 --> 00:00:01,000\nImage caption.\n",
+        encoding="utf-8",
+    )
+
+    datasource = ImageDirectoryDatasource(str(tmp_path), caption_extension=".srt")
+
+    assert datasource.get_caption(0) == (str(image_path), "Image caption.")
+
+
+def test_video_directory_datasource_reads_srt_caption(tmp_path: Path):
+    video_path = tmp_path / "clip.mp4"
+    video_path.touch()
+    (tmp_path / "clip.srt").write_text(
+        "1\n00:00:00,000 --> 00:00:01,000\nVideo caption.\n",
+        encoding="utf-8",
+    )
+
+    datasource = VideoDirectoryDatasource(str(tmp_path), caption_extension=".srt")
+
+    assert datasource.get_caption(0) == (str(video_path), "Video caption.")

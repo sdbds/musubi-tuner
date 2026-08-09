@@ -8,6 +8,7 @@ import torch
 from PIL import Image
 
 from musubi_tuner.dataset.audio_utils import AudioSource, AudioSpec, decode_audio, resolve_audio_source
+from musubi_tuner.dataset.caption_utils import read_caption_file
 from musubi_tuner.dataset.media_utils import glob_images, glob_videos, load_video, VIDEO_EXTENSIONS
 
 if TYPE_CHECKING:
@@ -243,8 +244,7 @@ class ImageDirectoryDatasource(ImageDatasource):
     def get_caption(self, idx: int) -> tuple[str, str]:
         image_path = self.image_paths[idx]
         caption_path = os.path.splitext(image_path)[0] + self.caption_extension if self.caption_extension else ""
-        with open(caption_path, "r", encoding="utf-8") as f:
-            caption = f.read().strip()
+        caption = read_caption_file(caption_path)
         return image_path, caption
 
     def __iter__(self):
@@ -635,8 +635,7 @@ class VideoDirectoryDatasource(VideoDatasource):
     def get_caption(self, idx: int) -> tuple[str, str]:
         video_path = self.video_paths[idx]
         caption_path = os.path.splitext(video_path)[0] + self.caption_extension if self.caption_extension else ""
-        with open(caption_path, "r", encoding="utf-8") as f:
-            caption = f.read().strip()
+        caption = read_caption_file(caption_path)
         return video_path, caption
 
     def _audio_resolution_inputs(self, idx: int) -> tuple[str, Optional[str]]:
