@@ -20,9 +20,11 @@ The parser will support:
 - cues without sequence numbers
 - multi-line cue text
 - optional settings after the end timestamp
-- case-insensitive `.srt` file extensions
+- case-insensitive SRT parser dispatch after the caption path is resolved
 
-Text lines within a cue and text from consecutive cues will be joined with one space. Empty cues will not contribute text. Subtitle text, punctuation, repeated cues, and inline formatting tags will otherwise remain unchanged.
+The reader will trim leading and trailing whitespace from each cue text line and join non-empty lines and consecutive cues with one ASCII space. Whitespace inside a text line will remain unchanged. Empty cues will not contribute text. Subtitle text, punctuation, repeated cues, and inline formatting tags will otherwise remain unchanged.
+
+Existing caption path discovery will not change. On case-sensitive file systems, the configured `caption_extension` must therefore use the same letter case as the caption filename.
 
 The following are out of scope:
 
@@ -36,10 +38,10 @@ The following are out of scope:
 
 Add a small caption-reading module under `musubi_tuner.dataset` with two responsibilities:
 
-1. Read a caption file as UTF-8 text.
+1. Read plain captions as UTF-8 text and SRT captions as UTF-8 with an optional byte-order mark (`utf-8-sig`).
 2. Dispatch `.srt` files to an SRT parser while returning other files with the current `strip()` behavior.
 
-The SRT parser will split the document into cue blocks on blank lines. For each non-empty block it will accept either a timing line first or a sequence identifier followed by a timing line. A timing line must contain two valid SRT timestamps separated by `-->`; end-timestamp settings are allowed. The parser will discard the identifier and timing line, normalize whitespace in the remaining text lines, and append non-empty text to the result.
+The SRT parser will split the document into cue blocks on blank lines. For each non-empty block it will accept either a timing line first or a decimal sequence number followed by a timing line. A timing line must contain two valid SRT timestamps separated by `-->`; end-timestamp settings are allowed. The parser will discard the sequence number and timing line, trim the remaining text lines as described above, and append non-empty text to the result. A non-numeric line before a timing line is malformed rather than an identifier.
 
 Both image and video directory data sources will use the shared reader. This keeps `caption_extension` behavior consistent and removes the existing duplicate file-reading logic. JSONL data sources will remain unchanged because their captions are already stored as strings rather than caption files.
 
@@ -57,10 +59,11 @@ Tests will exercise the real caption reader and directory data source behavior:
 
 - plain-text captions retain their current content and trimming behavior
 - numbered SRT cues are combined in file order
-- BOM, CRLF, multi-line cue text, and end-timestamp settings are handled
-- cues without sequence numbers are accepted
-- extension matching is case-insensitive
+- BOM combined with a first cue that has no sequence number is handled
+- CRLF, multi-line cue text, and end-timestamp settings are handled
+- an already resolved `.SRT` path uses the SRT parser
 - malformed non-empty cue blocks raise a path-aware `ValueError`
+- image directory data sources return parsed SRT text from `get_caption`
 - video directory data sources return parsed SRT text from `get_caption`
 
 Tests will be written and observed failing before production code is added.
