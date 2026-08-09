@@ -6,7 +6,7 @@ Directory-backed datasets accept any value for `caption_extension`, so an SRT fi
 
 ## Goal
 
-When a directory-backed dataset uses an `.srt` caption file, read the cues in file order, remove cue numbers and time ranges, normalize whitespace, and return the combined cue text as one caption.
+When a directory-backed dataset uses an `.srt` caption file, read the cues in file order, remove cue numbers, time ranges, and HTML markup, normalize whitespace, and return the combined cue text as one caption.
 
 Existing plain-text caption behavior must not change.
 
@@ -20,9 +20,13 @@ The parser will support:
 - cues without sequence numbers
 - multi-line cue text
 - optional settings after the end timestamp
+- HTML formatting tags, including tags with attributes and nested tags
+- `<br>` elements as text separators
 - case-insensitive SRT parser dispatch after the caption path is resolved
 
-The reader will trim leading and trailing whitespace from each cue text line and join non-empty lines and consecutive cues with one ASCII space. Whitespace inside a text line will remain unchanged. Empty cues will not contribute text. Subtitle text, punctuation, repeated cues, and inline formatting tags will otherwise remain unchanged.
+The reader will remove HTML tags while preserving their rendered text, decode HTML character references, and treat `<br>` elements as a single text separator. It will then trim leading and trailing whitespace from each cue text line and join non-empty lines and consecutive cues with one ASCII space. Whitespace inside a text line will otherwise remain unchanged. Empty cues and empty formatting tags will not contribute text. Subtitle text, punctuation, and repeated cues will otherwise remain unchanged.
+
+HTML cleanup applies only to `.srt` files. Existing plain-text caption content, including angle-bracketed text, will remain unchanged.
 
 Existing caption path discovery will not change. On case-sensitive file systems, the configured `caption_extension` must therefore use the same letter case as the caption filename.
 
@@ -30,7 +34,7 @@ The following are out of scope:
 
 - selecting cues for a sampled video time range
 - deduplicating rolling or repeated subtitles
-- removing HTML, ASS, or other inline formatting
+- removing ASS or other non-HTML inline formatting
 - accepting non-SRT subtitle formats
 - changing JSONL caption handling
 
@@ -41,7 +45,9 @@ Add a small caption-reading module under `musubi_tuner.dataset` with two respons
 1. Read plain captions as UTF-8 text and SRT captions as UTF-8 with an optional byte-order mark (`utf-8-sig`).
 2. Dispatch `.srt` files to an SRT parser while returning other files with the current `strip()` behavior.
 
-The SRT parser will split the document into cue blocks on blank lines. For each non-empty block it will accept either a timing line first or a decimal sequence number followed by a timing line. A timing line must contain two valid SRT timestamps separated by `-->`; end-timestamp settings are allowed. The parser will discard the sequence number and timing line, trim the remaining text lines as described above, and append non-empty text to the result. A non-numeric line before a timing line is malformed rather than an identifier.
+The SRT parser will split the document into cue blocks on blank lines. For each non-empty block it will accept either a timing line first or a decimal sequence number followed by a timing line. A timing line must contain two valid SRT timestamps separated by `-->`; end-timestamp settings are allowed. The parser will discard the sequence number and timing line, pass each remaining text line through a small `html.parser.HTMLParser` subclass, trim the cleaned lines as described above, and append non-empty text to the result. The parser will retain character data, discard start and end tags, emit a separator for `<br>`, and use the standard library's character-reference decoding. A non-numeric line before a timing line is malformed rather than an identifier.
+
+Using the Python standard library avoids adding a runtime dependency. A regular-expression tag remover is intentionally avoided because quoted attributes can contain `>` and HTML tags can be nested or malformed.
 
 Both image and video directory data sources will use the shared reader. This keeps `caption_extension` behavior consistent and removes the existing duplicate file-reading logic. JSONL data sources will remain unchanged because their captions are already stored as strings rather than caption files.
 
@@ -62,6 +68,9 @@ Tests will exercise the real caption reader and directory data source behavior:
 - BOM combined with a first cue that has no sequence number is handled
 - CRLF, multi-line cue text, and end-timestamp settings are handled
 - an already resolved `.SRT` path uses the SRT parser
+- HTML tags with attributes and nested formatting are removed without removing their text
+- empty formatting tags contribute no text, `<br>` prevents adjacent text from joining, and HTML character references are decoded
+- plain-text caption files retain HTML-like text unchanged
 - malformed non-empty cue blocks raise a path-aware `ValueError`
 - image directory data sources return parsed SRT text from `get_caption`
 - video directory data sources return parsed SRT text from `get_caption`
