@@ -44,6 +44,26 @@ def test_srt_handles_crlf_multiline_text_and_timing_settings(tmp_path: Path):
     assert read_caption_file(str(caption_path)) == "first line second  line"
 
 
+def test_srt_removes_html_markup_but_keeps_rendered_text(tmp_path: Path):
+    caption_path = tmp_path / "clip.srt"
+    caption_path.write_text(
+        "1\n"
+        "00:00:00,000 --> 00:00:01,000\n"
+        "<font color='green' title='2 > 1'><i>Green &amp; bright</i></font><BR>Next\n"
+        "<font color='green'></font>\n",
+        encoding="utf-8",
+    )
+
+    assert read_caption_file(str(caption_path)) == "Green & bright Next"
+
+
+def test_plain_caption_keeps_html_like_text(tmp_path: Path):
+    caption_path = tmp_path / "clip.txt"
+    caption_path.write_text("<font color='green'>Keep me</font>", encoding="utf-8")
+
+    assert read_caption_file(str(caption_path)) == "<font color='green'>Keep me</font>"
+
+
 def test_uppercase_srt_path_uses_srt_parser(tmp_path: Path):
     caption_path = tmp_path / "clip.SRT"
     caption_path.write_text("1\n00:00:00,000 --> 00:00:01,000\nUppercase extension.\n", encoding="utf-8")

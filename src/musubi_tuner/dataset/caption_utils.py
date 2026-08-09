@@ -1,3 +1,4 @@
+from html.parser import HTMLParser
 import os
 import re
 
@@ -6,6 +7,26 @@ _SRT_SEQUENCE_NUMBER = re.compile(r"[0-9]+")
 _SRT_TIMESTAMP = r"[0-9]{2,}:[0-5][0-9]:[0-5][0-9][,.][0-9]{3}"
 _SRT_TIMING_LINE = re.compile(rf"{_SRT_TIMESTAMP}[ \t]*-->[ \t]*{_SRT_TIMESTAMP}(?:[ \t]+.*)?")
 _SRT_CUE_SEPARATOR = re.compile(r"(?:[ \t]*\r?\n){2,}")
+
+
+class _SRTTextExtractor(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+
+    def handle_data(self, data: str) -> None:
+        self.parts.append(data)
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() == "br":
+            self.parts.append(" ")
+
+
+def _strip_srt_html(text: str) -> str:
+    parser = _SRTTextExtractor()
+    parser.feed(text)
+    parser.close()
+    return "".join(parser.parts)
 
 
 def parse_srt_caption(content: str, source: str) -> str:
@@ -22,7 +43,10 @@ def parse_srt_caption(content: str, source: str) -> str:
                 f"Invalid SRT cue block {block_index} in {source}: expected a timing line after an optional decimal sequence number"
             )
 
-        caption_lines.extend(line.strip() for line in lines[timing_index + 1 :] if line.strip())
+        for line in lines[timing_index + 1 :]:
+            cleaned_line = _strip_srt_html(line).strip()
+            if cleaned_line:
+                caption_lines.append(cleaned_line)
 
     return " ".join(caption_lines)
 
