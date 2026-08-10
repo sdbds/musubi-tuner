@@ -13,7 +13,7 @@ from musubi_tuner.dataset.cache_io import save_text_encoder_output_cache_minimax
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
 from musubi_tuner.dataset.image_video_dataset import ItemInfo, VideoDataset
 from musubi_tuner.minimax_h3.text_encoder import (
-    DEFAULT_PROCESSOR_ID,
+    H3Presentation,
     H3TextVisual,
     TEXT_CACHE_FORMAT,
     build_presentation,
@@ -22,6 +22,7 @@ from musubi_tuner.minimax_h3.text_encoder import (
     load_h3_text_encoder,
     presentation_fingerprint,
     processor_fingerprint,
+    save_h3_uncond_cache,
 )
 from musubi_tuner.minimax_h3.media import h3_records_from_datasource
 from musubi_tuner.minimax_h3_cache_latents import (
@@ -147,16 +148,22 @@ def setup_parser() -> argparse.ArgumentParser:
         help="attention implementation for the text encoder (default: transformers default, sdpa)."
         " Use flash_attention_2 for long presentations: sdpa falls back to the O(L^2) math kernel and can OOM",
     )
-    parser.add_argument(
-        "--processor",
-        type=str,
-        default=DEFAULT_PROCESSOR_ID,
-        help="Qwen3-VL-32B processor repo or local directory",
-    )
-    parser.add_argument("--processor_revision", type=str, default=None, help="optional processor revision")
     parser.add_argument("--task", choices=("t2va", "fl2va", "ref2va"), required=True)
     parser.add_argument("--text_cache_dtype", choices=("bf16", "float32"), default="bf16")
     parser.add_argument("--disable_mmap", action="store_true", help="disable memory-mapped safetensors loading")
+    parser.add_argument(
+        "--uncond_output",
+        type=str,
+        default=None,
+        help="also write the guidance-loss uncond probe embedding (--uncond_text) to this safetensors path,"
+        " for --h3_guidance_loss_uncond_cache in training",
+    )
+    parser.add_argument(
+        "--uncond_text",
+        type=str,
+        default=" ",
+        help='text of the uncond probe for --uncond_output (default: a single space, the screened "space" probe)',
+    )
     return parser
 
 
@@ -185,15 +192,13 @@ def main() -> None:
     }
     media_fingerprints = {path: fingerprint_file(path) for path in text_paths}
 
-    logger.info("Loading MiniMax-H3 Qwen3-VL processor from %s", args.processor)
-    processor = load_h3_processor(args.processor, revision=args.processor_revision)
+    logger.info("Loading MiniMax-H3 Qwen3-VL processor")
+    processor = load_h3_processor()
     processor_identity = processor_fingerprint(processor)
     text_encoder_identity = fingerprint_checkpoint(args.text_encoder)
     logger.info("Loading MiniMax-H3 text encoder from %s", args.text_encoder)
     text_encoder = load_h3_text_encoder(
         args.text_encoder,
-        processor_path=args.processor,
-        revision=args.processor_revision,
         device=device,
         dtype=torch.bfloat16,
         disable_mmap=args.disable_mmap,
@@ -201,6 +206,27 @@ def main() -> None:
         blocks_to_swap=args.text_encoder_blocks_to_swap,
         attn_mode=args.text_encoder_attn_mode,
     )
+
+    if args.uncond_output:
+        presentation = H3Presentation(text=args.uncond_text, processor_text=args.uncond_text)
+        hidden_states, token_tags = encode_h3_presentation(processor, text_encoder, presentation)
+        save_h3_uncond_cache(
+            args.uncond_output,
+            hidden_states.to(_cache_dtype(args.text_cache_dtype)).cpu(),
+            token_tags.cpu(),
+            metadata={
+                "text": args.uncond_text,
+                "text_encoder_fingerprint": text_encoder_identity,
+                "processor_fingerprint": processor_identity,
+                "cache_dtype": args.text_cache_dtype,
+            },
+        )
+        logger.info(
+            "Saved MiniMax-H3 guidance-loss uncond cache (%d rows, text=%r): %s",
+            hidden_states.shape[0],
+            args.uncond_text,
+            args.uncond_output,
+        )
 
     decoded_reference_cache = {}
     skip_matching_cache = args.skip_existing

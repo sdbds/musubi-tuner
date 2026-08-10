@@ -37,7 +37,6 @@ from musubi_tuner.minimax_h3.sampling import (
     write_joint_av,
 )
 from musubi_tuner.minimax_h3.text_encoder import (
-    DEFAULT_PROCESSOR_ID,
     TEXT_CACHE_FORMAT,
     build_presentation,
     encode_h3_presentation,
@@ -180,11 +179,9 @@ def _encode_text(args, record: H3Record, text_visuals, device: torch.device):
             presentation_identity=presentation_identity,
         )
     logger.info("Loading MiniMax-H3 Qwen3-VL text encoder")
-    processor = load_h3_processor(args.processor, revision=args.processor_revision)
+    processor = load_h3_processor()
     text_encoder = load_h3_text_encoder(
         args.text_encoder,
-        processor_path=args.processor,
-        revision=args.processor_revision,
         device=device,
         dtype=torch.bfloat16,
         disable_mmap=args.disable_numpy_memmap,
@@ -287,8 +284,8 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dit",
         required=True,
-        help="MiniMax-H3 transformer safetensors path or directory (BF16 or ConvRot INT8; pre-quantized full and "
-        "pruned ConvRot INT8 checkpoints are detected automatically)",
+        help="MiniMax-H3 transformer safetensors path or directory (BF16 or ConvRot INT8, each full or pruned; "
+        "pre-quantized and pruned checkpoints are detected automatically)",
     )
     parser.add_argument(
         "--convrot_int8",
@@ -297,6 +294,13 @@ def setup_parser() -> argparse.ArgumentParser:
         "falls back to slower dequantized bf16 matmul without it). ComfyUI pre-quantized ConvRot INT8 checkpoints "
         "are detected automatically and do not need this flag. With a BF16 base, LoRA weights are merged before "
         "quantization; with a pre-quantized base, LoRAs are attached as runtime branches instead.",
+    )
+    parser.add_argument(
+        "--prune_adaln",
+        action="store_true",
+        help="prune the AdaLN projections of a full BF16 DiT at load time (mean-centered rank-8 basis, time "
+        "embedder retained). Published pruned checkpoints do not need this flag; pre-quantized ConvRot INT8 "
+        "checkpoints are rejected. Combines with --convrot_int8.",
     )
     parser.add_argument("--video_vae", required=True, help="MiniMax-H3 video VAE safetensors path or directory")
     parser.add_argument("--audio_vae", required=True, help="MiniMax-H3 audio VAE safetensors path or directory")
@@ -323,8 +327,6 @@ def setup_parser() -> argparse.ArgumentParser:
         " Use flash_attention_2 for long presentations: sdpa falls back to the O(L^2) math kernel and can OOM",
     )
     parser.add_argument("--text_cache", default=None, help="optional precomputed mmh3 text cache")
-    parser.add_argument("--processor", default=DEFAULT_PROCESSOR_ID, help="Qwen3-VL processor repo or directory")
-    parser.add_argument("--processor_revision", default=None)
     parser.add_argument("--prompt", default=None)
     parser.add_argument("--first_frame", default=None)
     parser.add_argument("--last_frame", default=None)
@@ -487,6 +489,7 @@ def run_generation(args: argparse.Namespace) -> Path:
         quant_device=device,
         lora_weights=lora_weights,
         lora_multipliers=lora_multipliers,
+        prune_adaln=args.prune_adaln,
     )
     attached_lora_networks = _configure_lora_weights(transformer, args, device, prequantized=prequantized)
     if args.blocks_to_swap:
