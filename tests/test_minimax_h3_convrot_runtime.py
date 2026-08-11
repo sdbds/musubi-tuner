@@ -59,11 +59,11 @@ def _load_training_module(monkeypatch):
     _stub(
         monkeypatch,
         "musubi_tuner.minimax_h3.text_encoder",
-        DEFAULT_PROCESSOR_ID="fake-processor",
         build_presentation=noop,
         encode_h3_presentation=noop,
         load_h3_processor=noop,
         load_h3_text_encoder=noop,
+        load_h3_uncond_cache=noop,
     )
     _stub(
         monkeypatch,
@@ -118,6 +118,7 @@ def _trainer_args(**overrides):
         "convrot_int8_bwd": "bf16",
         "base_weights": None,
         "disable_numpy_memmap": False,
+        "prune_adaln": False,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
