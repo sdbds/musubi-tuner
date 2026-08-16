@@ -347,6 +347,19 @@ class ImageDataset(BaseDataset):
         self.no_resize_control = no_resize_control
         self.control_resolution = control_resolution
 
+        if self.architecture == ARCHITECTURE_MINIMAX_H3:
+            # one-frame (image) training v1: plain t2va targets only. Control images (fl2va
+            # conditions) and their fp_1f_clean_indices arrive with the K=1/2 editing phase.
+            if control_directory is not None or multiple_target:
+                raise ValueError("MiniMax-H3 image datasets do not support control images or multiple targets yet")
+            if fp_1f_clean_indices is not None:
+                raise ValueError(
+                    "MiniMax-H3 image datasets do not use fp_1f_clean_indices yet;"
+                    " only fp_1f_target_index (a 24 fps pixel-frame index) is supported"
+                )
+            if fp_1f_target_index is not None and fp_1f_target_index < 0:
+                raise ValueError(f"MiniMax-H3 fp_1f_target_index must be nonnegative, got {fp_1f_target_index}")
+
         control_count_per_image: Optional[int] = 1
         if self.architecture == ARCHITECTURE_FRAMEPACK or self.architecture == ARCHITECTURE_WAN:
             if fp_1f_clean_indices is not None:
@@ -385,6 +398,9 @@ class ImageDataset(BaseDataset):
         self.has_control = self.datasource.has_control
         if self.architecture == ARCHITECTURE_LENS and self.has_control:
             raise ValueError("Lens MVP supports text-to-image only; control images are not supported.")
+        if self.architecture == ARCHITECTURE_MINIMAX_H3 and self.has_control:
+            # JSONL control_path entries surface only after datasource construction
+            raise ValueError("MiniMax-H3 image datasets do not support control images yet")
 
     def get_metadata(self):
         metadata = super().get_metadata()
