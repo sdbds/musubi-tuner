@@ -23,7 +23,7 @@ from musubi_tuner.modules.convrot_int8_utils import apply_convrot_int8_monkey_pa
 from musubi_tuner.minimax_h3_train_network import (
     H3SamplingResources,
     MiniMaxH3NetworkTrainer,
-    _apply_timestep_focus,
+    _base_sigma_from_uniform,
     _decomposed_flow_loss,
     _prediction_geometry_log,
     _sample_request,
@@ -1049,6 +1049,23 @@ def test_noising_follows_the_trainer_timestep_convention_with_the_video_shift(mo
     assert timesteps.tolist() == [251.0]
     assert noisy.dtype == torch.float16
     assert torch.allclose(noisy.float(), torch.full_like(latents, -0.6).float())
+
+
+def test_noising_takes_the_dataset_draw_and_clips_it_in_base_space(monkeypatch):
+    # a pre-drawn dataset timestep (--num_timestep_buckets) is the raw uniform draw; the
+    # --min/max_timestep clip maps it affinely in base space before the video shift
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args(min_timestep=200, max_timestep=600)
+    trainer.handle_model_specific_args(args)
+    monkeypatch.setattr(torch, "rand", lambda *a, **k: pytest.fail("the dataset draw must be used"))
+    latents = torch.zeros(1, 24, 2, 4, 4, dtype=torch.float16)
+    noise = torch.ones_like(latents)
+
+    noisy, timesteps = trainer.get_noisy_model_input_and_timesteps(args, noise, latents, [0.25], None, torch.device("cpu"), None)
+
+    assert timesteps.tolist() == pytest.approx([301.0])  # base 0.2 + 0.4*0.25 = 0.3
+    # noise=1, latents=0: the noisy input is the shifted video sigma of base 0.3 under shift 12
+    assert noisy[0, 0, 0, 0, 0].item() == pytest.approx(12 * 0.3 / (1 + 11 * 0.3), abs=1e-3)
 
 
 @pytest.mark.parametrize(
@@ -2349,13 +2366,35 @@ def test_teacher_matching_replaces_both_targets_with_the_frozen_base_predictions
 def test_timestep_focus_remaps_a_uniform_draw_into_the_band_mixture():
     u = torch.linspace(0.0, 0.999, 1000)
 
-    out = _apply_timestep_focus(u, 0.4, 0.8, 0.5)
+    out = _base_sigma_from_uniform(u, focus_min=0.4, focus_max=0.8, focus_prob=0.5)
 
     assert out[u < 0.5].min() >= 0.4 and out[u < 0.5].max() < 0.8  # focused draws stay in the band
     assert out[u >= 0.5].min() >= 0.0 and out[u >= 0.5].max() <= 1.0  # the rest stays uniform over [0,1)
     in_band = ((out >= 0.4) & (out < 0.8)).float().mean().item()
     assert in_band == pytest.approx(0.5 + 0.5 * 0.4, abs=0.02)  # density = prob + (1-prob)*(max-min)
-    torch.testing.assert_close(_apply_timestep_focus(u, 0.4, 0.8, 0.0), u)  # prob 0 = identity
+    torch.testing.assert_close(_base_sigma_from_uniform(u, focus_min=0.4, focus_max=0.8, focus_prob=0.0), u)  # prob 0 = identity
+    torch.testing.assert_close(_base_sigma_from_uniform(u), u)  # the default draw is the raw uniform
+
+
+def test_timestep_focus_composes_with_the_clipped_base_range():
+    u = torch.linspace(0.0, 0.999, 1000)
+
+    # --min_timestep 100 --max_timestep 900: the non-focused draws stay uniform over the clipped range
+    out = _base_sigma_from_uniform(u, lower=0.1, upper=0.9, focus_min=0.4, focus_max=0.8, focus_prob=0.5)
+
+    assert out[u < 0.5].min() >= 0.4 and out[u < 0.5].max() < 0.8
+    assert out[u >= 0.5].min() >= 0.1 and out[u >= 0.5].max() < 0.9
+    assert out.min() >= 0.1 and out.max() < 0.9  # nothing lands outside the clip
+    in_band = ((out >= 0.4) & (out < 0.8)).float().mean().item()
+    assert in_band == pytest.approx(0.5 + 0.5 * 0.4 / 0.8, abs=0.02)  # density = prob + (1-prob)*(band/range)
+    # focus off: the clip alone is the exact affine map of the uniform draw
+    torch.testing.assert_close(_base_sigma_from_uniform(u, lower=0.2, upper=0.6), 0.2 + 0.4 * u)
+
+
+def test_timestep_focus_inside_a_clipped_range_is_accepted():
+    args = _trainer_args(h3_timestep_focus_prob=0.5, min_timestep=100, max_timestep=900)
+
+    MiniMaxH3NetworkTrainer().handle_model_specific_args(args)  # band [0.4,0.8) lies inside [0.1,0.9]
 
 
 @pytest.mark.parametrize(
@@ -2363,7 +2402,10 @@ def test_timestep_focus_remaps_a_uniform_draw_into_the_band_mixture():
     [
         ({"h3_timestep_focus_prob": 1.5}, "focus_prob"),
         ({"h3_timestep_focus_prob": 0.5, "h3_timestep_focus_min": 0.8, "h3_timestep_focus_max": 0.4}, "min < max"),
-        ({"h3_timestep_focus_prob": 0.5, "min_timestep": 100}, "min_timestep"),
+        # the band must lie inside the clipped base range: a contradictory configuration
+        ({"h3_timestep_focus_prob": 0.5, "min_timestep": 500}, "min_timestep"),
+        ({"h3_timestep_focus_prob": 0.5, "max_timestep": 700}, "max_timestep"),
+        ({"min_timestep": 600, "max_timestep": 600}, "non-empty"),
         ({"h3_teacher_loss_dc_weight": 0.0}, "h3_teacher_matching"),
         ({"h3_teacher_loss_mag_weight": 0.5}, "h3_teacher_matching"),
         ({"h3_teacher_preservation_weight": 2.0}, "h3_teacher_matching"),
@@ -2901,6 +2943,24 @@ def test_preservation_density_compensation_counts_the_lower_anchor_band():
     assert _preservation_density_compensation(0.75, 0.1, 0.8, 0.5, 0.15) == pytest.approx(0.4 / ((0.5 * 0.4) + 0.5 * 0.1 / 0.7))
     # sigma_min 0 reproduces the previous single-band value
     assert _preservation_density_compensation(0.75, 0.4, 0.8, 0.5, 0.0) == pytest.approx(0.25 / 0.1875)
+
+
+def test_preservation_density_compensation_measures_the_anchor_inside_the_clipped_range():
+    from musubi_tuner.minimax_h3_train_network import _preservation_density_compensation
+
+    # --max_timestep 900: the anchor (0.75,1] is sampled only on (0.75,0.9], uniform share 0.15/0.9;
+    # focus 0.5 on [0.4,0.7) never lands there, so the anchor thins to (1-p) of its share
+    assert _preservation_density_compensation(0.75, 0.4, 0.7, 0.5, 0.0, 0.0, 0.9) == pytest.approx(2.0)
+    # the focus band overlapping the clipped anchor counts only the sampled overlap
+    expected = (0.15 / 0.9) / (0.5 * 0.15 / 0.9 + 0.5 * 0.05 / 0.4)
+    assert _preservation_density_compensation(0.75, 0.4, 0.8, 0.5, 0.0, 0.0, 0.9) == pytest.approx(expected)
+    # a clip that never reaches the anchor band: no anchor steps, no correction
+    assert _preservation_density_compensation(0.75, 0.4, 0.7, 0.5, 0.0, 0.0, 0.7) == 1.0
+    # the lower anchor band is clipped the same way (--min_timestep 100 under sigma_min 0.15)
+    expected_lower = ((0.25 + 0.05) / 0.9) / (0.5 * (0.25 + 0.05) / 0.9 + 0.5 * 0.05 / 0.4)
+    assert _preservation_density_compensation(0.75, 0.4, 0.8, 0.5, 0.15, 0.1, 1.0) == pytest.approx(expected_lower)
+    # the full range reproduces the unclipped formula
+    assert _preservation_density_compensation(0.75, 0.4, 0.8, 0.5, 0.15, 0.0, 1.0) == pytest.approx(0.4 / 0.2625)
 
 
 def test_teacher_matching_requires_the_lora_network(monkeypatch):
