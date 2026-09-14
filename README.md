@@ -63,14 +63,16 @@ If you find this project helpful, please consider supporting its development via
 
 GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
-- August 14, 2026
-    - Added experimental MiniMax-H3 teacher-matching training (`--h3_teacher_matching`): a T2VA LoRA is trained against the frozen base model's predictions under privileged conditioning — the clip's first/last frames, or the training clip itself as a copy-source reference (`--h3_teacher_conditions ref`) — structurally avoiding the de-distillation drift of plain flow targets. Includes a base-sigma preservation anchor, a decomposed anti-washout loss, timestep focus (`--h3_timestep_focus_*`, usable in any H3 training), and the `--lora_runtime_attach` / `--trajectory_dir` generation options. [PR #1047](https://github.com/kohya-ss/musubi-tuner/pull/1047). See the [MiniMax-H3 documentation](./docs/minimax_h3.md) for details.
-
-- August 8, 2026
-    - Added MiniMax-H3 ConvRot INT8 support for LoRA training and generation: BF16 checkpoints quantize at load time with `--convrot_int8`, and the released full and pruned ConvRot INT8 transformers and the ConvRot INT8 Qwen3-VL-32B text encoder are detected automatically. Generation attaches LoRAs to pre-quantized bases as runtime branches. Thank you sdbds [PR #1024](https://github.com/kohya-ss/musubi-tuner/pull/1024). See the [MiniMax-H3 documentation](./docs/minimax_h3.md) for details.
-
-- August 3, 2026
-    - Added experimental MiniMax-H3 R1 support for T2VA, FL2VA, and Ref2VA LoRA training plus standalone and scheduled training-time joint video/audio generation. R1 supports the published BF16 transformers, dual VAEs, Qwen3-VL-32B conditioning, and block swap. See the [MiniMax-H3 documentation](./docs/minimax_h3.md) for dataset, cache, training, generation, and R2 deferral details. [PR #1018](https://github.com/kohya-ss/musubi-tuner/pull/1018) Thank you sdbds for the contribution.
+- September XX, 2026
+    - Added experimental support for MiniMax-H3 (LoRA training and joint video/audio generation). Many thanks to sdbds for the initial [PR #1018](https://github.com/kohya-ss/musubi-tuner/pull/1018) and follow-ups.
+        - For details, please refer to the [documentation](./docs/minimax_h3.md) and the [one-frame (image) training documentation](./docs/minimax_h3_1f.md). The list of merged features and remaining work is tracked in the [MiniMax-H3 support roadmap](https://github.com/kohya-ss/musubi-tuner/issues/1029).
+    - Added ConvRot int8 quantization of the frozen DiT base weights for Krea 2 LoRA training (`--convrot_int8`), as an alternative to `--fp8_base --fp8_scaled`. See [PR #1008](https://github.com/kohya-ss/musubi-tuner/pull/1008).
+        - Weight VRAM is halved as with fp8. The main benefit is speed on GPUs without fp8 support (RTX 30 series and older). Requires `triton` for the fused kernels. See the [Krea 2 documentation](./docs/krea2.md#convrot-int8--convrot-int8) for details.
+    - Dataset configuration changes for metadata JSONL files. See the [dataset configuration documentation](./docs/dataset_config.md) for details.
+        - Relative paths in JSONL files are now also resolved against the directory containing the JSONL file when they are not found relative to the working directory. [PR #1023](https://github.com/kohya-ss/musubi-tuner/pull/1023)
+        - Video records may carry an optional `audio_path` field for audio-capable architectures (currently MiniMax-H3); a same-stem audio sidecar file or the embedded audio track is used when omitted. [PR #1020](https://github.com/kohya-ss/musubi-tuner/pull/1020), [PR #1021](https://github.com/kohya-ss/musubi-tuner/pull/1021)
+        - Keys outside the shared schema are passed through to architecture-specific cache scripts as per-item extras. [PR #1094](https://github.com/kohya-ss/musubi-tuner/pull/1094)
+    - Fixed `--attn_mode sdpa` raising an error in the shared attention backends; it is now an alias of `torch`. Thank you rossnot [PR #1092](https://github.com/kohya-ss/musubi-tuner/pull/1092).
 
 - July 14, 2026
     - Added the `--log_grad_metrics` option to log gradient norm diagnostics (`grad/norm`, `grad/mean_norm`, `grad/max`, measured before gradient clipping) to the tracker. Thank you rockerBOO [PR #988](https://github.com/kohya-ss/musubi-tuner/pull/988).
@@ -174,6 +176,7 @@ For detailed information on specific architectures, configurations, and advanced
 - [Kandinsky 5](./docs/kandinsky5.md)
 - [FLUX.2](./docs/flux_2.md)
 - [MiniMax-H3](./docs/minimax_h3.md)
+- [MiniMax-H3 (Single Frame)](./docs/minimax_h3_1f.md)
 
 **Common Configuration & Usage:**
 - [Dataset Configuration](./docs/dataset_config.md)
