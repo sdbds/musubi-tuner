@@ -479,20 +479,38 @@ def _base_sigma_of(timesteps: torch.Tensor) -> float:
     return float((timesteps.reshape(-1)[0].item() - 1.0) / 1000.0)
 
 
-def _apply_timestep_focus(base: torch.Tensor, low: float, high: float, prob: float) -> torch.Tensor:
-    """Deterministic remap of a uniform [0,1) draw that concentrates sampling on a band.
+def _base_sigma_range(args: argparse.Namespace) -> tuple[float, float]:
+    """The base-sigma range --min_timestep/--max_timestep clip to, in [0,1] (1 = pure noise)."""
+    lower = 0.0 if args.min_timestep is None else float(args.min_timestep) / 1000.0
+    upper = 1.0 if args.max_timestep is None else float(args.max_timestep) / 1000.0
+    return lower, upper
 
-    With probability ``prob`` the sample lands uniformly in [low, high); otherwise it stays
-    uniform over [0, 1). The band density becomes prob + (1-prob)*(high-low), so the rest of
-    the range (including a base-preservation anchor band) keeps nonzero coverage. The shift
-    family s*u/(1+(s-1)u) can only pile mass onto an endpoint, which is why an interior
-    decision band needs this mixture form instead.
+
+def _base_sigma_from_uniform(
+    u: torch.Tensor,
+    *,
+    lower: float = 0.0,
+    upper: float = 1.0,
+    focus_min: float = 0.0,
+    focus_max: float = 1.0,
+    focus_prob: float = 0.0,
+) -> torch.Tensor:
+    """Deterministic map of a uniform [0,1) draw onto the training base sigma.
+
+    With probability ``focus_prob`` the sample lands uniformly in the focus band
+    [focus_min, focus_max); otherwise it is uniform over the clipped range [lower, upper).
+    The band density becomes prob + (1-prob)*(band width / range width), so the rest of the
+    range (including a base-preservation anchor band) keeps nonzero coverage. The shift family
+    s*u/(1+(s-1)u) can only pile mass onto an endpoint, which is why an interior decision band
+    needs this mixture form instead. Being a deterministic function of ``u``, the map keeps the
+    dataset's stratified draws (--num_timestep_buckets) stratified.
     """
-    if prob <= 0.0:
-        return base
-    focused = low + (high - low) * (base / prob)
-    passthrough = (base - prob) / max(1.0 - prob, 1e-8)
-    return torch.where(base < prob, focused, passthrough)
+    passthrough = lower + (upper - lower) * u
+    if focus_prob <= 0.0:
+        return passthrough
+    focused = focus_min + (focus_max - focus_min) * (u / focus_prob)
+    passthrough = lower + (upper - lower) * ((u - focus_prob) / max(1.0 - focus_prob, 1e-8))
+    return torch.where(u < focus_prob, focused, passthrough)
 
 
 def _dc_attenuated_prediction(pred: torch.Tensor, target: torch.Tensor, dc_weight: float) -> torch.Tensor:
@@ -530,26 +548,38 @@ def _decomposed_flow_loss(pred: torch.Tensor, target: torch.Tensor, mag_weight: 
 
 
 def _preservation_density_compensation(
-    sigma_max: float, focus_min: float, focus_max: float, focus_prob: float, sigma_min: float = 0.0
+    sigma_max: float,
+    focus_min: float,
+    focus_max: float,
+    focus_prob: float,
+    sigma_min: float = 0.0,
+    lower: float = 0.0,
+    upper: float = 1.0,
 ) -> float:
     """Loss-weight correction that keeps the preservation anchor's expected gradient share
     invariant under timestep focus.
 
     Focus concentrates the base-sigma draw on the teaching band and thins the anchor bands
     (base sigma > sigma_max, and < sigma_min when a lower gate is set) from their uniform
-    share ``(1 - sigma_max) + sigma_min`` to ``(1-p)*uniform + p*overlap/(max-min)``;
+    share of the clipped range [lower, upper] to ``(1-p)*uniform + p*overlap/(max-min)``;
     multiplying each anchor step's loss by uniform/focused restores the anchor's per-unit-time
     pull, so raising the focus does not silently weaken the drift protection.
     """
-    anchor_width = (1.0 - sigma_max) + max(0.0, sigma_min)
+
+    def overlap(a0: float, a1: float, b0: float, b1: float) -> float:
+        return max(0.0, min(a1, b1) - max(a0, b0))
+
+    # the anchor bands as actually sampled: intersected with the clipped base range
+    anchor_width = overlap(sigma_max, 1.0, lower, upper) + overlap(0.0, sigma_min, lower, upper)
     if anchor_width <= 0.0 or focus_prob <= 0.0:
         return 1.0
-    overlap = max(0.0, focus_max - max(focus_min, sigma_max)) + max(0.0, min(focus_max, sigma_min) - focus_min)
-    focused_share = (1.0 - focus_prob) * anchor_width + focus_prob * overlap / (focus_max - focus_min)
+    uniform_share = anchor_width / (upper - lower)
+    focus_overlap = overlap(sigma_max, 1.0, focus_min, focus_max) + overlap(0.0, sigma_min, focus_min, focus_max)
+    focused_share = (1.0 - focus_prob) * uniform_share + focus_prob * focus_overlap / (focus_max - focus_min)
     if focused_share <= 0.0:
         # the anchor band is never sampled, so the multiplier is never applied
         return 1.0
-    return anchor_width / focused_share
+    return uniform_share / focused_share
 
 
 def _prediction_geometry_log(label: str, prediction: torch.Tensor, target: torch.Tensor) -> dict[str, torch.Tensor]:
@@ -673,10 +703,12 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             raise ValueError("MiniMax-H3 supports --weighting_scheme none only")
         if float(args.discrete_flow_shift) != 1.0:
             raise ValueError("MiniMax-H3 requires --discrete_flow_shift 1.0; use the two H3 shifts instead")
-        lower = 0.0 if args.min_timestep is None else float(args.min_timestep)
-        upper = 1000.0 if args.max_timestep is None else float(args.max_timestep)
-        if not 0.0 <= lower <= upper <= 1000.0:
-            raise ValueError("MiniMax-H3 min_timestep/max_timestep must define a range inside [0,1000]")
+        lower, upper = _base_sigma_range(args)
+        if not 0.0 <= lower < upper <= 1.0:
+            raise ValueError("MiniMax-H3 min_timestep/max_timestep must define a non-empty range inside [0,1000]")
+        if args.preserve_distribution_shape:
+            # the H3 draw is uniform in base space, where the clip is exact; rejection sampling changes nothing
+            logger.info("MiniMax-H3 ignores --preserve_distribution_shape: the uniform base draw is clipped exactly")
         validate_shift(args.h3_shift_video, "--h3_shift_video")
         validate_shift(args.h3_shift_audio, "--h3_shift_audio")
         validate_clean_coefficient(args.h3_visual_cond_clean, "--h3_visual_cond_clean")
@@ -696,15 +728,18 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         if focus_prob > 0.0:
             focus_min = float(args.h3_timestep_focus_min)
             focus_max = float(args.h3_timestep_focus_max)
-            if not 0.0 <= focus_min < focus_max <= 1.0:
-                raise ValueError(f"--h3_timestep_focus_min/max must satisfy 0 <= min < max <= 1, got {focus_min}/{focus_max}")
-            if args.min_timestep is not None or args.max_timestep is not None:
-                raise ValueError("--h3_timestep_focus_prob does not compose with --min_timestep/--max_timestep")
+            if not lower <= focus_min < focus_max <= upper:
+                raise ValueError(
+                    "--h3_timestep_focus_min/max must satisfy min < max and lie inside the base range"
+                    f" [{lower},{upper}] of --min_timestep/--max_timestep, got {focus_min}/{focus_max}"
+                )
             logger.info(
-                "MiniMax-H3 timestep focus: base sigma band [%s,%s) sampled with density %.3f (uniform elsewhere)",
+                "MiniMax-H3 timestep focus: base sigma band [%s,%s) sampled with density %.3f (uniform over [%s,%s) elsewhere)",
                 focus_min,
                 focus_max,
-                focus_prob + (1.0 - focus_prob) * (focus_max - focus_min),
+                focus_prob + (1.0 - focus_prob) * (focus_max - focus_min) / (upper - lower),
+                lower,
+                upper,
             )
 
         guidance_scale = float(args.h3_guidance_loss_scale)
@@ -1540,14 +1575,26 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         return self.compute_loss(args, output, timesteps, noise_scheduler, dit_dtype, network_dtype, global_step)
 
     def get_noisy_model_input_and_timesteps(self, args, noise, latents, timesteps, noise_scheduler, device, dtype):
-        """The video half of the H3 noising: one base sigma per item from the shared draw (uniform,
-        then the optional timestep focus), shifted by --h3_shift_video. The returned timesteps
-        follow the trainer's 1..1000 convention; process_batch derives the audio noising from the
-        same base sigma under --h3_shift_audio."""
+        """The video half of the H3 noising: one base sigma per item, mapped from a raw uniform
+        draw (the optional focus mixture over the --min/max_timestep range) and shifted by
+        --h3_shift_video. H3 owns the draw instead of going through sample_timesteps: the base
+        trainer's distribution knobs describe a single stream, while H3 derives both streams
+        from the same base sigma. The returned timesteps carry that base sigma in the trainer's
+        1..1000 convention; process_batch derives the audio noising from it under --h3_shift_audio."""
         del noise_scheduler, dtype
-        base = self.sample_timesteps(args, noise.shape[0], timesteps, latents, device)
-        base = _apply_timestep_focus(
-            base, float(args.h3_timestep_focus_min), float(args.h3_timestep_focus_max), float(args.h3_timestep_focus_prob)
+        # the raw uniform draw: the dataset's stratified pool under --num_timestep_buckets, else fresh
+        if timesteps is not None:
+            u = torch.tensor(timesteps, device=device)
+        else:
+            u = torch.rand((noise.shape[0],), device=device)
+        lower, upper = _base_sigma_range(args)
+        base = _base_sigma_from_uniform(
+            u,
+            lower=lower,
+            upper=upper,
+            focus_min=float(args.h3_timestep_focus_min),
+            focus_max=float(args.h3_timestep_focus_max),
+            focus_prob=float(args.h3_timestep_focus_prob),
         )
         sigma_video = shift_sigma(base, args.h3_shift_video).view(-1, 1, 1, 1, 1)
         # blended in fp32, stored in the cache dtype (the released FP16 video latents stay FP16)
@@ -1603,15 +1650,22 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             # preservation-anchor step: user weight on top of the automatic focus compensation,
             # so raising the timestep focus does not silently weaken the drift protection.
             # loss/video and loss/audio are logged unweighted to keep sigma-binned reads comparable
+            lower, upper = _base_sigma_range(args)
             multiplier = float(args.h3_teacher_preservation_weight) * _preservation_density_compensation(
                 float(args.h3_teacher_condition_sigma_max),
                 float(args.h3_timestep_focus_min),
                 float(args.h3_timestep_focus_max),
                 float(args.h3_timestep_focus_prob),
                 float(args.h3_teacher_condition_sigma_min),
+                lower,
+                upper,
             )
             if multiplier != 1.0:
                 total_loss = total_loss * multiplier
+            logs["teacher/anchor_multiplier"] = multiplier
+        if teacher_matching:
+            # the weighted step loss split by role, so the two populations read as separate curves
+            logs["loss/teaching" if conditioned else "loss/anchor"] = total_loss.detach()
         return total_loss, _scalar_logs(logs)
 
 
