@@ -1662,6 +1662,10 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             )
             if multiplier != 1.0:
                 total_loss = total_loss * multiplier
+            logs["teacher/anchor_multiplier"] = multiplier
+        if teacher_matching:
+            # the weighted step loss split by role, so the two populations read as separate curves
+            logs["loss/teaching" if conditioned else "loss/anchor"] = total_loss.detach()
         return total_loss, _scalar_logs(logs)
 
 

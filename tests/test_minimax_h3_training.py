@@ -2465,8 +2465,17 @@ def test_compute_loss_keeps_full_dc_and_applies_the_preservation_weight_on_ancho
     )
 
     # the anchor step ignores the DC attenuation (full MSE value) and doubles the returned loss;
-    # loss/video is logged unweighted so sigma-binned reads stay comparable
+    # loss/video is logged unweighted so sigma-binned reads stay comparable, while loss/anchor
+    # carries the weighted step loss of the anchor population and the applied multiplier is logged
     assert logs["loss/video"] == pytest.approx(2.5)
+    assert logs["loss/anchor"] == pytest.approx(5.0)
+    assert logs["teacher/anchor_multiplier"] == pytest.approx(2.0)
+    assert "loss/teaching" not in logs
+    _, teaching_logs = trainer.compute_loss(
+        _trainer_args(h3_teacher_matching=True), _dc_split_output(conditioned=1.0), None, None, torch.bfloat16, torch.float32, 0
+    )
+    assert teaching_logs["loss/teaching"] == pytest.approx(2.5)
+    assert "loss/anchor" not in teaching_logs and "teacher/anchor_multiplier" not in teaching_logs
     assert loss.item() == pytest.approx(5.0)
 
 
