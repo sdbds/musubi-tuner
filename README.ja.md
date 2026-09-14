@@ -58,14 +58,16 @@
 
 GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
-- 2026/08/14
-    - MiniMax-H3の教師マッチング学習（`--h3_teacher_matching`）を実験的に追加しました。T2VA LoRAは、特権的条件付け――クリップの最初/最後のフレーム、またはコピーソース参照としての学習クリップ自体（`--h3_teacher_conditions ref`）――の下で凍結されたベースモデルの予測に対して学習され、単純なフローターゲットの脱蒸留ドリフトを構造的に回避します。ベースシグマ保持アンカー、分解されたアンチウォッシュアウト損失、タイムステップフォーカス（`--h3_timestep_focus_*`、任意のH3学習で使用可能）、および `--lora_runtime_attach` / `--trajectory_dir` 生成オプションが含まれます。[PR #1047](https://github.com/kohya-ss/musubi-tuner/pull/1047) 詳細は[MiniMax-H3のドキュメント](./docs/minimax_h3.md)を参照してください。
-
-- 2026/08/08
-    - MiniMax-H3 ConvRot INT8のLoRA学習と生成への対応を追加しました。BF16チェックポイントは、`--convrot_int8`でロード時に量子化され、リリースされた完全およびプルーニング済みのConvRot INT8トランスフォーマーとConvRot INT8 Qwen3-VL-32Bテキストエンコーダーが自動的に検出されます。生成では、LoRAが事前量子化されたベースにランタイムブランチとしてアタッチされます。sdbds氏に感謝します。[PR #1024](https://github.com/kohya-ss/musubi-tuner/pull/1024) 詳細は[MiniMax-H3のドキュメント](./docs/minimax_h3.md)を参照してください。
-
-- 2026/08/03
-    - 実験的なMiniMax-H3のR1対応を追加しました。T2VA、FL2VA、Ref2VAのLoRA学習に加え、独立したトレーニング時のビデオ/オーディオの共同生成とスケジュールされた生成をサポートします。R1は、公開されたBF16トランスフォーマー、デュアルVAE、Qwen3-VL-32B条件付け、およびブロックスワップをサポートします。詳細は[MiniMax-H3のドキュメント](./docs/minimax_h3.md)を参照してください。[PR #1018](https://github.com/kohya-ss/musubi-tuner/pull/1018) sdbds氏に感謝します。
+- 2026/09/XX
+    - MiniMax-H3に実験的に対応しました（LoRA学習、映像と音声の同時生成）。最初の[PR #1018](https://github.com/kohya-ss/musubi-tuner/pull/1018)とその後のフォローアップを含め、sdbds氏に感謝します。
+        - 詳細は[ドキュメント](./docs/minimax_h3.md)および[one-frame（画像）学習のドキュメント](./docs/minimax_h3_1f.md)を参照してください。マージ済みの機能と今後の作業は[MiniMax-H3 support roadmap](https://github.com/kohya-ss/musubi-tuner/issues/1029)で管理しています。
+    - Krea 2のLoRA学習で、凍結されたDiTのbase重みをConvRot int8で量子化するオプション（`--convrot_int8`）を追加しました。`--fp8_base --fp8_scaled`の代替となります。[PR #1008](https://github.com/kohya-ss/musubi-tuner/pull/1008)
+        - fp8と同様に重みのVRAMが半減します。主な利点はfp8非対応GPU（RTX 30シリーズ以前）での速度向上です。融合カーネルには`triton`が必要です。詳細は[Krea 2のドキュメント](./docs/krea2.md#convrot-int8--convrot-int8)を参照してください。
+    - metadata JSONLファイルによるデータセット設定を拡張しました。詳細は[データセット設定のドキュメント](./docs/dataset_config.md)を参照してください。
+        - JSONL内の相対パスは、作業ディレクトリ基準で見つからない場合、JSONLファイルのあるディレクトリ基準でも解決されるようになりました。[PR #1023](https://github.com/kohya-ss/musubi-tuner/pull/1023)
+        - audio対応アーキテクチャ（現時点ではMiniMax-H3）向けに、動画レコードに任意の`audio_path`フィールドを指定できます。省略時は同名の音声サイドカーファイル、または動画内の音声トラックが使用されます。[PR #1020](https://github.com/kohya-ss/musubi-tuner/pull/1020)、[PR #1021](https://github.com/kohya-ss/musubi-tuner/pull/1021)
+        - 共通スキーマ以外のキーは、項目ごとの追加フィールドとしてアーキテクチャ固有のキャッシュスクリプトに渡されます。[PR #1094](https://github.com/kohya-ss/musubi-tuner/pull/1094)
+    - 共通のattention backendで`--attn_mode sdpa`がエラーになる問題を修正しました。`torch`のエイリアスとして動作します。rossnot氏に感謝します。[PR #1092](https://github.com/kohya-ss/musubi-tuner/pull/1092)
 
 - 2026/07/14
     - 勾配ノルムの診断メトリクス（`grad/norm`, `grad/mean_norm`, `grad/max`、勾配クリッピング前の値）をトラッカーに出力する `--log_grad_metrics` オプションを追加しました。[PR #988](https://github.com/kohya-ss/musubi-tuner/pull/988) rockerBOO氏に感謝します。
