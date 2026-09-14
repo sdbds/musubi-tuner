@@ -176,6 +176,7 @@ For detailed information on specific architectures, configurations, and advanced
 - [Kandinsky 5](./docs/kandinsky5.md)
 - [FLUX.2](./docs/flux_2.md)
 - [MiniMax-H3](./docs/minimax_h3.md)
+- [MiniMax-H3 (Single Frame)](./docs/minimax_h3_1f.md)
 
 **Common Configuration & Usage:**
 - [Dataset Configuration](./docs/dataset_config.md)
