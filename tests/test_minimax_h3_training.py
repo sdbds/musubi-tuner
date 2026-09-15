@@ -313,7 +313,7 @@ def test_h3_trainer_validates_backward_mode_and_destructive_merges_after_detecti
 
     with pytest.raises(ValueError, match="convrot_int8_bwd.*INT8"):
         trainer.on_transformer_loaded(_trainer_args(convrot_int8_bwd="int8"), None, bf16)
-    with pytest.raises(ValueError, match="base_weights.*INT8"):
+    with pytest.raises(ValueError, match="base_weights.*pre-quantized.*INT8"):
         trainer.on_transformer_loaded(_trainer_args(base_weights=["base.safetensors"]), None, int8)
     with pytest.raises(ValueError, match=r"int8.*CUDA"):
         trainer.on_transformer_loaded(
@@ -322,6 +322,28 @@ def test_h3_trainer_validates_backward_mode_and_destructive_merges_after_detecti
             int8,
         )
     trainer.on_transformer_loaded(_trainer_args(), None, int8)
+    # BF16 source + --convrot_int8: the loader merged the base weights before quantizing
+    trainer._base_weights_merged_at_load = True
+    trainer.on_transformer_loaded(_trainer_args(base_weights=["base.safetensors"], convrot_int8=True), None, int8)
+
+
+def test_h3_skips_the_post_load_base_weights_merge_when_the_loader_already_merged_them(monkeypatch):
+    from musubi_tuner.training.trainer_base import NetworkTrainer
+
+    calls = []
+    monkeypatch.setattr(NetworkTrainer, "merge_base_weights", lambda self, *args: calls.append(args))
+    printed = []
+    accelerator = SimpleNamespace(print=printed.append)
+    args = _trainer_args(base_weights=["adapter.safetensors"])
+    trainer = MiniMaxH3NetworkTrainer()
+
+    trainer.merge_base_weights(args, accelerator, "transformer", lora_minimax_h3, torch.bfloat16)
+    assert calls == [(args, accelerator, "transformer", lora_minimax_h3, torch.bfloat16)]
+
+    trainer._base_weights_merged_at_load = True
+    trainer.merge_base_weights(args, accelerator, "transformer", lora_minimax_h3, torch.bfloat16)
+    assert len(calls) == 1
+    assert printed == ["all weights merged during the ConvRot INT8 load: adapter.safetensors"]
 
 
 def test_h3_trainer_passes_backward_mode_to_loader_and_excludes_int8_linears_from_compile(monkeypatch):

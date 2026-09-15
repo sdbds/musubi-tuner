@@ -145,6 +145,7 @@ def _trainer_args(**overrides):
         "convrot_int8": False,
         "convrot_int8_bwd": "bf16",
         "base_weights": None,
+        "base_weights_multiplier": None,
         "disable_numpy_memmap": False,
         "prune_adaln": False,
     }
@@ -175,7 +176,7 @@ def test_training_detection_guards_merges_and_compile_policy(monkeypatch):
     # int8 backward needs an INT8 base (flag or auto-detected pre-quantized checkpoint)
     with pytest.raises(ValueError, match="convrot_int8_bwd.*INT8"):
         trainer.on_transformer_loaded(_trainer_args(convrot_int8_bwd="int8"), accelerator, bf16)
-    with pytest.raises(ValueError, match="base_weights.*INT8"):
+    with pytest.raises(ValueError, match="base_weights.*pre-quantized.*INT8"):
         trainer.on_transformer_loaded(_trainer_args(base_weights=["base.safetensors"]), accelerator, int8)
     with pytest.raises(ValueError, match=r"int8.*CUDA"):
         trainer.on_transformer_loaded(_trainer_args(convrot_int8_bwd="int8"), accelerator, int8)
@@ -196,9 +197,65 @@ def test_training_detection_guards_merges_and_compile_policy(monkeypatch):
 
     assert trainer.load_transformer(accelerator, args, "dit.safetensors", "torch", False, "cpu", torch.bfloat16) is int8
     assert trainer._convrot_int8_active is True
+    assert trainer._base_weights_merged_at_load is False
     assert trainer.compile_transformer(args, int8) is int8
     assert captured["load"]["convrot_int8_bwd"] == "int8"
+    assert captured["load"]["lora_weights"] is None
     assert captured["compile"]["disable_linear"] is True
+
+
+def test_training_merges_base_weights_into_a_bf16_source_before_int8_quantization(monkeypatch):
+    train = _load_training_module(monkeypatch)
+    trainer = train.MiniMaxH3NetworkTrainer()
+    int8 = SimpleNamespace(is_convrot_int8=True, blocks=[])
+    accelerator = SimpleNamespace(device=torch.device("cpu"))
+    captured = {}
+    monkeypatch.setattr(train, "load_h3_transformer", lambda *args, **kwargs: captured.update(kwargs) or int8)
+    monkeypatch.setattr(train, "resolve_safetensors_files", lambda path: [path])
+    prequantized = {"value": False}
+    monkeypatch.setattr(train, "has_comfy_quant_tensors", lambda files, **kwargs: prequantized["value"])
+    # the adapters are published in the Diffusers key format; the streaming merge hook
+    # matches native lora_unet_ keys, so the conversion has to happen before the load
+    adapter = {
+        "diffusion_model.blocks.0.attn.qkv_proj.lora_A.weight": torch.zeros(2, 16),
+        "diffusion_model.blocks.0.attn.qkv_proj.lora_B.weight": torch.zeros(48, 2),
+    }
+    monkeypatch.setattr(train, "load_file", lambda path: dict(adapter))
+    args = _trainer_args(convrot_int8=True, base_weights=["adapter.safetensors"], base_weights_multiplier=[0.5])
+
+    assert trainer.load_transformer(accelerator, args, "dit_bf16.safetensors", "torch", False, "cpu", torch.bfloat16) is int8
+    assert trainer._base_weights_merged_at_load is True
+    assert captured["lora_multipliers"] == [0.5]
+    (merged,) = captured["lora_weights"]
+    assert set(merged) == {
+        "lora_unet_blocks_0_attn_qkv_proj.lora_down.weight",
+        "lora_unet_blocks_0_attn_qkv_proj.lora_up.weight",
+        "lora_unet_blocks_0_attn_qkv_proj.alpha",
+    }
+    trainer.on_transformer_loaded(args, accelerator, int8)  # merged before quantization: no rejection
+    printed = []
+    trainer.merge_base_weights(args, SimpleNamespace(print=printed.append), int8, None, torch.bfloat16)
+    assert printed == ["all weights merged during the ConvRot INT8 load: adapter.safetensors"]
+
+    # a pre-quantized source cannot be merged into: nothing is passed to the loader and
+    # the post-load guard rejects the combination
+    prequantized["value"] = True
+    trainer = train.MiniMaxH3NetworkTrainer()
+    assert trainer.load_transformer(accelerator, args, "dit_int8.safetensors", "torch", False, "cpu", torch.bfloat16) is int8
+    assert trainer._base_weights_merged_at_load is False
+    assert captured["lora_weights"] is None and captured["lora_multipliers"] is None
+    with pytest.raises(ValueError, match="pre-quantized"):
+        trainer.on_transformer_loaded(args, accelerator, int8)
+
+    # without --convrot_int8 the BF16 base takes the generic post-load merge
+    trainer = train.MiniMaxH3NetworkTrainer()
+    prequantized["value"] = False
+    bf16_args = _trainer_args(base_weights=["adapter.safetensors"])
+    bf16 = SimpleNamespace(is_convrot_int8=False, blocks=[])
+    monkeypatch.setattr(train, "load_h3_transformer", lambda *args, **kwargs: captured.update(kwargs) or bf16)
+    assert trainer.load_transformer(accelerator, bf16_args, "dit_bf16.safetensors", "torch", False, "cpu", torch.bfloat16) is bf16
+    assert trainer._base_weights_merged_at_load is False
+    assert captured["lora_weights"] is None
 
 
 def _load_generation_module(monkeypatch):
