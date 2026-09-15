@@ -78,6 +78,7 @@ from musubi_tuner.minimax_h3.text_encoder import (
     normalize_teacher_conditions,
 )
 from musubi_tuner.minimax_h3.video_vae import VIDEO_VAE_DECODE_DTYPE, VIDEO_VAE_ENCODE_DTYPE, load_video_vae
+from musubi_tuner.networks import lora_minimax_h3
 from musubi_tuner.training.audio_loss import add_audio_train_args, effective_audio_loss_weights
 from musubi_tuner.training.parser_common import read_config_from_file, setup_parser_common
 from musubi_tuner.training.sampling_prompts import load_prompts
@@ -825,6 +826,25 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             require_path(args.h3_guidance_loss_uncond_cache, "h3_guidance_loss_uncond_cache")
         elif args.h3_guidance_loss_uncond_cache:
             logger.warning("--h3_guidance_loss_uncond_cache is ignored because --h3_guidance_loss_scale is 0")
+        if args.base_weights:
+            # A merged de-distillation adapter and the two guided-space losses solve the same
+            # problem; combining them is unvalidated but not forbidden, since --base_weights
+            # also has ordinary uses (e.g. a character LoRA trained on top of a style LoRA).
+            if args.h3_teacher_matching:
+                logger.warning(
+                    "MiniMax-H3 --base_weights with --h3_teacher_matching: the frozen teacher is the merged base,"
+                    " so a de-distillation adapter turns the teacher predictions into de-distilled ones"
+                )
+            if guidance_scale > 0.0:
+                logger.warning(
+                    "MiniMax-H3 --base_weights with --h3_guidance_loss_scale: a de-distillation training adapter"
+                    " already leaves the guided space, and its authors advise against combining it with the guidance loss"
+                )
+
+    def convert_weight_keys(self, weights_sd: dict[str, torch.Tensor], network_module):
+        # --base_weights: the de-distillation training adapters are published in the Diffusers key format
+        del network_module
+        return lora_minimax_h3.convert_lora_state_dict(weights_sd)
 
     def on_train_start(self, args: argparse.Namespace, accelerator: Accelerator, network, transformer, optimizer) -> None:
         del accelerator, network, transformer, optimizer

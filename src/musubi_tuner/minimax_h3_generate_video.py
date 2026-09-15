@@ -406,7 +406,8 @@ def _load_lora_state_dicts(args) -> list[dict]:
     for index, path in enumerate(args.lora_weight or []):
         include = includes[index] if index < len(includes) else None
         exclude = excludes[index] if index < len(excludes) else None
-        state_dicts.append(filter_lora_state_dict(load_file(path), include, exclude))
+        weights_sd = lora_minimax_h3.convert_lora_state_dict(load_file(path))
+        state_dicts.append(filter_lora_state_dict(weights_sd, include, exclude))
     return state_dicts
 
 
@@ -425,6 +426,7 @@ def _configure_lora_weights(transformer, args, device: torch.device, *, prequant
     """
     if not args.lora_weight:
         return []
+    # every route accepts the Diffusers key format (third-party adapters, ai-toolkit LoRAs)
     if prequantized or args.lora_runtime_attach:
         return attach_lora_weights(
             lora_minimax_h3,
@@ -434,6 +436,7 @@ def _configure_lora_weights(transformer, args, device: torch.device, *, prequant
             args.include_patterns,
             args.exclude_patterns,
             device,
+            converter=lora_minimax_h3.convert_lora_state_dict,
         )
     if not args.convrot_int8:
         merge_lora_weights(
@@ -444,6 +447,7 @@ def _configure_lora_weights(transformer, args, device: torch.device, *, prequant
             args.include_patterns,
             args.exclude_patterns,
             device,
+            converter=lora_minimax_h3.convert_lora_state_dict,
         )
     return []
 
