@@ -1,15 +1,42 @@
 import ast
+import logging
 from typing import Dict, List, Optional
 
 import torch
 import torch.nn as nn
 
+from musubi_tuner import convert_lora
 import musubi_tuner.networks.lora as lora
 
+
+logger = logging.getLogger(__name__)
 
 MINIMAX_H3_TARGET_REPLACE_MODULES = ["DiTBlock"]
 MINIMAX_H3_DEFAULT_TARGET_PATTERN = r"blocks\.\d+\.(?:attn\.(?:qkv_proj|out_proj)|mlp\.(?:fc1|fc2))"
 _DEFAULT_EXCLUDE_PATTERN = rf"(?!{MINIMAX_H3_DEFAULT_TARGET_PATTERN}$).*"
+# ComfyUI / Diffusers-style H3 LoRA keys, the format of the third-party training adapters and of
+# ai-toolkit / diffusion-pipe LoRAs: `diffusion_model.blocks.N.attn.qkv_proj.lora_A.weight`
+_COMFY_KEY_PREFIXES = ("diffusion_model.", "transformer.")
+
+
+def convert_lora_state_dict(weights_sd: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    """Return ``weights_sd`` in the native ``lora_unet_*`` key format.
+
+    Native state dicts pass through untouched. ComfyUI-format ones (``diffusion_model.`` or
+    ``transformer.`` prefix, ``lora_A``/``lora_B``, no alpha) are renamed to the Musubi keys
+    with ``alpha = rank`` filled in, the same treatment ``hv_train_network`` gives HunyuanVideo
+    LoRAs. Every H3 LoRA entry point (``--base_weights``, ``--lora_weight`` on each of its
+    routes) goes through here so the third-party adapters load without a manual conversion.
+    """
+    if not weights_sd:
+        return weights_sd
+    first_key = next(iter(weights_sd))
+    if first_key.startswith("lora_"):
+        return weights_sd
+    if first_key.startswith(_COMFY_KEY_PREFIXES):
+        logger.info("Converting MiniMax-H3 LoRA weights from the ComfyUI/Diffusers key format to the native format")
+        return convert_lora.convert_from_diffusers("lora_unet_", weights_sd)
+    return weights_sd
 
 
 def _pattern_list(value) -> list[str]:

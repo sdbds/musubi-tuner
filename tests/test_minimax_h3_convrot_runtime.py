@@ -1,5 +1,6 @@
 import argparse
 import importlib.util
+import re
 import sys
 import types
 from pathlib import Path
@@ -7,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from safetensors.torch import save_file
+from safetensors.torch import load_file, save_file
 
 from musubi_tuner.minimax_h3.model import MiniMaxH3Config, MiniMaxH3Model
 from musubi_tuner.minimax_h3.packing import H3VideoGeometry, build_h3_layout
@@ -254,11 +255,16 @@ def test_generation_selects_merge_for_bf16_and_attachment_for_int8(monkeypatch):
     attached = [object()]
     # the shared inference helpers (wan merge_lora_weights / lora_utils.attach_lora_weights)
     # take (lora_module, model, weights, multipliers, includes, excludes, device)
-    monkeypatch.setattr(generate, "merge_lora_weights", lambda module, transformer, *rest: calls.append(("merge", transformer)))
+    # plus the keyword `converter` (the ComfyUI key conversion) on both
+    monkeypatch.setattr(
+        generate,
+        "merge_lora_weights",
+        lambda module, transformer, *rest, converter: calls.append(("merge", transformer, converter)),
+    )
     monkeypatch.setattr(
         generate,
         "attach_lora_weights",
-        lambda module, transformer, *rest: calls.append(("attach", transformer, rest[-1])) or attached,
+        lambda module, transformer, *rest, converter: calls.append(("attach", transformer, rest[-1], converter)) or attached,
     )
     device = torch.device("cpu")
     bf16 = SimpleNamespace(is_convrot_int8=False)
@@ -289,7 +295,13 @@ def test_generation_selects_merge_for_bf16_and_attachment_for_int8(monkeypatch):
     assert generate._configure_lora_weights(bf16, lora_args(lora_runtime_attach=True), device, prequantized=False) is attached
     attach_int8_args = lora_args(convrot_int8=True, lora_runtime_attach=True)
     assert generate._configure_lora_weights(int8, attach_int8_args, device, prequantized=False) is attached
-    assert calls == [("merge", bf16), ("attach", int8, device), ("attach", bf16, device), ("attach", int8, device)]
+    convert = generate.lora_minimax_h3.convert_lora_state_dict
+    assert calls == [
+        ("merge", bf16, convert),
+        ("attach", int8, device, convert),
+        ("attach", bf16, device, convert),
+        ("attach", int8, device, convert),
+    ]
 
 
 def _tiny_model(*, num_layers: int = 1):
@@ -352,6 +364,83 @@ def test_attached_lora_forward_does_not_mutate_int8_base(tmp_path: Path, monkeyp
     assert all(not parameter.requires_grad for parameter in networks[0].parameters())
     for path, expected in snapshots.items():
         assert torch.equal(model.get_submodule(path).weight, expected)
+
+
+def _comfy_format(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """Rewrite a native H3 LoRA state dict into the ComfyUI key format of the published adapters
+    (`diffusion_model.blocks.N.attn.qkv_proj.lora_A.weight`, no alpha tensors)."""
+    converted = {}
+    for key, tensor in state_dict.items():
+        if key.endswith(".alpha"):
+            continue
+        match = re.fullmatch(r"lora_unet_blocks_(\d+)_(attn|mlp)_(\w+)\.lora_(down|up)\.weight", key)
+        assert match is not None, key
+        block, parent, leaf, direction = match.groups()
+        converted[f"diffusion_model.blocks.{block}.{parent}.{leaf}.lora_{'A' if direction == 'down' else 'B'}.weight"] = tensor
+    return converted
+
+
+def _saved_lora_pair(tmp_path: Path, generate) -> tuple[Path, Path]:
+    """Save one random LoRA twice: native keys and the ComfyUI key format (alpha == rank in both)."""
+    source = _tiny_model()
+    source_network = generate.lora_minimax_h3.create_arch_network(1.0, 2, 2.0, None, None, source)
+    source_network.apply_to(None, source, apply_text_encoder=False, apply_unet=True)
+    with torch.no_grad():
+        for name, parameter in source_network.named_parameters():
+            if "lora_up" in name:
+                parameter.normal_(std=0.1)
+    native = {key: value.detach().contiguous() for key, value in source_network.state_dict().items()}
+    native_path, comfy_path = tmp_path / "native.safetensors", tmp_path / "comfy.safetensors"
+    save_file(native, native_path)
+    save_file(_comfy_format(native), comfy_path)
+    return native_path, comfy_path
+
+
+def test_attached_comfyui_format_lora_matches_the_native_one_over_an_int8_base(tmp_path: Path, monkeypatch):
+    generate = _load_generation_module(monkeypatch)
+    native_path, comfy_path = _saved_lora_pair(tmp_path, generate)
+    torch.manual_seed(0)
+    base = _tiny_model()
+    tokens = torch.randn(3, 16)
+    outputs = {}
+    for label, path in (("native", native_path), ("comfy", comfy_path)):
+        model = _tiny_model()
+        model.load_state_dict(base.state_dict())
+        _prepare_int8_targets(model)
+        networks = generate.attach_lora_weights(
+            generate.lora_minimax_h3,
+            model,
+            [str(path)],
+            [0.75],
+            None,
+            None,
+            torch.device("cpu"),
+            converter=generate.lora_minimax_h3.convert_lora_state_dict,
+        )
+        assert len(networks) == 1 and len(networks[0].unet_loras) == 4
+        outputs[label] = model.blocks[0].attn.qkv_proj(tokens)
+    without_lora = _tiny_model()
+    without_lora.load_state_dict(base.state_dict())
+    _prepare_int8_targets(without_lora)
+
+    assert torch.equal(outputs["comfy"], outputs["native"])
+    assert not torch.allclose(outputs["comfy"], without_lora.blocks[0].attn.qkv_proj(tokens))
+
+
+def test_load_time_merge_state_dicts_are_converted_before_filtering(tmp_path: Path, monkeypatch):
+    generate = _load_generation_module(monkeypatch)
+    native_path, comfy_path = _saved_lora_pair(tmp_path, generate)
+    args = SimpleNamespace(
+        lora_weight=[str(comfy_path), str(native_path)],
+        include_patterns=[r"attn", None],
+        exclude_patterns=None,
+    )
+
+    comfy_sd, native_sd = generate._load_lora_state_dicts(args)
+
+    assert all(key.startswith("lora_unet_blocks_0_attn_") for key in comfy_sd) and len(comfy_sd) == 6
+    assert comfy_sd["lora_unet_blocks_0_attn_qkv_proj.alpha"].item() == 2
+    assert set(native_sd) == set(load_file(str(native_path)))
 
 
 def test_lora_gradient_reaches_adapter_over_checkpointed_int8_base(monkeypatch):

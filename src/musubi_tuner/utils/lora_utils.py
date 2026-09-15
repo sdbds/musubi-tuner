@@ -1,7 +1,7 @@
 import os
 import re
 from types import ModuleType
-from typing import Dict, List, Optional, Union
+from typing import Callable, Dict, List, Optional, Union
 import torch
 
 import logging
@@ -72,6 +72,7 @@ def attach_lora_weights(
     include_patterns: Optional[List[str]],
     exclude_patterns: Optional[List[str]],
     device: torch.device,
+    converter: Optional[Callable[[Dict[str, torch.Tensor]], Dict[str, torch.Tensor]]] = None,
 ) -> List[torch.nn.Module]:
     """Attach LoRAs to a model as runtime additive branches instead of merging them (inference).
 
@@ -89,6 +90,8 @@ def attach_lora_weights(
         include_patterns: regex patterns to include LoRA modules, aligned with lora_weights
         exclude_patterns: regex patterns to exclude LoRA modules, aligned with lora_weights
         device: device the attached networks run on
+        converter: optional state-dict key converter applied before filtering (same role as
+            the ``converter`` of ``wan_generate_video.merge_lora_weights``)
     """
     networks = []
     for i, lora_weight in enumerate(lora_weights or []):
@@ -96,7 +99,10 @@ def attach_lora_weights(
         include = include_patterns[i] if include_patterns is not None and len(include_patterns) > i else None
         exclude = exclude_patterns[i] if exclude_patterns is not None and len(exclude_patterns) > i else None
         logger.info(f"Attaching LoRA weights from {lora_weight} with multiplier {multiplier}")
-        weights_sd = filter_lora_state_dict(load_file(lora_weight), include, exclude)
+        weights_sd = load_file(lora_weight)
+        if converter is not None:
+            weights_sd = converter(weights_sd)
+        weights_sd = filter_lora_state_dict(weights_sd, include, exclude)
         network = lora_module.create_arch_network_from_weights(multiplier, weights_sd, unet=model, for_inference=True)
         if not network.unet_loras:
             raise ValueError(f"LoRA {lora_weight} contains no modules that match the model")
