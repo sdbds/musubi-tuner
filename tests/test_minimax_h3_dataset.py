@@ -1,6 +1,7 @@
 import inspect
 from pathlib import Path
 import pickle
+import re
 import sys
 from types import SimpleNamespace
 
@@ -34,7 +35,8 @@ def test_h3_documentation_does_not_ask_users_to_set_source_fps():
     documentation = (ROOT / "docs" / "minimax_h3.md").read_text(encoding="utf-8")
 
     assert "source_fps = " not in documentation
-    assert "`source_fps` is not needed" in documentation
+    # the guide states that the option is ignored (the exact wording may change)
+    assert re.search(r"`source_fps`[^.\n]*ignored", documentation)
 
 
 @pytest.mark.parametrize(
