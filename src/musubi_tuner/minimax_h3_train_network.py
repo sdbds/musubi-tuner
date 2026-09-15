@@ -10,6 +10,7 @@ from typing import Any
 
 import torch
 from accelerate import Accelerator
+from safetensors.torch import load_file
 from tqdm.auto import tqdm
 
 from musubi_tuner.dataset.architectures import (
@@ -42,6 +43,7 @@ from musubi_tuner.minimax_h3.media import (
     module_device_dtype,
     reject_one_frame_audio_references,
 )
+from musubi_tuner.minimax_h3.checkpoint import resolve_safetensors_files
 from musubi_tuner.minimax_h3.model import load_h3_transformer
 from musubi_tuner.minimax_h3.packing import (
     FL_CONDITION_ROLES,
@@ -78,6 +80,7 @@ from musubi_tuner.minimax_h3.text_encoder import (
     normalize_teacher_conditions,
 )
 from musubi_tuner.minimax_h3.video_vae import VIDEO_VAE_DECODE_DTYPE, VIDEO_VAE_ENCODE_DTYPE, load_video_vae
+from musubi_tuner.modules.convrot_int8_utils import has_comfy_quant_tensors
 from musubi_tuner.networks import lora_minimax_h3
 from musubi_tuner.training.audio_loss import add_audio_train_args, effective_audio_loss_weights
 from musubi_tuner.training.parser_common import read_config_from_file, setup_parser_common
@@ -668,6 +671,9 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         # effective base quantization, known once load_transformer has seen the checkpoint
         # (pre-quantized ConvRot INT8 files are detected there, independent of --convrot_int8)
         self._convrot_int8_active: bool | None = None
+        # --base_weights merged by the streaming loader (BF16 source + --convrot_int8: the
+        # adapters are fused before quantization), so the generic post-load merge must not run
+        self._base_weights_merged_at_load = False
         # batch observations already warned about (each one is logged once per run)
         self._warned_notices: set[str] = set()
 
@@ -846,6 +852,12 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         del network_module
         return lora_minimax_h3.convert_lora_state_dict(weights_sd)
 
+    def merge_base_weights(self, args, accelerator, transformer, network_module, weight_dtype):
+        if self._base_weights_merged_at_load:
+            accelerator.print(f"all weights merged during the ConvRot INT8 load: {', '.join(args.base_weights)}")
+            return
+        super().merge_base_weights(args, accelerator, transformer, network_module, weight_dtype)
+
     def on_train_start(self, args: argparse.Namespace, accelerator: Accelerator, network, transformer, optimizer) -> None:
         del accelerator, network, transformer, optimizer
         self._guidance_uncond = None
@@ -878,8 +890,11 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
                 )
             if torch.device(accelerator.device).type != "cuda":
                 raise ValueError("--convrot_int8_bwd int8 requires a CUDA training device")
-        if is_convrot_int8 and args.base_weights:
-            raise ValueError("MiniMax-H3 --base_weights cannot be merged into a ConvRot INT8 transformer base")
+        if is_convrot_int8 and args.base_weights and not self._base_weights_merged_at_load:
+            raise ValueError(
+                "MiniMax-H3 --base_weights cannot be merged into a pre-quantized ConvRot INT8 transformer base;"
+                " pass a BF16 checkpoint with --convrot_int8 instead (the weights are merged before quantization)"
+            )
 
     def prepare_sampling(self, args, accelerator, vae_dtype):
         del vae_dtype  # the H3 video/audio VAE dtypes are fixed per stage
@@ -1178,6 +1193,20 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
     ):
         if dit_weight_dtype not in {None, torch.bfloat16}:
             raise ValueError("MiniMax-H3 transformer weights must stay BF16")
+        # BF16 source + --convrot_int8: --base_weights are merged into the BF16 weights during the
+        # streaming load and quantized with them, as the generation script does for --lora_weight.
+        # Pre-quantized INT8 tensors cannot be merged into (on_transformer_loaded rejects them).
+        lora_weights = None
+        if args.base_weights and args.convrot_int8:
+            prequantized = has_comfy_quant_tensors(
+                resolve_safetensors_files(dit_path), disable_numpy_memmap=args.disable_numpy_memmap
+            )
+            if not prequantized:
+                logger.info(
+                    "Merging --base_weights into the BF16 MiniMax-H3 weights before ConvRot INT8 quantization: %s",
+                    ", ".join(args.base_weights),
+                )
+                lora_weights = [self.convert_weight_keys(load_file(path), None) for path in args.base_weights]
         transformer = load_h3_transformer(
             dit_path,
             device=loading_device,
@@ -1190,8 +1219,11 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             # quantization runs on the accelerator device even when the weights load to CPU
             # for block swap (cf. the Krea 2 calc-device fix in #1008)
             quant_device=accelerator.device,
+            lora_weights=lora_weights,
+            lora_multipliers=args.base_weights_multiplier if lora_weights else None,
             prune_adaln=args.prune_adaln,
         )
+        self._base_weights_merged_at_load = lora_weights is not None
         # pre-quantized ConvRot INT8 checkpoints are detected during loading, so the
         # effective base quantization can differ from the --convrot_int8 flag
         self._convrot_int8_active = bool(getattr(transformer, "is_convrot_int8", False))

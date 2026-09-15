@@ -1122,6 +1122,27 @@ class NetworkTrainer:
         # Default: assume the saved LoRA is already in this project's native format.
         return weights_sd
 
+    def merge_base_weights(self, args, accelerator: Accelerator, transformer, network_module: lora_module, weight_dtype):
+        """Merge every --base_weights LoRA into the loaded transformer before the network is built.
+
+        Called only when --base_weights is set. Architectures whose loader already merged the
+        weights during loading (e.g. before an on-the-fly quantization) override this to skip.
+        """
+        for i, weight_path in enumerate(args.base_weights):
+            if args.base_weights_multiplier is None or len(args.base_weights_multiplier) <= i:
+                multiplier = 1.0
+            else:
+                multiplier = args.base_weights_multiplier[i]
+
+            accelerator.print(f"merging module: {weight_path} with multiplier {multiplier}")
+
+            weights_sd = load_file(weight_path)
+            weights_sd = self.convert_weight_keys(weights_sd, network_module)
+            module = network_module.create_arch_network_from_weights(multiplier, weights_sd, unet=transformer, for_inference=True)
+            module.merge_to(None, transformer, weights_sd, weight_dtype, "cpu")
+
+        accelerator.print(f"all weights merged: {', '.join(args.base_weights)}")
+
     def process_sample_prompts(
         self,
         args: argparse.Namespace,
@@ -1660,23 +1681,7 @@ class NetworkTrainer:
         network_module: lora_module = importlib.import_module(args.network_module)  # actual module may be different
 
         if args.base_weights is not None:
-            # if base_weights is specified, merge the weights to DiT model
-            for i, weight_path in enumerate(args.base_weights):
-                if args.base_weights_multiplier is None or len(args.base_weights_multiplier) <= i:
-                    multiplier = 1.0
-                else:
-                    multiplier = args.base_weights_multiplier[i]
-
-                accelerator.print(f"merging module: {weight_path} with multiplier {multiplier}")
-
-                weights_sd = load_file(weight_path)
-                weights_sd = self.convert_weight_keys(weights_sd, network_module)
-                module = network_module.create_arch_network_from_weights(
-                    multiplier, weights_sd, unet=transformer, for_inference=True
-                )
-                module.merge_to(None, transformer, weights_sd, weight_dtype, "cpu")
-
-            accelerator.print(f"all weights merged: {', '.join(args.base_weights)}")
+            self.merge_base_weights(args, accelerator, transformer, network_module, weight_dtype)
 
         # prepare network
         net_kwargs = {}
