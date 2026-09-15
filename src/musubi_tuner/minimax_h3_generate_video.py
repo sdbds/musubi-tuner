@@ -426,7 +426,7 @@ def _configure_lora_weights(transformer, args, device: torch.device, *, prequant
     """
     if not args.lora_weight:
         return []
-    # every route accepts the ComfyUI key format (third-party adapters, ai-toolkit LoRAs)
+    # every route accepts the Diffusers key format (third-party adapters, ai-toolkit LoRAs)
     if prequantized or args.lora_runtime_attach:
         return attach_lora_weights(
             lora_minimax_h3,

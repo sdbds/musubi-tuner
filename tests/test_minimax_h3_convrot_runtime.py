@@ -255,7 +255,7 @@ def test_generation_selects_merge_for_bf16_and_attachment_for_int8(monkeypatch):
     attached = [object()]
     # the shared inference helpers (wan merge_lora_weights / lora_utils.attach_lora_weights)
     # take (lora_module, model, weights, multipliers, includes, excludes, device)
-    # plus the keyword `converter` (the ComfyUI key conversion) on both
+    # plus the keyword `converter` (the Diffusers key conversion) on both
     monkeypatch.setattr(
         generate,
         "merge_lora_weights",
@@ -366,8 +366,8 @@ def test_attached_lora_forward_does_not_mutate_int8_base(tmp_path: Path, monkeyp
         assert torch.equal(model.get_submodule(path).weight, expected)
 
 
-def _comfy_format(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    """Rewrite a native H3 LoRA state dict into the ComfyUI key format of the published adapters
+def _diffusers_format(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """Rewrite a native H3 LoRA state dict into the Diffusers key format of the published adapters
     (`diffusion_model.blocks.N.attn.qkv_proj.lora_A.weight`, no alpha tensors)."""
     converted = {}
     for key, tensor in state_dict.items():
@@ -381,7 +381,7 @@ def _comfy_format(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor
 
 
 def _saved_lora_pair(tmp_path: Path, generate) -> tuple[Path, Path]:
-    """Save one random LoRA twice: native keys and the ComfyUI key format (alpha == rank in both)."""
+    """Save one random LoRA twice: native keys and the Diffusers key format (alpha == rank in both)."""
     source = _tiny_model()
     source_network = generate.lora_minimax_h3.create_arch_network(1.0, 2, 2.0, None, None, source)
     source_network.apply_to(None, source, apply_text_encoder=False, apply_unet=True)
@@ -390,20 +390,20 @@ def _saved_lora_pair(tmp_path: Path, generate) -> tuple[Path, Path]:
             if "lora_up" in name:
                 parameter.normal_(std=0.1)
     native = {key: value.detach().contiguous() for key, value in source_network.state_dict().items()}
-    native_path, comfy_path = tmp_path / "native.safetensors", tmp_path / "comfy.safetensors"
+    native_path, diffusers_path = tmp_path / "native.safetensors", tmp_path / "diffusers.safetensors"
     save_file(native, native_path)
-    save_file(_comfy_format(native), comfy_path)
-    return native_path, comfy_path
+    save_file(_diffusers_format(native), diffusers_path)
+    return native_path, diffusers_path
 
 
-def test_attached_comfyui_format_lora_matches_the_native_one_over_an_int8_base(tmp_path: Path, monkeypatch):
+def test_attached_diffusers_format_lora_matches_the_native_one_over_an_int8_base(tmp_path: Path, monkeypatch):
     generate = _load_generation_module(monkeypatch)
-    native_path, comfy_path = _saved_lora_pair(tmp_path, generate)
+    native_path, diffusers_path = _saved_lora_pair(tmp_path, generate)
     torch.manual_seed(0)
     base = _tiny_model()
     tokens = torch.randn(3, 16)
     outputs = {}
-    for label, path in (("native", native_path), ("comfy", comfy_path)):
+    for label, path in (("native", native_path), ("diffusers", diffusers_path)):
         model = _tiny_model()
         model.load_state_dict(base.state_dict())
         _prepare_int8_targets(model)
@@ -423,23 +423,61 @@ def test_attached_comfyui_format_lora_matches_the_native_one_over_an_int8_base(t
     without_lora.load_state_dict(base.state_dict())
     _prepare_int8_targets(without_lora)
 
-    assert torch.equal(outputs["comfy"], outputs["native"])
-    assert not torch.allclose(outputs["comfy"], without_lora.blocks[0].attn.qkv_proj(tokens))
+    assert torch.equal(outputs["diffusers"], outputs["native"])
+    assert not torch.allclose(outputs["diffusers"], without_lora.blocks[0].attn.qkv_proj(tokens))
+
+
+def test_attach_applies_every_module_of_a_third_party_lora_including_the_token_refiner(tmp_path: Path, monkeypatch):
+    # ai-toolkit LoRAs cover the token refiner, which Musubi's training default excludes; a
+    # LoRA built from weights decides its own coverage, so the strict load must not see
+    # those keys as unexpected
+    generate = _load_generation_module(monkeypatch)
+    torch.manual_seed(0)
+    rank = 2
+    model = _tiny_model()
+    lora_sd = {}
+    for module_path in ("blocks.0.attn.qkv_proj", "token_refiner.blocks.0.attn.out_proj", "token_refiner.blocks.0.mlp.fc1"):
+        linear = model.get_submodule(module_path)
+        lora_sd[f"diffusion_model.{module_path}.lora_A.weight"] = torch.randn(rank, linear.in_features)
+        lora_sd[f"diffusion_model.{module_path}.lora_B.weight"] = torch.randn(linear.out_features, rank) * 0.1
+    lora_path = tmp_path / "third_party.safetensors"
+    save_file(lora_sd, lora_path)
+    _prepare_int8_targets(model)
+    refiner_input = torch.randn(3, 16)
+    before = model.token_refiner.blocks[0].attn.out_proj(refiner_input)
+
+    networks = generate.attach_lora_weights(
+        generate.lora_minimax_h3,
+        model,
+        [str(lora_path)],
+        None,
+        None,
+        None,
+        torch.device("cpu"),
+        converter=generate.lora_minimax_h3.convert_lora_state_dict,
+    )
+
+    assert {module.lora_name for module in networks[0].unet_loras} == {
+        "lora_unet_blocks_0_attn_qkv_proj",
+        "lora_unet_token_refiner_blocks_0_attn_out_proj",
+        "lora_unet_token_refiner_blocks_0_mlp_fc1",
+    }
+    assert not torch.allclose(model.token_refiner.blocks[0].attn.out_proj(refiner_input), before)
 
 
 def test_load_time_merge_state_dicts_are_converted_before_filtering(tmp_path: Path, monkeypatch):
     generate = _load_generation_module(monkeypatch)
-    native_path, comfy_path = _saved_lora_pair(tmp_path, generate)
+    native_path, diffusers_path = _saved_lora_pair(tmp_path, generate)
     args = SimpleNamespace(
-        lora_weight=[str(comfy_path), str(native_path)],
+        lora_weight=[str(diffusers_path), str(native_path)],
         include_patterns=[r"attn", None],
         exclude_patterns=None,
     )
 
-    comfy_sd, native_sd = generate._load_lora_state_dicts(args)
+    diffusers_sd, native_sd = generate._load_lora_state_dicts(args)
 
-    assert all(key.startswith("lora_unet_blocks_0_attn_") for key in comfy_sd) and len(comfy_sd) == 6
-    assert comfy_sd["lora_unet_blocks_0_attn_qkv_proj.alpha"].item() == 2
+    assert all(key.startswith("lora_unet_blocks_0_attn_") for key in diffusers_sd) and len(diffusers_sd) == 6
+    assert diffusers_sd["lora_unet_blocks_0_attn_qkv_proj.alpha"].item() == 2
     assert set(native_sd) == set(load_file(str(native_path)))
 
 

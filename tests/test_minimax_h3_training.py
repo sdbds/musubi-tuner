@@ -1797,8 +1797,8 @@ def test_default_h3_lora_policy_targets_only_four_projections_in_main_blocks():
     }
 
 
-def _comfy_format(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    """Rewrite a native H3 LoRA state dict into the ComfyUI key format of the published adapters
+def _diffusers_format(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """Rewrite a native H3 LoRA state dict into the Diffusers key format of the published adapters
     (`diffusion_model.blocks.N.attn.qkv_proj.lora_A.weight`, no alpha tensors)."""
     converted = {}
     for key, tensor in state_dict.items():
@@ -1811,22 +1811,22 @@ def _comfy_format(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor
     return converted
 
 
-def test_h3_lora_state_dict_conversion_accepts_the_comfyui_adapter_format():
+def test_h3_lora_state_dict_conversion_accepts_the_diffusers_adapter_format():
     model = _tiny_model(num_layers=2)
     source_network = lora_minimax_h3.create_arch_network(1.0, 2, 2.0, None, None, model)
     source_network.apply_to(None, model, apply_text_encoder=False, apply_unet=True)
     native = source_network.state_dict()
-    comfy = _comfy_format(native)
-    assert len(comfy) == 16 and not any(key.endswith(".alpha") for key in comfy)
+    diffusers = _diffusers_format(native)
+    assert len(diffusers) == 16 and not any(key.endswith(".alpha") for key in diffusers)
 
-    converted = MiniMaxH3NetworkTrainer().convert_weight_keys(comfy, lora_minimax_h3)
+    converted = MiniMaxH3NetworkTrainer().convert_weight_keys(diffusers, lora_minimax_h3)
 
     assert set(converted) == set(native)
     for key, tensor in native.items():
         if key.endswith(".alpha"):
-            assert converted[key].item() == 2  # no alpha in the ComfyUI format => alpha = rank
+            assert converted[key].item() == 2  # no alpha in the Diffusers format => alpha = rank
         else:
-            assert converted[key] is comfy[_comfy_format({key: tensor}).popitem()[0]]
+            assert converted[key] is diffusers[_diffusers_format({key: tensor}).popitem()[0]]
     # the converted dict drives create_arch_network_from_weights exactly like a native one
     target = _tiny_model(num_layers=2)
     network = lora_minimax_h3.create_arch_network_from_weights(1.0, converted, unet=target, for_inference=True)

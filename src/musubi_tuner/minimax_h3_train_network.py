@@ -842,7 +842,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
                 )
 
     def convert_weight_keys(self, weights_sd: dict[str, torch.Tensor], network_module):
-        # --base_weights: the de-distillation training adapters are published in the ComfyUI key format
+        # --base_weights: the de-distillation training adapters are published in the Diffusers key format
         del network_module
         return lora_minimax_h3.convert_lora_state_dict(weights_sd)
 
