@@ -68,6 +68,11 @@ GitHub Discussionsを有効にしました。コミュニティのQ&A、知識�
         - audio対応アーキテクチャ（現時点ではMiniMax-H3）向けに、動画レコードに任意の`audio_path`フィールドを指定できます。省略時は同名の音声サイドカーファイル、または動画内の音声トラックが使用されます。[PR #1020](https://github.com/kohya-ss/musubi-tuner/pull/1020)、[PR #1021](https://github.com/kohya-ss/musubi-tuner/pull/1021)
         - 共通スキーマ以外のキーは、項目ごとの追加フィールドとしてアーキテクチャ固有のキャッシュスクリプトに渡されます。[PR #1094](https://github.com/kohya-ss/musubi-tuner/pull/1094)
     - 共通のattention backendで`--attn_mode sdpa`がエラーになる問題を修正しました。`torch`のエイリアスとして動作します。rossnot氏に感謝します。[PR #1092](https://github.com/kohya-ss/musubi-tuner/pull/1092)
+    - 動画データセットのlatentキャッシュ時に`enable_bucket`と`bucket_no_upscale`が無視され、設定に関わらず常にbucketingされていた問題を修正しました。christopher5106氏に感謝します。[PR #1100](https://github.com/kohya-ss/musubi-tuner/pull/1100)
+        - **挙動の変更:** `enable_bucket = true`を指定していない動画データセットは、画像データセットと同様に、設定した`resolution`の単一解像度（リサイズ後に中央をクロップ）でキャッシュされるようになります。設定なしでbucketingに依存していた場合は、データセットに`enable_bucket = true`を追加してください。そうでない場合は、キャッシュが設定した解像度と一致するように、latentキャッシュを再作成してください（MiniMax-H3の`fl2va` / `ref2va`はリサイズ後の制御画像をテキストエンコーダー出力のキャッシュに含むため、そちらも再作成が必要です）。
+    - `--output_dir`または`--output_name`が指定されていない場合、最初の保存時にエラーになるのではなく、学習開始時に停止するようになりました。rossnot氏に感謝します。[PR #1070](https://github.com/kohya-ss/musubi-tuner/pull/1070)
+    - Krea 2: `--gradient_checkpointing_cpu_offload`（gradient checkpointing時のactivationのCPUオフロード）が有効になりました。rockerBOO氏に感謝します。[PR #1101](https://github.com/kohya-ss/musubi-tuner/pull/1101)
+    - Krea 2: 学習中のサンプル画像生成で、`--turbo_dit`の代わりにRAWモデルの上にTurbo LoRAを合成する`--turbo_lora`オプションを追加しました。block swap、fp8、ConvRot int8と併用できます。詳細は[Krea 2のドキュメント](./docs/krea2.md#sample-image-generation-during-training--学習中のサンプル画像生成)を参照してください。rockerBOO氏に感謝します。[PR #1103](https://github.com/kohya-ss/musubi-tuner/pull/1103)
 
 - 2026/07/14
     - 勾配ノルムの診断メトリクス（`grad/norm`, `grad/mean_norm`, `grad/max`、勾配クリッピング前の値）をトラッカーに出力する `--log_grad_metrics` オプションを追加しました。[PR #988](https://github.com/kohya-ss/musubi-tuner/pull/988) rockerBOO氏に感謝します。
