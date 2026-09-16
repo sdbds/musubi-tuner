@@ -375,7 +375,11 @@ def _tiny_model(*, num_layers: int = 1):
         time_embed_dim=8,
         rope_inv_freq_len=1,
     )
-    return MiniMaxH3Model(config, dtype=torch.float32)
+    model = MiniMaxH3Model(config, dtype=torch.float32)
+    with torch.no_grad():
+        # rope.inv_freq is a torch.empty buffer that only the checkpoint fills
+        model.rope.inv_freq.fill_(1.0)
+    return model
 
 
 def _prepare_int8_targets(model):
