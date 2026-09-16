@@ -25,6 +25,8 @@ The implementation follows the released MiniMax-H3 packing, Qwen3-VL conditionin
 
 Read and accept the [MiniMax-H3 Community License](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE) before downloading or using the weights.
 
+Thanks to [MiniMax AI](https://huggingface.co/MiniMaxAI) for releasing MiniMax-H3 as open weights.
+
 <details>
 <summary>日本語</summary>
 
@@ -33,6 +35,8 @@ Musubi Tuner は MiniMax-H3 の text-to-video-with-audio (T2VA)、first/last-fra
 実装は公開された MiniMax-H3 の packing、Qwen3-VL による条件付け、video/audio 二重の flow スケジュール、2 種類の VAE レイアウトに従っています。公開されている full / pruned の BF16 transformer、full / pruned の ConvRot INT8 transformer、ConvRot INT8 および NVFP4+AWQ の Qwen3-VL テキストエンコーダーに対応します。
 
 重みのダウンロード・使用の前に [MiniMax-H3 Community License](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE) を読み、同意してください。
+
+MiniMax-H3 をオープンウェイトで公開してくださった [MiniMax AI](https://huggingface.co/MiniMaxAI) に感謝します。
 
 </details>
 
@@ -56,6 +60,8 @@ Download the following files from [Comfy-Org/MiniMax-H3](https://huggingface.co/
 | Video VAE | `vae/minimax_h3_video_vae_fp16.safetensors` |
 | Audio VAE | `vae/minimax_h3_audio_vae_fp32.safetensors` |
 
+Thanks to the [ComfyUI](https://github.com/comfyanonymous/ComfyUI) team (Comfy-Org) for publishing the weights in these formats, including the pruned and quantized variants.
+
 Which base for which task: T2VA and FL2VA (and every one-frame image recipe except reference-conditioned images) use the FL2VA transformer; Ref2VA uses the Ref2VA transformer. The pruned, ConvRot INT8, and NVFP4+AWQ files are drop-in replacements for their BF16 counterparts and are detected automatically from their tensor structure — pass them to `--dit` / `--text_encoder` and nothing else changes. What each one saves is summarized in [Memory and speed options](#memory-and-speed-options--メモリと速度のオプション). FP8 files and NVFP4 transformers are rejected.
 
 The Qwen3-VL processor and config are downloaded by Transformers from the official [MiniMaxAI/MiniMax-H3](https://huggingface.co/MiniMaxAI/MiniMax-H3) repository (`processor` and `text_encoder` subfolders, a few config and tokenizer files only, no weights). The upstream `Qwen/Qwen3-VL-32B-Instruct` files are not interchangeable: the H3 tokenizer adds `<d>`, `</d>`, `<|cutoff|>`, `<|lyrics_start|>`, `<|lyrics_end|>`, `<|caption_start|>`, and `<|caption_end|>` as special tokens, and the released prompt format writes dialogue and lyrics as `<d>[Language] ...</d>`.
@@ -64,6 +70,8 @@ The Qwen3-VL processor and config are downloaded by Transformers from the offici
 <summary>日本語</summary>
 
 上の表のファイルを [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3) からダウンロードしてください。
+
+pruned 版や量子化版を含め、これらの形式の重みを公開してくださった [ComfyUI](https://github.com/comfyanonymous/ComfyUI) チーム（Comfy-Org）に感謝します。
 
 どのタスクにどの base を使うか: T2VA と FL2VA（および参照画像で条件付けする画像生成を除く、すべての 1 フレーム画像レシピ）は FL2VA transformer、Ref2VA は Ref2VA transformer を使います。pruned、ConvRot INT8、NVFP4+AWQ の各ファイルは BF16 版の置き換えとして使え、テンソル構造から自動判別されます。`--dit` / `--text_encoder` にそのまま渡すだけで、他に変更は不要です。それぞれの削減量は [Memory and speed options](#memory-and-speed-options--メモリと速度のオプション) にまとめています。FP8 ファイルと NVFP4 の transformer は受け付けません。
 
@@ -166,12 +174,16 @@ Third-party de-distillation adapters that have been used with `--base_weights` o
 
 All three are in the Diffusers key format (`diffusion_model.blocks.N....lora_A/lora_B.weight`, no alpha, so alpha = rank), which `--base_weights` and every generation `--lora_weight` route accept alongside Musubi's own format. A LoRA loaded from weights is applied to every module the file contains, including token refiner modules that Musubi's own training default leaves out.
 
+Thanks to [circlestone-labs](https://huggingface.co/circlestone-labs) and [ostris](https://huggingface.co/ostris) for training and publishing these adapters.
+
 <details>
 <summary>日本語</summary>
 
 Musubi Tuner で `--base_weights` に使えることを確認したサードパーティの de-distillation アダプタを表に示します（3 つともロードと学習は動作しますが、出力品質は評価していません）。表の列は、アダプタ / 対象の base / rank / 備考です。circlestone-labs のものは FL2VA base 向けで画像が主目的（README では動画・混在も「動くようだ」とされ、guidance loss との併用は非推奨）、ostris の v2 は FL2VA base 向け、ostris の `minimax_h3_ref2va_training_adapter_v1` は Ref2VA base 向けです。
 
 3 つとも Diffusers のキー形式（`diffusion_model.blocks.N....lora_A/lora_B.weight`、alpha なし＝alpha は rank と同じ）です。`--base_weights` と生成側のすべての `--lora_weight` 経路は、Musubi 独自の形式に加えてこの形式を受け付けます。重みから読み込んだ LoRA はファイルに含まれるすべてのモジュールに適用されます。Musubi の学習デフォルトでは対象外の token refiner のモジュールも含まれます。
+
+これらのアダプタを学習・公開してくださった [circlestone-labs](https://huggingface.co/circlestone-labs) と [ostris](https://huggingface.co/ostris) 氏に感謝します。
 
 </details>
 
