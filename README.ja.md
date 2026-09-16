@@ -78,39 +78,6 @@ GitHub Discussionsを有効にしました。コミュニティのQ&A、知識�
     - 勾配ノルムの診断メトリクス（`grad/norm`, `grad/mean_norm`, `grad/max`、勾配クリッピング前の値）をトラッカーに出力する `--log_grad_metrics` オプションを追加しました。[PR #988](https://github.com/kohya-ss/musubi-tuner/pull/988) rockerBOO氏に感謝します。
         - 勾配の爆発・消失の診断や、適切な `--max_grad_norm` の値を決める際に役立ちます。デフォルトでは無効です。詳細は[高度な設定のドキュメント](./docs/advanced_config.md#log-gradient-metrics--勾配メトリクスのログ出力)を参照してください。
 
-- 2026/06/24
-    - Krea 2に実験的に対応しました（LoRA学習、推論）。[PR #980](https://github.com/kohya-ss/musubi-tuner/pull/980)
-        - 詳細は[ドキュメント](./docs/krea2.md)を参照してください。
-
-- 2026/06/19
-    - Ideogram4に実験的に対応しました（LoRA学習、推論）。[PR #966](https://github.com/kohya-ss/musubi-tuner/pull/966) について、sdbds氏に深く感謝します。フォローアップは [PR #975](https://github.com/kohya-ss/musubi-tuner/pull/975) および [PR #977](https://github.com/kohya-ss/musubi-tuner/pull/977) で行われました。変更内容の詳細を確認されたい場合はPRをご覧ください。
-        - 詳細は[ドキュメント](./docs/ideogram4.md)を参照してください。
-        - JSON形式のプロンプトが推奨されますが、自然言語での学習も可能なようです。
-        - 学習設定の詳細は不明なためコミュニティからの情報共有を歓迎します。
-
-- 2026/06/16
-    - LoRA（LoHa/LoKr）学習向けに最適化したブロックスワップモード「H2D-only block swap」を追加しました。全アーキテクチャで利用できます。`--block_swap_h2d_only` で有効化します。[PR #972](https://github.com/kohya-ss/musubi-tuner/pull/972)
-        - ベース凍結の学習ではCPUとGPU上のベース重みが同一のため、従来のブロックスワップにおけるdevice→host（D2H）コピーは完全に無駄になります。H2DのみのモードはCPUに恒久的なマスターコピーを保持し、常にhost→deviceのみを転送することで、D2H転送を完全に排除します。これにより学習スループットが向上することがあり、`--fp8_base` / `--fp8_scaled` 使用時に効果が最も大きくなります。
-        - `--gradient_checkpointing` が必須です。ストリーミングに使うGPUリングバッファの数は `--block_swap_ring_size` で調整できます（デフォルト `2`、`1` でVRAM最小）。
-        - ブロックスワップの全オプションをまとめた[ブロックスワップのドキュメント](./docs/block_swap.md)も新設しました。
-
-- 2026/06/13
-    - ネットワーク重みの保存精度を指定する `--save_precision` オプションを追加し、デフォルトの保存精度をfp32に変更しました。[PR #967](https://github.com/kohya-ss/musubi-tuner/pull/967) rockerBOO氏に感謝します。
-        - **破壊的変更**：LoRAファイルの保存精度のデフォルトがfp32に変更されました。
-        - 学習中のLoRA重みの精度を保って保存するための変更です。post-hoc EMA、マージ、抽出、重み解析などの後処理で有用です。
-        - `--mixed_precision bf16`(`fp16`) で学習している場合、LoRAファイルのサイズが従来のおよそ2倍になることがあります。従来と同じ挙動にしたい場合は `--save_precision bf16` （あるいは`fp16`）を指定してください。
-        - 詳細は[HunyuanVideoのドキュメント](./docs/hunyuan_video.md#training--学習)を参照してください。
-
-- 2026/06/08
-    - HiDream-O1-Imageに実験的に対応しました（LoRA学習、fine-tuning、推論）。[PR #964](https://github.com/kohya-ss/musubi-tuner/pull/964)
-        - 詳細は[ドキュメント](./docs/hidream_o1.md)を参照してください。
-        - オプションでDINOv3による補助的な知覚損失（perceptual loss）も利用できます。[advanced configのドキュメント](./docs/advanced_config.md)を参照してください。
-        - この対応のベースとなった[PR #947](https://github.com/kohya-ss/musubi-tuner/pull/947)（および続く[PR #955](https://github.com/kohya-ss/musubi-tuner/pull/955)）について、sdbds氏に深く感謝します。変更内容の詳細を確認されたい場合はPRをご覧ください。
-
-- 2026/05/22
-    - コードベースの大規模な内部リファクタリングを行い、コードベースの品質と保守性を向上させました。[PR #950](https://github.com/kohya-ss/musubi-tuner/pull/950)
-        - ユーザーの方には直接の影響がないよう配慮しました。詳細について、および不具合報告などは[こちらのdiscussion](https://github.com/kohya-ss/musubi-tuner/discussions/949)までお願いします。
-
 ### リリースについて
 
 Musubi Tunerの解説記事執筆や、関連ツールの開発に取り組んでくださる方々に感謝いたします。このプロジェクトは開発中のため、互換性のない変更や機能追加が起きる可能性があります。想定外の互換性問題を避けるため、参照用として[リリース](https://github.com/kohya-ss/musubi-tuner/releases)をお使いください。
