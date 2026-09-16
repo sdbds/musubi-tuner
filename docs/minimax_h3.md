@@ -28,7 +28,7 @@ Read and accept the [MiniMax-H3 Community License](https://huggingface.co/MiniMa
 <details>
 <summary>日本語</summary>
 
-Musubi Tuner は MiniMax-H3 の text-to-video-with-audio (T2VA)、first/last-frame-to-video-with-audio (FL2VA)、reference-to-video-with-audio (Ref2VA) の LoRA 学習と単体の生成に対応しています。加えて、実験的な 1 フレーム（画像）モードが学習・生成の両方にあります。
+Musubi Tuner は MiniMax-H3 の text-to-video-with-audio (T2VA)、first/last-frame-to-video-with-audio (FL2VA)、reference-to-video-with-audio (Ref2VA) の LoRA 学習と生成に対応しています。加えて、実験的な 1 フレーム（画像）モードを学習・生成の両方でサポートしています。
 
 実装は公開された MiniMax-H3 の packing、Qwen3-VL による条件付け、video/audio 二重の flow スケジュール、2 種類の VAE レイアウトに従っています。公開されている full / pruned の BF16 transformer、full / pruned の ConvRot INT8 transformer、ConvRot INT8 および NVFP4+AWQ の Qwen3-VL テキストエンコーダーに対応します。
 
@@ -87,7 +87,7 @@ Qwen3-VL の processor と config は、Transformers が公式の [MiniMaxAI/Min
 - 幅と高さは 32 の正の倍数である必要があります。
 - フレーム数は `17*n+5` である必要があります。公開されている長さの範囲は 5〜15 秒で、24 fps では 124 から 345 まで 17 刻みです。`--allow_experimental_duration` はこの長さのチェックのみを外します。
 - 対象音声は任意です。ある場合はステレオ 32000 Hz にデコードされ、ない場合はキャッシュに無音のプレースホルダが保存されます。プレースホルダは学習の教師には使われません（[Audio policy](#audio-policy) を参照）。
-- Ref2VA の参照はレコードごとに順序付きです。動画データセットでは JSONL の `references` リストから取ります（共通の control 動画フィールドは使いません）。画像データセットではこれに加えて control 画像（`control_directory` / `control_path`、control 1 枚が画像参照 1 つ）からも取れます。レコードあたり最大 12 参照、うち画像は最大 9、動画は最大 3、音声付きは最大 3。画像または動画が最低 1 つ必要で、参照動画は 2〜15 秒です。
+- Ref2VA の参照は各レコードで順序付きで定義されます（記述順に意味があります）。動画データセットでは JSONL の `references` リストから取ります（共通の control 動画フィールドは使いません）。画像データセットではこれに加えて control 画像（`control_directory` / `control_path`、control 1 枚が画像参照 1 つ）からも取れます。レコードあたり最大 12 参照、うち画像は最大 9、動画は最大 3、音声付きは最大 3。画像または動画が最低 1 つ必要で、参照動画は 2〜15 秒です。
 - 展開後の Qwen 条件付けは 32768 行までです。上限での BF16 テキストキャッシュは 1 サンプルあたり約 320 MiB です。
 
 </details>
@@ -114,10 +114,10 @@ Choosing between them: the adapter is the cheapest (no extra forward) and the le
 **Table A の 3 方式:**
 
 - **Training adapter（de-distillation LoRA）**: サードパーティ（または Musubi 提供）のアダプタをロード時に base へマージし、蒸留を解除したモデル上で素の flow loss で学習します。推論時は学習した LoRA をアダプタなしの素の base に適用します。フラグは `--base_weights adapter.safetensors`。追加コストはありません。制約: BF16 のソースが必要です（`--convrot_int8` の併用は可）。量子化済み INT8 ファイルにはマージできません。guidance loss や teacher matching との併用は可能ですが warning が出ます（後述）。学習中のサンプルは蒸留解除後のモデルの出力なので、素の base + LoRA の結果を表しません。
-- **Guidance loss**: モデル自身の no-grad の無条件予測を使って、flow の target を guided 空間に置き直します。テキストキャッシュ時に `--uncond_output uncond.safetensors`、学習時に `--h3_guidance_loss_scale 4.0 --h3_guidance_loss_sigma_min 0.15 --h3_guidance_loss_uncond_cache uncond.safetensors` を指定します。コストは約 85% の step で no-grad forward が 1 回追加。制約: base は INT8 を含めて何でも可。teacher matching とは併用不可。
-- **Teacher matching**: テキストのみの student を、特権的な条件（クリップの両端フレーム、クリップ自体、または同じ被写体の別の写真）を与えた frozen base の予測に合わせて学習します。`--h3_teacher_matching --h3_teacher_conditions first,last` / `ref` / `subject_ref` に、[Training](#training--学習) にある teacher ごとの設定を加えます。コストは毎 step no-grad forward が 1 回追加。制約: student は常に `--task t2va`。画像ターゲットでは `subject_ref` のみ。guidance loss とは併用不可。
+- **Guidance loss**: モデル自身の no-grad の無条件予測（CFG 推論時の uncond に相当）を使って、flow の target を guided 空間に置き直します。テキストキャッシュ時に `--uncond_output uncond.safetensors`、学習時に `--h3_guidance_loss_scale 4.0 --h3_guidance_loss_sigma_min 0.15 --h3_guidance_loss_uncond_cache uncond.safetensors` を指定します。コストは約 85% の step で no-grad forward が 1 回追加。制約: base は INT8 を含めて何でも可。teacher matching とは併用不可。
+- **Teacher matching**: テキストのみの student を、H3 の条件入力（クリップの両端フレーム、クリップ自体、または同じ被写体の別の写真）を設定した frozen base の予測に合わせて学習します。これらの条件は student には与えません。`--h3_teacher_matching --h3_teacher_conditions first,last` / `ref` / `subject_ref` に、[Training](#training--学習) にある teacher ごとの設定を加えます。コストは毎 step no-grad forward が 1 回追加。制約: student は常に `--task t2va`。画像ターゲットでは `subject_ref` のみ。guidance loss とは併用不可。
 
-**選び方**: アダプタは最も安く（forward の追加なし）設定も最少です。guidance loss は step あたり約 1.5 倍のコストですが、外部ファイルが不要で、量子化済み INT8 の base でも動きます。teacher matching は、外見をキャプションに書かずに identity を学習させたい場合のレシピです（teacher は外見を見ており、student はそれを学ぶ必要があります）。`--base_weights` にはキャラ LoRA の下に画風 LoRA を敷くといった通常の用途もあるので、他の 2 方式との併用は warning のみです。ただし、アダプタの作者は guidance loss との併用を勧めておらず、teacher matching ではマージ後の base が teacher になります。
+**選び方**: アダプタは最も安く（forward の追加なし）設定も最少です。guidance loss は step あたり約 1.5 倍のコストですが、外部ファイルが不要で、量子化済み INT8 の base でも動きます。teacher matching は、外見をキャプションに書かずに identity を学習させたい場合のレシピです（teacher は外見を見ており、student はそれを学ぶ必要があります）。`--base_weights` にはキャラ LoRA の下に画風 LoRA を敷くといった通常の用途もあるので、他の 2 方式との併用は warning のみです。ただし、アダプタの作者は `--base_weights` によるアダプタ使用と guidance loss との併用を勧めていません。また teacher matching で `--base_weights` を指定すると、マージ後の base が teacher になります。
 
 </details>
 
@@ -150,7 +150,7 @@ Table B の列は、目的 / データセットの形 / base / latent キャッ�
 7. 画像: 編集・中割り（adapter または GL）
 8. 画像: 推論時に参照画像で条件付け（adapter または GL）
 
-行に別の指定がない限り、latent キャッシュ・テキストキャッシュ・学習で同じ `--task` を使ってください（teacher matching の行は、student の学習タスクより情報の多いタスクで意図的にキャッシュします）。画像の行の詳細（時間インデックス、時間付き control と時間なし参照の違い）は `docs/minimax_h3_1f.md` にあります。画像と動画を 1 回の学習で混ぜることは動作する見込みですが未検証です。
+行に別の指定がない限り、latent キャッシュ・テキストキャッシュ・学習で同じ `--task` を使ってください（teacher matching の行は、teacher に与える条件も含めてキャッシュするため、student の学習タスクより情報の多いタスクで意図的にキャッシュします）。画像の行の詳細（時間インデックス、時間付き control と時間なし参照の違い）は `docs/minimax_h3_1f.md` にあります。画像と動画を 1 回の学習で混ぜることは動作する見込みですが未検証です。
 
 </details>
 
@@ -210,7 +210,7 @@ For a directory item such as `clip.mp4`, put the caption in `clip.txt`. FL2VA de
 <details>
 <summary>日本語</summary>
 
-ディレクトリ内の `clip.mp4` に対しては、キャプションを `clip.txt` に置きます。FL2VA は、選択された各ターゲットの切り出し範囲から最初と最後のフレームを条件として自動的に取り出します。対象音声は、同名の音声サイドカー（`clip.wav` など、ちょうど 1 つ）→ 動画に埋め込まれた音声トラック → 無音プレースホルダ、の順で解決されます。
+ディレクトリ内の `clip.mp4` に対しては、キャプションを `clip.txt` に置きます。FL2VA は、選択された各ターゲットの切り出し範囲から最初と最後のフレームを条件として自動的に取り出します。対象音声は、同じベースファイル名で拡張子の異なる音声ファイル（`clip.wav` など。ちょうど 1 つであること）→ 動画に埋め込まれた音声トラック → 無音プレースホルダ、の順で解決されます。
 
 </details>
 
@@ -235,7 +235,7 @@ A `video` reference uses its explicit `audio_path`, else its embedded track; `"a
 <details>
 <summary>日本語</summary>
 
-JSONL の各行はターゲットと順序付きの参照を持ちます。相対パスは JSONL のあるディレクトリから解決されます。ターゲットの `audio_path` はサイドカーや埋め込み音声より優先されます。
+JSONL の各行はターゲットと順序付きの参照を持ちます（記述順に意味があります）。相対パスは JSONL のあるディレクトリから解決されます。ターゲットの `audio_path` は、同じベースファイル名の音声ファイルや埋め込み音声より優先されます。
 
 `video` 参照は明示的な `audio_path` があればそれを、なければ埋め込みトラックを使います。`"audio_path": null` と書くと、ファイルに音声があっても映像のみの参照（動きや構図の参照）になります。音声トラックのない参照動画も同様に映像のみです。`audio_path` は `video` 参照にのみ指定できます。参照の上限は [Geometry And Media Contract](#geometry-and-media-contract--ジオメトリとメディアの規約) を参照してください。同じ JSONL（画像ターゲットに `references` を付けたもの）は、動画の identity 学習用の subject-reference teacher にも使います。
 
@@ -282,7 +282,7 @@ fp_1f_target_index = 24       # target position, required when controls are pres
 <details>
 <summary>日本語</summary>
 
-`fp_1f_clean_indices` を指定することで、control 画像が時間付きの FL2VA アンカーになります（`fp_1f_clean_indices` は control 画像の位置、`fp_1f_target_index` はターゲットの位置で、control がある場合は必須です。単位は 24 fps のピクセルフレームのインデックス）。インデックスの選び方は結果に大きく影響します（ターゲットと同じインデックスの control は、そのまま複写する挙動と戦うことになります）。`docs/minimax_h3_1f.md` を参照してください。
+`fp_1f_clean_indices` を指定することで、control 画像が時間付きの FL2VA アンカーになります（`fp_1f_clean_indices` は control 画像の位置、`fp_1f_target_index` はターゲットの位置で、control がある場合は必須です。単位は 24 fps のピクセルフレームのインデックス）。インデックスの選び方は結果に大きく影響します（ターゲットと同じインデックスの control は、そのまま複写する挙動を無理やり上書きすることになります）。`docs/minimax_h3_1f.md` を参照してください。
 
 </details>
 
@@ -301,7 +301,7 @@ For the subject-reference teacher, the references should be *other* pictures of 
 
 参照の与え方は 2 通りです。`image_jsonl_file` のレコードごとの `references`（動画 JSONL と同じスキーマで、画像と動画が使えます）か、`fp_1f_clean_indices` を**指定しない** `control_directory` / `control_path` です。後者では各 control 画像がインデックス順に 1 つの画像参照になります。
 
-subject-reference teacher に使う場合、参照は同じ被写体の*別の*写真にしてください。`caption` は student 用の素のキャプション（トリガーワードのみで外見は書かない）です。省略可能な `teacher_caption` を書くと、自動的に包まれる teacher 用キャプションを上書きできます。
+subject-reference teacher に使う場合、参照は同じ被写体の*別の*写真にしてください。`caption` は student 用の素のキャプション（トリガーワードのみで外見は書かない）です。`teacher_caption` は省略可能で、省略時は student のキャプションに参照生成用のプロンプトが自動的に追加されます（`subject_definitions:` や `<Picture 1>` などの参照宣言）。明示的に `teacher_caption` を書くとこれを上書きできます。
 
 </details>
 
@@ -344,12 +344,12 @@ latent のキャッシュとテキストエンコーダー出力のキャッシ�
 - `--audio_vae` は常に必要です。H3 は無音アイテムでも audio 行を持ちます。
 - `--skip_existing` は、保存されたメタデータ（task、cache seed、切り出し位置、フォーマットのバージョン、メディアと VAE のフィンガープリント）が一致しないキャッシュを作り直すので、常に付けておいて安全です。フィンガープリントはサイズ＋mtime なので、ファイルをコピーし直すと 1 回だけ再キャッシュされます。
 - latent キャッシュのスクリプトは終了時に、実音声のあるサンプルの割合を表示します。warning が出た場合、実音声のあるアイテムが 1 つもありません。
-- テキストキャッシュは ConvRot INT8 と NVFP4+AWQ のテキストエンコーダーも受け付けます。VRAM が少ない GPU では `--text_encoder_blocks_to_swap 50` を、長い Ref2VA のプレゼンテーションには `--text_encoder_attn_mode flash_attention_2` を追加してください。
+- テキストキャッシュは ConvRot INT8 と NVFP4+AWQ のテキストエンコーダーも受け付けます。VRAM が少ない GPU では `--text_encoder_blocks_to_swap 50` を、Ref2VA の参照が多くテキストエンコーダーへの入力が長くなる場合は `--text_encoder_attn_mode flash_attention_2` を追加してください。
 
 テキストキャッシュのコマンドへのレシピ別の追加:
 
 - **Guidance loss**: `--uncond_output /data/h3/uncond.safetensors` で無条件プローブの埋め込み（約 10 KB、forward 1 回追加）を書き出します。`--uncond_text` でプローブのテキストを変えられます（デフォルトは半角スペース 1 つで、蒸留時の真の uncond として選ばれたものです。advanced 文書を参照）。
-- **Teacher matching**: `--teacher_conditions first,last` / `ref` / `subject_ref`（常に `--task t2va` と組み合わせる）で、素のキャプション行の横に teacher 用のプレゼンテーションを保存します。キャプションは共有で、teacher の行には画像や参照宣言が加わります。キャッシュの teacher 種別と `--h3_teacher_conditions` が一致しないとトレーナーはエラーで停止するので、teacher を切り替えるときはテキストを再キャッシュしてください。
+- **Teacher matching**: `--teacher_conditions first,last` / `ref` / `subject_ref`（常に `--task t2va` と組み合わせる）で、素のキャプションと同じファイルに teacher 用のプレゼンテーションを保存します。デフォルトではキャプションは共有で、teacher の行には画像や参照宣言が加わります。キャッシュの teacher 種別と `--h3_teacher_conditions` が一致しないとトレーナーはエラーで停止するので、teacher を切り替えるときはテキストを再キャッシュしてください。
 
 </details>
 
@@ -399,7 +399,7 @@ Works with a BF16 `--dit`, with or without `--convrot_int8` (the adapter is merg
 <details>
 <summary>日本語</summary>
 
-`--base_weights` にアダプタのファイルを指定します。BF16 の `--dit` で動作し、`--convrot_int8` の有無は問いません（アダプタはストリーミングロード中に BF16 の重みへマージされ、一緒に量子化されます）。量子化済みの INT8 ファイルは受け付けません。学習した LoRA は推論時に素の base に適用してください。学習中のサンプルは蒸留解除後のモデルの出力なので、それで品質を判断しないでください。
+`--base_weights` にアダプタのファイルを指定します。BF16 の `--dit` で動作し、`--convrot_int8` の有無は問いません（アダプタはストリーミングロード中に BF16 の重みへマージされ、一緒に量子化されます）。量子化済みの INT8 ファイルは受け付けません。学習した LoRA は推論時に素の base に適用してください。学習中のサンプルは蒸留解除後のモデル、かつ CFG なしの出力なので、それで品質を判断しないでください。
 
 </details>
 
@@ -457,9 +457,9 @@ student は常に `--task t2va` です。teacher は 3 種類あり、それぞ�
 - **Reference teacher**（`ref`。latent キャッシュは `--task t2va` または `fl2va`）: 動画から identity と声を学習します。teacher は各クリップの実際の音声を複写するので、音声が学習に値するものである必要があります。そうでなければ `--audio_loss_weight` を下げるか `--video_only` を付けてください。
 - **Subject-reference teacher**（`subject_ref`。latent キャッシュは `--task ref2va`）: 同じ被写体の別の写真から identity を学習します。画像ターゲットで使える唯一の teacher で、動画にも使えます。
 
-各ノブの意味を簡単に説明します。`--h3_teacher_condition_sigma_max` は最もノイズの多い帯域を base 維持のアンカーに変え、構図の決定が上書きされないようにします（endpoint と reference teacher では `0.75`。subject-reference teacher は identity が範囲の上端で決まるためデフォルトの `1.0` のままにします。teacher のレシピと値が合わないとトレーナーが warning を出します）。`--h3_teacher_condition_sigma_min` は低ノイズ側の対になるゲートです。`--h3_teacher_loss_dc_weight` を 1 未満にすると、データセットの色調が画風のずれとして学習されるのを防ぎます（画風 LoRA では `1.0` のままにします）。`--h3_teacher_loss_mag_weight` を 1 未満にすると大きさより方向を優先します（reference teacher でも候補です。帯域内に残る蒸留の楔は主に大きさの効果です）。`--h3_timestep_focus_prob P` は、引いた時刻の割合 P を `[--h3_timestep_focus_min, --h3_timestep_focus_max)`（デフォルト 0.4〜0.8、base 単位。内容が決まる帯域）に入れ、0.5 でその帯域の収束がおよそ 2 倍速くなります。`--h3_teacher_preservation_weight`（デフォルト 1.0）は長い学習でアンカーを強めます。
+各ノブの意味を簡単に説明します。`--h3_teacher_condition_sigma_max` は最もノイズの多い帯域を base 維持のアンカーに変え、構図の決定が上書きされないようにします（endpoint と reference teacher では `0.75`。subject-reference teacher は identity が範囲の上端で決まるためデフォルトの `1.0` のままにします。teacher のレシピと値が合わないとトレーナーが warning を出します）。`--h3_teacher_condition_sigma_min` は低ノイズ側の対になるゲートです。`--h3_teacher_loss_dc_weight` を 1 未満にすると、データセットの色調が画風のずれとして学習されるのを防ぎます（画風 LoRA では `1.0` のままにします）。`--h3_teacher_loss_mag_weight` を 1 未満にすると大きさより方向を優先します（reference teacher でも候補です。sigma_max / sigma_min で指定した teacher を適用する sigma の範囲内に残る CFG 蒸留の効果は、ベクトルの方向ではなく主に大きさに現れるため、方向を優先することで CFG 蒸留を維持しやすくなります）。`--h3_timestep_focus_prob P` は、最初に引いた時刻を確率 P で `[--h3_timestep_focus_min, --h3_timestep_focus_max)`（デフォルト 0.4〜0.8、base 単位。内容が決まる帯域）に再マップします。残りの 1-P は一様分布のままなので、たとえば 0.5 では帯域内に入る確率が 50% + 50% × 帯域幅 0.4 = 約 70% になり、収束がおよそ 2 倍速くなります。`--h3_teacher_preservation_weight`（デフォルト 1.0）は長い学習でアンカーを強めます。アンカーとは、sigma_max より上（または sigma_min より下）の step で teacher が条件なしの base として予測し、student を base に引き戻す項のことです。
 
-loss はゼロには収束しません（teacher はテキストからは分からないことを知っています）。教育帯域の残差は数百 step でプラトーに達することがあり、最も良い checkpoint はプラトーの時点かその直後にあることが多いので、途中の checkpoint を保存して評価してください。仕組み、sigma ごとに分けたログ（`teacher/*`）の読み方、メタデータのキーは advanced 文書にあります。
+loss はゼロには収束しません（teacher はテキストから分からないことを知っているので、student が最善の予測をしても teacher には追い付けません）。教育帯域の残差は数百 step でプラトーに達することがあり、最も良い checkpoint はプラトーの時点かその直後にあることが多いので、途中の checkpoint を保存して評価してください。仕組み、sigma ごとに分けたログ（`teacher/*`）の読み方、メタデータのキーは advanced 文書にあります。
 
 </details>
 
@@ -470,7 +470,7 @@ Every sample contributes the video loss. A sample cached with real audio additio
 <details>
 <summary>日本語</summary>
 
-すべてのサンプルが video loss に寄与します。実音声付きでキャッシュされたサンプルはさらに `--audio_loss_weight`（デフォルト 1.0）倍の audio loss に寄与し、実音声のないアイテムは audio loss に寄与しません。`--video_only` は音声の教師あり学習を完全に無効にします（モデルは audio latent をコンテキストとして参照し続けます）。H3 は single-stream なので、video のみの LoRA も音声経路が使う重みを変更します。完全に video のみで学習した LoRA の音声は、制約のない出力とみなしてください。画像データセットでは常に `--video_only` を付けてください（audio 行は無音プレースホルダで、いずれにせよ何も寄与しません）。
+すべてのサンプルが video loss に寄与します。実音声付きでキャッシュされたサンプルはさらに `--audio_loss_weight`（デフォルト 1.0）倍の audio loss に寄与し、実音声のないアイテムは audio loss に寄与しません。`--video_only` は音声の教師あり学習を完全に無効にします（モデルは audio latent をコンテキストとして参照し続けます）。H3 は single-stream なので、video のみの LoRA も音声経路が使う重みを変更します。完全に video のみで学習した LoRA の音声は、音声側の loss による制約がないため、元モデルからドリフトした出力になる可能性があります。画像データセットでは常に `--video_only` を付けてください（audio 行は無音プレースホルダで、いずれにせよ何も寄与しません）。
 
 </details>
 
@@ -543,7 +543,7 @@ Two caveats: samples under a merged `--base_weights` adapter show the de-distill
 
 学習コマンドにサンプル生成用のアセット（`--sample_prompts`、video VAE、audio VAE、テキストエンコーダー）と通常のサンプル生成スケジュールのフラグを追加します（英語部分の例を参照）。
 
-サンプルは `OUTPUT_DIR/sample` に音声付きの MP4 として書き出されます（1 フレームのサンプルは PNG）。テキストエンコーダーは transformer より先にアクセラレータに読み込まれ、すべてのプロンプトを一度に処理するので、その時点でテキストエンコーダー分の空きが必要です。BF16 で約 50 GB、INT8 で約 25 GB、NVFP4 で約 15 GB です。`--text_encoder_blocks_to_swap 50` でその大半を不要にできます。
+サンプルは `OUTPUT_DIR/sample` に音声付きの MP4 として書き出されます（1 フレームのサンプルは PNG）。テキストエンコーダーは transformer より先にアクセラレータに読み込まれ、すべてのプロンプトを一度に処理するので、その時点で VRAM にテキストエンコーダー分の空きが必要です。BF16 で約 50 GB、INT8 で約 25 GB、NVFP4 で約 15 GB です。`--text_encoder_blocks_to_swap 50` でその大半を不要にできます。
 
 すべてのエントリは学習の `--task` を使います。`.txt` のプロンプトファイルは 1 行に 1 プロンプトで、生成と同じ行オプション（[Batch and interactive modes](#batch-and-interactive-modes)）が使えます。`#` で始まる行は無視されます。英語部分の例では、T2VA、FL2VA（`--i` / `--ei` で最初と最後のフレーム、1 フレームのサンプルでは順序付きの `--ci` リスト）、Ref2VA（`--ref` を複数回、または JSONL のレコードを `--rj`）の 3 行を示しています。
 
@@ -600,11 +600,11 @@ FL2VA base での T2VA 生成のコマンド例は英語部分を参照してく
 
 タスクごとの入力:
 
-- **FL2VA**: FL2VA base で `--task fl2va --first_frame first.png --last_frame last.png`。どちらか片方だけでも有効です（I2VA / L2VA。プロンプトには対応する公式の指示行を使ってください）。条件画像はキャンバスを覆うように拡大縮小してから中央でクロップされます。学習で control をバケットに合わせるのと同じ処理です。
+- **FL2VA**: FL2VA base で `--task fl2va --first_frame first.png --last_frame last.png`。どちらか片方だけでも有効です（I2VA / L2VA。プロンプトには対応する公式の指示行を使ってください）。条件画像はアスペクト比を維持したままキャンバスを覆うように拡大縮小してから、中央でクロップされます。学習で control をバケットに合わせるのと同じ処理です。
 - **Ref2VA**: Ref2VA base で `--task ref2va` に、`--reference_jsonl file.jsonl --reference_index 0`（学習と同じ JSONL スキーマ。ターゲットのメディアはレコードの識別にだけ使われます）か、インラインの参照 `--ref refs/cat.png --ref "refs/dance.mp4;audio=refs/song.wav" --ref refs/bgm.mp3` を組み合わせます。`--ref PATH[;type=image|video|audio][;audio=AUDIO_PATH]` は繰り返し指定でき、指定順が参照の順序になります。type を省略すると拡張子から推定されます。キャプションは `--prompt` で与えます（JSONL のキャプションを上書きします）。
 - **テキストエンコーダーの代わりにテキストキャッシュ**: T2VA と Ref2VA は `--text_cache`（プロンプトとメディアにフィンガープリントが一致するデータセットのテキストキャッシュ）を受け付けます。FL2VA は受け付けません。
 
-学習した LoRA は `--lora_weight` と `--lora_multiplier` で追加します。すべての経路が Musubi の形式と、ai-toolkit や diffusion-pipe が書き出す Diffusers 形式を受け付けます。BF16 base ではロード後に一度マージされます（`--convrot_int8` を付けた場合は量子化の前にマージ）。量子化済み INT8 base では実行時のブランチとして付加されるので、LoRA を使う生成に BF16 ファイルは不要です。`--lora_runtime_attach` はどの base でも実行時ブランチを強制します（[Training-Time Samples](#training-time-samples--学習中のサンプル生成) の注意点を参照）。
+学習した LoRA は `--lora_weight` と `--lora_multiplier` で追加します。すべての経路が Musubi の形式と、ai-toolkit や diffusion-pipe が書き出す Diffusers 形式を受け付けます。BF16 base ではロード後に一度マージされます（`--convrot_int8` を付けた場合は量子化の前にマージ）。量子化済み INT8 base では実行時に LoRA が動的に適用されるので、LoRA を使う生成に BF16 ファイルは不要です。`--lora_runtime_attach` はどの base でも実行時の動的適用を強制します（[Training-Time Samples](#training-time-samples--学習中のサンプル生成) の注意点を参照）。
 
 1 回の生成ではモデルのロードが所要時間の大半を占めます（`--convrot_int8` は起動のたびに再量子化します）。繰り返し生成する場合はバッチモードか対話モードを使ってください。
 
