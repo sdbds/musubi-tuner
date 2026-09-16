@@ -83,39 +83,6 @@ GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, 
     - Added the `--log_grad_metrics` option to log gradient norm diagnostics (`grad/norm`, `grad/mean_norm`, `grad/max`, measured before gradient clipping) to the tracker. Thank you rockerBOO [PR #988](https://github.com/kohya-ss/musubi-tuner/pull/988).
         - Useful for diagnosing gradient explosion / vanishing and for choosing an appropriate `--max_grad_norm` value. Disabled by default. See the [advanced configuration documentation](./docs/advanced_config.md#log-gradient-metrics--勾配メトリクスのログ出力) for details.
 
-- June 24, 2026
-    - Added experimental support for Krea 2 (LoRA training and inference). See [PR #980](https://github.com/kohya-ss/musubi-tuner/pull/980) for details.
-        - For details, please refer to the [documentation](./docs/krea2.md).
-
-- June 19, 2026
-    - Added experimental support for Ideogram4 (LoRA training and inference). Many thanks to sdbds for [PR #966](https://github.com/kohya-ss/musubi-tuner/pull/966). Follow-ups were made in [PR #975](https://github.com/kohya-ss/musubi-tuner/pull/975) and [PR #977](https://github.com/kohya-ss/musubi-tuner/pull/977). Please refer to the PRs for detailed changes.
-        - For details, please refer to the [documentation](./docs/ideogram4.md).
-        - JSON format prompts are recommended, but natural language training is also possible.
-        - Training settings details are unknown, so community information sharing is welcome.
-
-- June 16, 2026
-    - Added H2D-only block swap, an optimized block swap mode for LoRA (LoHa/LoKr) training, available for all architectures. Enable it with `--block_swap_h2d_only`. See [PR #972](https://github.com/kohya-ss/musubi-tuner/pull/972).
-        - For frozen-base training, the base weights on the CPU and GPU are identical, so the classic block swap's device-to-host (D2H) copy is pure overhead. H2D-only keeps a permanent master copy on the CPU and only ever transfers host-to-device, removing the D2H transfer entirely. This can improve training throughput, with the largest benefit when using `--fp8_base` / `--fp8_scaled`.
-        - Requires `--gradient_checkpointing`. The number of GPU ring buffers used for streaming can be tuned with `--block_swap_ring_size` (default `2`; `1` minimizes VRAM).
-        - There is also a new standalone [Block Swap documentation](./docs/block_swap.md) covering all block swap options.
-
-- June 13, 2026
-    - Added the `--save_precision` option for network weights and changed the default save precision to fp32. Thank you rockerBOO [PR #967](https://github.com/kohya-ss/musubi-tuner/pull/967).
-        - **Breaking Change**: The default save precision for LoRA files has been changed to fp32.
-        - This preserves the precision of LoRA weights during training and is useful for post-processing such as post-hoc EMA, merging, extraction, and weight analysis.
-        - LoRA files may be about twice as large as before when training with `--mixed_precision bf16`(`fp16`). To keep the previous behavior, specify `--save_precision bf16` (`fp16`).
-        - Please refer to the [HunyuanVideo documentation](./docs/hunyuan_video.md#training--学習) for details.
-
-- June 8, 2026
-    - Added experimental support for HiDream-O1-Image (LoRA training, full finetuning, and inference). See [PR #964](https://github.com/kohya-ss/musubi-tuner/pull/964).
-        - Please refer to the [documentation](./docs/hidream_o1.md) for details.
-        - An optional DINOv3 auxiliary perceptual loss is also available. See the [advanced configuration documentation](./docs/advanced_config.md).
-        - Many thanks to sdbds for [PR #947](https://github.com/kohya-ss/musubi-tuner/pull/947) (followed by [PR #955](https://github.com/kohya-ss/musubi-tuner/pull/955)), which this support is based on. Please open the PRs if you would like to review the changes in detail.
-
-- May 22, 2026
-    - Performed a large-scale internal refactoring to improve code quality and maintainability. See [PR #950](https://github.com/kohya-ss/musubi-tuner/pull/950)
-        - We have taken care to ensure that there are no direct impacts on users. For details and to report any issues, please refer to [this discussion](https://github.com/kohya-ss/musubi-tuner/discussions/949).
-
 ### Releases
 
 We are grateful to everyone who has been contributing to the Musubi Tuner ecosystem through documentation and third-party tools. To support these valuable contributions, we recommend working with our [releases](https://github.com/kohya-ss/musubi-tuner/releases) as stable reference points, as this project is under active development and breaking changes may occur.
