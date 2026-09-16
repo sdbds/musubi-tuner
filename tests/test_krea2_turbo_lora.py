@@ -229,9 +229,7 @@ def test_build_network_eagerly_builds_turbo_lora(tiny_k2_model, tmp_path, monkey
     lora_path = tmp_path / "turbo_lora.safetensors"
     save_file(trainee.state_dict(), str(lora_path))
 
-    monkeypatch.setattr(
-        NetworkTrainer, "_build_network", lambda self, args, accelerator, transformer, vae, weight_dtype: trainee
-    )
+    monkeypatch.setattr(NetworkTrainer, "_build_network", lambda self, args, accelerator, transformer, vae, weight_dtype: trainee)
 
     trainer = Krea2NetworkTrainer()
     args = _trainer_args(turbo_lora=str(lora_path), compile=True)
