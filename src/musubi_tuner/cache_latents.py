@@ -1,6 +1,6 @@
 import argparse
 import os
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 
 import numpy as np
 import torch
@@ -284,9 +284,21 @@ def encode_and_save_batch(vae: AutoencoderKLCausal3D, batch: list[ItemInfo]):
         save_latent_cache(item, l)
 
 
-def encode_datasets(datasets: list[BaseDataset], encode: callable, args: argparse.Namespace, supports_alpha: bool = False):
-    """Common function to encode datasets. This function is called from multiple architecture scripts."""
+def encode_datasets(
+    datasets: list[BaseDataset],
+    encode: callable,
+    args: argparse.Namespace,
+    supports_alpha: bool = False,
+    cache_is_current: Optional[Callable[[ItemInfo], bool]] = None,
+):
+    """Common function to encode datasets. This function is called from multiple architecture scripts.
+
+    With --skip_existing, an item whose latent cache file exists is skipped; an architecture can
+    replace that test with `cache_is_current(item)` (e.g. to also compare cache metadata).
+    """
     num_workers = args.num_workers if args.num_workers is not None else max(1, os.cpu_count() - 1)
+    if cache_is_current is None:
+        cache_is_current = lambda item: os.path.exists(item.latent_cache_path)  # noqa: E731
     for i, dataset in enumerate(datasets):
         logger.info(f"Encoding dataset [{i}]")
         all_latent_cache_paths = []
@@ -304,7 +316,7 @@ def encode_datasets(datasets: list[BaseDataset], encode: callable, args: argpars
             all_latent_cache_paths.extend([item.latent_cache_path for item in batch])
 
             if args.skip_existing:
-                filtered_batch = [item for item in batch if not os.path.exists(item.latent_cache_path)]
+                filtered_batch = [item for item in batch if not cache_is_current(item)]
                 if len(filtered_batch) == 0:
                     continue
                 batch = filtered_batch
@@ -375,12 +387,15 @@ def main():
     encode_datasets(datasets, encode, args)
 
 
-def setup_parser_common() -> argparse.ArgumentParser:
+def setup_parser_common(*, include_vae: bool = True) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--dataset_config", type=str, required=True, help="path to dataset config .toml file")
-    parser.add_argument("--vae", type=str, required=False, default=None, help="path to vae checkpoint")
-    parser.add_argument("--vae_dtype", type=str, default=None, help="data type for VAE, default depends on model, e.g., float16")
+    if include_vae:
+        parser.add_argument("--vae", type=str, required=False, default=None, help="path to vae checkpoint")
+        parser.add_argument(
+            "--vae_dtype", type=str, default=None, help="data type for VAE, default depends on model, e.g., float16"
+        )
     parser.add_argument("--device", type=str, default=None, help="device to use, default is cuda if available")
     parser.add_argument(
         "--batch_size", type=int, default=None, help="batch size, override dataset config if dataset batch size > this"

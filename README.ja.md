@@ -38,7 +38,7 @@
 
 ## はじめに
 
-このリポジトリは、HunyuanVideo、Wan2.1/2.2、FramePack、FLUX.1 Kontext、FLUX.2 dev/klein、Qwen-Image、Z-ImageのLoRA学習用のコマンドラインツールです。このリポジトリは非公式であり、それらの公式リポジトリとは関係ありません。
+このリポジトリは、HunyuanVideo、Wan2.1/2.2、FramePack、FLUX.1 Kontext、FLUX.2 dev/klein、Qwen-Image、Z-Image、MiniMax-H3のLoRA学習用のコマンドラインツールです。このリポジトリは非公式であり、それらの公式リポジトリとは関係ありません。
 
 *リポジトリは開発中です。*
 
@@ -57,6 +57,22 @@
 ### 最近の更新
 
 GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
+
+- 2026/09/16
+    - MiniMax-H3に実験的に対応しました（LoRA学習、映像と音声の同時生成）。最初の[PR #1018](https://github.com/kohya-ss/musubi-tuner/pull/1018)とその後のフォローアップを含め、sdbds氏に感謝します。
+        - 詳細は[ドキュメント](./docs/minimax_h3.md)および[one-frame（画像）学習のドキュメント](./docs/minimax_h3_1f.md)を参照してください。マージ済みの機能と今後の作業は[MiniMax-H3 support roadmap](https://github.com/kohya-ss/musubi-tuner/issues/1029)で管理しています。
+    - Krea 2のLoRA学習で、凍結されたDiTのbase重みをConvRot int8で量子化するオプション（`--convrot_int8`）を追加しました。`--fp8_base --fp8_scaled`の代替となります。[PR #1008](https://github.com/kohya-ss/musubi-tuner/pull/1008)
+        - fp8と同様に重みのVRAMが半減します。主な利点はfp8非対応GPU（RTX 30シリーズ以前）での速度向上です。融合カーネルには`triton`が必要です。詳細は[Krea 2のドキュメント](./docs/krea2.md#convrot-int8--convrot-int8)を参照してください。
+    - metadata JSONLファイルによるデータセット設定を拡張しました。詳細は[データセット設定のドキュメント](./docs/dataset_config.md)を参照してください。
+        - JSONL内の相対パスは、作業ディレクトリ基準で見つからない場合、JSONLファイルのあるディレクトリ基準でも解決されるようになりました。[PR #1023](https://github.com/kohya-ss/musubi-tuner/pull/1023)
+        - audio対応アーキテクチャ（現時点ではMiniMax-H3）向けに、動画レコードに任意の`audio_path`フィールドを指定できます。省略時は同名の音声サイドカーファイル、または動画内の音声トラックが使用されます。[PR #1020](https://github.com/kohya-ss/musubi-tuner/pull/1020)、[PR #1021](https://github.com/kohya-ss/musubi-tuner/pull/1021)
+        - 共通スキーマ以外のキーは、項目ごとの追加フィールドとしてアーキテクチャ固有のキャッシュスクリプトに渡されます。[PR #1094](https://github.com/kohya-ss/musubi-tuner/pull/1094)
+    - 共通のattention backendで`--attn_mode sdpa`がエラーになる問題を修正しました。`torch`のエイリアスとして動作します。rossnot氏に感謝します。[PR #1092](https://github.com/kohya-ss/musubi-tuner/pull/1092)
+    - 動画データセットのlatentキャッシュ時に`enable_bucket`と`bucket_no_upscale`が無視され、設定に関わらず常にbucketingされていた問題を修正しました。christopher5106氏に感謝します。[PR #1100](https://github.com/kohya-ss/musubi-tuner/pull/1100)
+        - **挙動の変更:** `enable_bucket = true`を指定していない動画データセットは、画像データセットと同様に、設定した`resolution`の単一解像度（リサイズ後に中央をクロップ）でキャッシュされるようになります。設定なしでbucketingに依存していた場合は、データセットに`enable_bucket = true`を追加してください。そうでない場合は、キャッシュが設定した解像度と一致するように、latentキャッシュを再作成してください（MiniMax-H3の`fl2va` / `ref2va`はリサイズ後の制御画像をテキストエンコーダー出力のキャッシュに含むため、そちらも再作成が必要です）。
+    - `--output_dir`または`--output_name`が指定されていない場合、最初の保存時にエラーになるのではなく、学習開始時に停止するようになりました。rossnot氏に感謝します。[PR #1070](https://github.com/kohya-ss/musubi-tuner/pull/1070)
+    - Krea 2: `--gradient_checkpointing_cpu_offload`（gradient checkpointing時のactivationのCPUオフロード）が有効になりました。rockerBOO氏に感謝します。[PR #1101](https://github.com/kohya-ss/musubi-tuner/pull/1101)
+    - Krea 2: 学習中のサンプル画像生成で、`--turbo_dit`の代わりにRAWモデルの上にTurbo LoRAを合成する`--turbo_lora`オプションを追加しました。block swap、fp8、ConvRot int8と併用できます。詳細は[Krea 2のドキュメント](./docs/krea2.md#sample-image-generation-during-training--学習中のサンプル画像生成)を参照してください。rockerBOO氏に感謝します。[PR #1103](https://github.com/kohya-ss/musubi-tuner/pull/1103)
 
 - 2026/07/14
     - 勾配ノルムの診断メトリクス（`grad/norm`, `grad/mean_norm`, `grad/max`、勾配クリッピング前の値）をトラッカーに出力する `--log_grad_metrics` オプションを追加しました。[PR #988](https://github.com/kohya-ss/musubi-tuner/pull/988) rockerBOO氏に感謝します。
@@ -159,6 +175,8 @@ Musubi Tunerの解説記事執筆や、関連ツールの開発に取り組ん�
 - [HunyuanVideo 1.5](./docs/hunyuan_video_1_5.md)
 - [Kandinsky 5](./docs/kandinsky5.md)
 - [FLUX.2](./docs/flux_2.md)
+- [MiniMax-H3](./docs/minimax_h3.md)
+- [MiniMax-H3 (1フレーム学習)](./docs/minimax_h3_1f.md)
 
 **共通設定・その他:**
 - [データセット設定](./docs/dataset_config.md)
@@ -313,5 +331,7 @@ sdbds氏によるWindows対応のSageAttentionのwheelが https://github.com/sdb
 `wan`ディレクトリ以下のコードは、[Wan2.1](https://github.com/Wan-Video/Wan2.1)のコードを一部改変して使用しています。ライセンスはApache License 2.0です。
 
 `frame_pack`ディレクトリ以下のコードは、[frame_pack](https://github.com/lllyasviel/FramePack)のコードを一部改変して使用しています。ライセンスはApache License 2.0です。
+
+`modules/convrot_int8_kernels.py`のコードは、[comfy-kitchen](https://github.com/Comfy-Org/comfy-kitchen)（dxqb/OneTrainerおよびComfyUI-Flux2-INT8由来）のコードを一部改変して使用しています。ライセンスはApache License 2.0です。
 
 他のコードはApache License 2.0に従います。一部Diffusersのコードをコピー、改変して使用しています。
