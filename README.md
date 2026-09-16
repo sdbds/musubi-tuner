@@ -63,7 +63,7 @@ If you find this project helpful, please consider supporting its development via
 
 GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
-- September XX, 2026
+- September 16, 2026
     - Added experimental support for MiniMax-H3 (LoRA training and joint video/audio generation). Many thanks to sdbds for the initial [PR #1018](https://github.com/kohya-ss/musubi-tuner/pull/1018) and follow-ups.
         - For details, please refer to the [documentation](./docs/minimax_h3.md) and the [one-frame (image) training documentation](./docs/minimax_h3_1f.md). The list of merged features and remaining work is tracked in the [MiniMax-H3 support roadmap](https://github.com/kohya-ss/musubi-tuner/issues/1029).
     - Added ConvRot int8 quantization of the frozen DiT base weights for Krea 2 LoRA training (`--convrot_int8`), as an alternative to `--fp8_base --fp8_scaled`. See [PR #1008](https://github.com/kohya-ss/musubi-tuner/pull/1008).

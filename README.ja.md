@@ -58,7 +58,7 @@
 
 GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
-- 2026/09/XX
+- 2026/09/16
     - MiniMax-H3に実験的に対応しました（LoRA学習、映像と音声の同時生成）。最初の[PR #1018](https://github.com/kohya-ss/musubi-tuner/pull/1018)とその後のフォローアップを含め、sdbds氏に感謝します。
         - 詳細は[ドキュメント](./docs/minimax_h3.md)および[one-frame（画像）学習のドキュメント](./docs/minimax_h3_1f.md)を参照してください。マージ済みの機能と今後の作業は[MiniMax-H3 support roadmap](https://github.com/kohya-ss/musubi-tuner/issues/1029)で管理しています。
     - Krea 2のLoRA学習で、凍結されたDiTのbase重みをConvRot int8で量子化するオプション（`--convrot_int8`）を追加しました。`--fp8_base --fp8_scaled`の代替となります。[PR #1008](https://github.com/kohya-ss/musubi-tuner/pull/1008)
