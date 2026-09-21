@@ -92,6 +92,17 @@ exploration metrics. `--video_only` with active audio search is rejected at
 startup; `--audio_loss_weight 0` is allowed and logs the fallback warning.
 MiniMax-H3 rejects `--xm_best_of_k > 1`.
 
+H3 uses the upstream task-authoritative batch plan: `--task` decides which
+cached conditions are consumed, including one-frame Ref2VA references and
+FL2VA `cond_000...` controls. Timestep clipping and focus are applied once per
+batch, before candidate selection. Video noising blends in FP32 and keeps the
+video cache dtype; the audio cache remains FP32.
+
+`--h3_teacher_matching` cannot be combined with `--h3_best_of_k > 1`: its
+decomposed teacher loss is not the raw MSE used for candidate ranking. Use
+`K = 1` for teacher matching, or a training adapter/guidance loss for H3
+best-of-K.
+
 ### Compatibility
 
 Standard Forward XM supports these LoRA entry points:
@@ -166,9 +177,10 @@ K.
 
 ### Validated Runtime
 
-R1 is tested on Python 3.10.11, PyTorch `2.13.0+cu130`, CUDA 13.0, and an NVIDIA
-GeForce RTX 4090 with compute capability 8.9. This is the current validation
-runtime only; `cu124` is not in this feature's test matrix. The implementation
+R1 was tested on Python 3.10.11. The upstream integration is also tested on
+Python 3.11.11, with PyTorch `2.13.0+cu130`, CUDA 13.0, and an NVIDIA GeForce
+RTX 4090 with compute capability 8.9. These are the validated runtimes only;
+`cu124` is not in this feature's test matrix. The implementation
 uses existing public PyTorch APIs and adds no version gate, but other runtimes
 are outside this test matrix. Stable APIs may work elsewhere; that is not a
 compatibility claim.
@@ -256,6 +268,15 @@ effective audio weight が 0 の audio batch は順位付けできないため�
 探索と `--video_only` の組み合わせは起動時に拒否されます。`--audio_loss_weight 0` は
 許可され、fallback warning を出します。MiniMax-H3 は `--xm_best_of_k > 1` を拒否します。
 
+H3 は上流の task-authoritative batch plan を使い、`--task` が読み込む条件を決めます。
+one-frame Ref2VA の参照と FL2VA の `cond_000...` 条件にも対応します。timestep の
+範囲制限と focus は候補選択前に batch ごとに一度だけ適用されます。動画の noising は
+FP32 で計算してキャッシュの dtype に戻し、音声キャッシュは FP32 を維持します。
+
+`--h3_teacher_matching` の分解 loss は順位付け用の raw MSE と異なるため、
+`--h3_best_of_k > 1` とは併用できません。teacher matching では `K = 1`、H3 best-of-K
+では training adapter または guidance loss を使ってください。
+
 ### 対応範囲
 
 標準 Forward XM は次の LoRA エントリポイントに対応します。
@@ -324,8 +345,9 @@ loss scaling 設定によって backward 中に非有限 gradient を検出し�
 
 ### 検証環境
 
-R1 は Python 3.10.11、PyTorch `2.13.0+cu130`、CUDA 13.0、compute capability 8.9 の
-NVIDIA GeForce RTX 4090 で検証済みです。これは現在の検証 runtime のみであり、`cu124`
-はこの機能の test matrix に含まれません。既存の public PyTorch API だけを使い
+R1 は Python 3.10.11 で検証済みです。上流との統合は Python 3.11.11、PyTorch
+`2.13.0+cu130`、CUDA 13.0、compute capability 8.9 の NVIDIA GeForce RTX 4090 でも
+検証済みです。これらが検証 runtime であり、`cu124` はこの機能の test matrix に
+含まれません。既存の public PyTorch API だけを使い
 version gate は追加しませんが、その他の runtime はこの test matrix の対象外です。
 stable API により別の環境で動作する可能性はありますが、互換性の主張ではありません。

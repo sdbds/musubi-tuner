@@ -440,6 +440,8 @@ def _early_validation_args(xm_best_of_k):
         cuda_cudnn_benchmark=False,
         dataset_config="unused.toml",
         dit="unused.safetensors",
+        output_dir="unused-output",
+        output_name="unused-lora",
         fp8_scaled=False,
         fp8_base=False,
         sage_attn=False,
@@ -479,7 +481,8 @@ def test_best_of_k_validation_rejects_values_below_one():
 def test_best_of_k_validation_rejects_non_integer_toml_before_allocation(tmp_path, monkeypatch, toml_value):
     config = tmp_path / "invalid-xm.toml"
     config.write_text(
-        f'dataset_config = "unused.toml"\ndit = "unused.safetensors"\nxm_best_of_k = {toml_value}\n',
+        'dataset_config = "unused.toml"\ndit = "unused.safetensors"\n'
+        f'output_dir = "unused-output"\noutput_name = "unused-lora"\nxm_best_of_k = {toml_value}\n',
         encoding="utf-8",
     )
     parser = setup_parser_common()
