@@ -1089,7 +1089,7 @@ class _ToyH3BestOfKTrainer(MiniMaxH3NetworkTrainer):
                 "audio_latents": state.audio_latents.detach().clone(),
                 "audio_noise": inputs.audio_noise.detach().clone(),
                 "noisy_audio": inputs.noisy_audio.detach().clone(),
-                "base_time": state.base_time.detach().clone(),
+                "timesteps": state.timesteps.detach().clone(),
                 "model_t_video": state.model_t_video.detach().clone(),
                 "model_t_audio": state.model_t_audio.detach().clone(),
                 "visual_conditions": tuple(value.detach().clone() for value in state.visual_conditions),
@@ -1267,7 +1267,7 @@ def test_h3_best_of_k_selects_video_only_replays_rng_and_keeps_audio_gradient(mo
         "audio_latents",
         "audio_noise",
         "noisy_audio",
-        "base_time",
+        "timesteps",
         "model_t_video",
         "model_t_audio",
         "audio_loss_weight",
@@ -1286,8 +1286,8 @@ def test_h3_best_of_k_selects_video_only_replays_rng_and_keeps_audio_gradient(mo
         "h3_best_of_k/video/candidate_loss_mean",
         "h3_best_of_k/video/selection_gain",
     }
-    assert metrics["loss/video"].item() == pytest.approx(1.0)
-    assert metrics["loss/audio"].item() == pytest.approx(100.0)
+    assert metrics["loss/video"] == pytest.approx(1.0)
+    assert metrics["loss/audio"] == pytest.approx(100.0)
     assert metrics["h3_best_of_k/video/candidate_loss_mean"] == pytest.approx(2.5)
     assert metrics["h3_best_of_k/video/selection_gain"] == pytest.approx(3.0)
     assert not any(key.startswith("xm/") for key in metrics)
@@ -1441,8 +1441,9 @@ def test_h3_best_of_k_one_frame_overrides_audio_stream_and_keeps_silence_state_f
 @pytest.mark.parametrize(
     ("roles", "control_indices"),
     [
-        (("first",), [0]),
-        (("first", "last"), [0, 48]),
+        (("cond_000",), [0]),
+        (("cond_000", "cond_001"), [0, 48]),
+        (("cond_000", "cond_001", "cond_002"), [0, 48, 72]),
     ],
 )
 def test_h3_best_of_k_one_frame_fl2va_keeps_control_layout_and_times_fixed(monkeypatch, roles, control_indices):
@@ -1588,7 +1589,7 @@ def test_h3_audio_best_of_k_zero_effective_weight_matches_one_prepared_ordinary_
     assert trainer.best_of_k_records[0]["grad_enabled"] is True
     assert torch.equal(loss, ordinary_loss)
     assert metrics.keys() == ordinary_metrics.keys() == {"loss/video", "loss/audio"}
-    assert all(torch.equal(metrics[key], ordinary_metrics[key]) for key in metrics)
+    assert metrics == ordinary_metrics
     assert torch.equal(fallback_rng, ordinary_rng)
     assert not any(key.startswith("h3_best_of_k/") for key in metrics)
     assert (trainer._audio_items_seen, trainer._audio_supervised_seen) == (1, int(audio_present))
@@ -1846,8 +1847,8 @@ def test_h3_best_of_k_real_production_path_dispatches_pairs_targets_and_keeps_jo
     final_audio_target = audio_latents - fixed_audio_noise
     expected_video_loss = torch.nn.functional.mse_loss(records[-1]["video_prediction"].float(), final_video_target.float())
     expected_audio_loss = torch.nn.functional.mse_loss(records[-1]["audio_prediction"].float(), final_audio_target.float())
-    assert metrics["loss/video"].item() == pytest.approx(expected_video_loss.item(), rel=1e-5, abs=1e-6)
-    assert metrics["loss/audio"].item() == pytest.approx(expected_audio_loss.item(), rel=1e-5, abs=1e-6)
+    assert metrics["loss/video"] == pytest.approx(expected_video_loss.item(), rel=1e-5, abs=1e-6)
+    assert metrics["loss/audio"] == pytest.approx(expected_audio_loss.item(), rel=1e-5, abs=1e-6)
     assert loss.item() == pytest.approx((expected_video_loss + expected_audio_loss).item(), rel=1e-5, abs=1e-6)
 
     loss.backward()
@@ -1952,8 +1953,8 @@ def test_h3_audio_best_of_k_real_production_path_pairs_audio_targets_and_keeps_v
     final_audio_target = audio_latents - candidate_audio_noise
     expected_video_loss = torch.nn.functional.mse_loss(records[-1]["video_prediction"].float(), final_video_target.float())
     expected_audio_loss = torch.nn.functional.mse_loss(records[-1]["audio_prediction"].float(), final_audio_target.float())
-    assert metrics["loss/video"].item() == pytest.approx(expected_video_loss.item(), rel=1e-5, abs=1e-6)
-    assert metrics["loss/audio"].item() == pytest.approx(expected_audio_loss.item(), rel=1e-5, abs=1e-6)
+    assert metrics["loss/video"] == pytest.approx(expected_video_loss.item(), rel=1e-5, abs=1e-6)
+    assert metrics["loss/audio"] == pytest.approx(expected_audio_loss.item(), rel=1e-5, abs=1e-6)
     assert loss.item() == pytest.approx((expected_video_loss + expected_audio_loss).item(), rel=1e-5, abs=1e-6)
 
     loss.backward()
@@ -1961,6 +1962,51 @@ def test_h3_audio_best_of_k_real_production_path_pairs_audio_targets_and_keeps_v
         assert parameter.grad is not None
         assert torch.isfinite(parameter.grad).all()
         assert parameter.grad.abs().sum().item() > 0.0
+
+
+@pytest.mark.parametrize("count", [1, 2])
+@pytest.mark.parametrize("stream", ["video", "audio"])
+def test_h3_best_of_k_preserves_upstream_noising_precision_and_focused_timesteps(monkeypatch, count, stream):
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args(
+        h3_best_of_k=count,
+        h3_best_of_k_stream=stream,
+        min_timestep=100,
+        max_timestep=900,
+        h3_timestep_focus_min=0.4,
+        h3_timestep_focus_max=0.6,
+        h3_timestep_focus_prob=0.5,
+    )
+    trainer.handle_model_specific_args(args)
+    trainer._validate_and_init_best_of_k(args)
+    batch = _training_batch()
+    batch["timesteps"] = [0.25]  # midpoint of the focused branch, hence base sigma 0.5
+    latents = torch.linspace(-3, 3, 768, dtype=torch.float16).reshape(1, 24, 2, 4, 4)
+    noise = torch.full_like(latents, 0.125)
+    transformer = _RecordingTransformer()
+    monkeypatch.setattr(torch, "randn_like", lambda tensor: torch.zeros_like(tensor))
+    monkeypatch.setattr(h3_module, "draw_candidate_noise", lambda reference, generator: torch.ones_like(reference))
+
+    _, metrics = trainer._process_batch_for_training(
+        args, _Accelerator(), transformer, None, batch, latents, noise, None, torch.bfloat16, torch.float32, None, 0
+    )
+
+    calls = transformer.calls
+    assert len(calls) == (1 if count == 1 else count + 1)
+    for index, call in enumerate(calls[:count]):
+        video_noise = torch.ones_like(noise) if index == 1 and stream == "video" else noise
+        # Upstream blends in FP32 before returning the released FP16 video cache dtype.
+        expected_video = (latents.float() * (1.0 - 12.0 / 13.0) + video_noise.float() * (12.0 / 13.0)).half()
+        expected_audio = torch.full_like(batch["latents_audio"], 1.75 if index == 1 and stream == "audio" else 1.0)
+        torch.testing.assert_close(call["video_latents"], expected_video, rtol=0, atol=0)
+        torch.testing.assert_close(call["audio_latents"], expected_audio, rtol=0, atol=0)
+        assert call["model_t_video"].item() == pytest.approx(1.0 / 13.0)
+        assert call["model_t_audio"].item() == pytest.approx(0.25)
+    if count > 1:
+        assert any(torch.equal(calls[-1]["video_latents"], call["video_latents"]) for call in calls[:count])
+        assert any(torch.equal(calls[-1]["audio_latents"], call["audio_latents"]) for call in calls[:count])
+    assert trainer._audio_items_seen == trainer._audio_supervised_seen == 1
+    assert all(type(value) is float for value in metrics.values())
 
 
 def test_process_batch_preserves_the_released_fp32_audio_cache_dtype(monkeypatch):
@@ -2529,6 +2575,58 @@ def test_one_frame_ref2va_batch_builds_the_reference_layout(monkeypatch, with_vi
     assert trainer._audio_supervised_seen == 0
 
 
+@pytest.mark.parametrize("task", ["t2va", "ref2va"])
+def test_h3_best_of_k_uses_the_authoritative_task_for_one_frame_reference_caches(monkeypatch, task):
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args(task=task, one_frame=True, h3_best_of_k=2, h3_best_of_k_stream="audio")
+    trainer.handle_model_specific_args(args)
+    trainer._validate_and_init_best_of_k(args)
+    batch = _one_frame_ref_batch(with_video_reference=True)
+    batch["timesteps"] = [0.25]
+    latents = torch.zeros(1, 24, 1, 4, 4)
+    transformer = _RecordingTransformer()
+    monkeypatch.setattr(h3_module, "draw_candidate_noise", lambda reference, generator: torch.ones_like(reference))
+
+    loss, metrics = trainer._process_batch_for_training(
+        args,
+        _Accelerator(),
+        transformer,
+        None,
+        batch,
+        latents,
+        torch.zeros_like(latents),
+        None,
+        torch.bfloat16,
+        torch.float32,
+        None,
+        0,
+    )
+
+    assert torch.isfinite(loss)
+    assert len(transformer.calls) == 3
+    first = transformer.calls[0]
+    for call in transformer.calls:
+        assert call["layout"] is first["layout"]
+        assert call["layout"].task == task
+        assert call["layout"].time_overrides.target_time == FRAME_RESCALE * 24
+        assert call["layout"].time_overrides.condition_times == ()
+        assert len(call["layout"].references) == (2 if task == "ref2va" else 0)
+        assert len(call["visual_condition_latents"]) == (2 if task == "ref2va" else 0)
+        assert len(call["audio_condition_latents"]) == (1 if task == "ref2va" else 0)
+        for key in ("visual_condition_latents", "audio_condition_latents"):
+            assert all(left is right for left, right in zip(call[key], first[key]))
+        torch.testing.assert_close(call["audio_latents"], first["audio_latents"], rtol=0, atol=0)
+        torch.testing.assert_close(call["text_hidden_states"], first["text_hidden_states"], rtol=0, atol=0)
+    assert not torch.equal(transformer.calls[0]["video_latents"], transformer.calls[1]["video_latents"])
+    assert metrics["loss/audio"] == 0.0
+    assert {key for key in metrics if key.startswith("h3_best_of_k/")} == {
+        "h3_best_of_k/image/candidate_loss_mean",
+        "h3_best_of_k/image/selection_gain",
+    }
+    assert trainer._audio_items_seen == 1
+    assert trainer._audio_supervised_seen == 0
+
+
 def test_one_frame_coinciding_control_and_target_indices_warn_once(monkeypatch, caplog):
     trainer = MiniMaxH3NetworkTrainer()
     args = _trainer_args(task="fl2va", one_frame=True)
@@ -2920,18 +3018,6 @@ def test_compute_loss_is_video_mean_plus_weighted_audio_mean_mse():
     assert metrics["loss/audio"] == pytest.approx(2.0)
 
 
-def test_compute_loss_requires_the_audio_weight_tensor():
-    trainer = MiniMaxH3NetworkTrainer()
-    output = DiTOutput(
-        pred=torch.tensor([[1.0]]),
-        target=torch.tensor([[3.0]]),
-        extra={"audio_pred": torch.tensor([[0.0]]), "audio_target": torch.tensor([[2.0]])},
-    )
-
-    with pytest.raises(ValueError, match="audio loss weight"):
-        trainer.compute_loss(_trainer_args(), output, torch.tensor([251.0]), object(), torch.bfloat16, torch.float32, 7)
-
-
 def test_compute_loss_returns_plain_float_metrics_from_tensor_logs():
     # the process_batch contract is dict[str, float]; call_dit's tensor logs are fetched in one go
     trainer = MiniMaxH3NetworkTrainer()
@@ -2951,6 +3037,18 @@ def test_compute_loss_returns_plain_float_metrics_from_tensor_logs():
     assert all(type(value) is float for value in metrics.values())
     assert metrics["guidance/base_sigma"] == 0.25
     assert metrics["guidance/video_gap_rms"] == 2.0
+
+
+def test_compute_loss_requires_the_audio_weight_tensor():
+    trainer = MiniMaxH3NetworkTrainer()
+    output = DiTOutput(
+        pred=torch.tensor([[1.0]]),
+        target=torch.tensor([[3.0]]),
+        extra={"audio_pred": torch.tensor([[0.0]]), "audio_target": torch.tensor([[2.0]])},
+    )
+
+    with pytest.raises(ValueError, match="audio loss weight"):
+        trainer.compute_loss(_trainer_args(), output, torch.tensor([251.0]), object(), torch.bfloat16, torch.float32, 7)
 
 
 def test_compute_loss_skips_audio_expression_and_gradient_for_zero_weight():
@@ -3427,6 +3525,7 @@ def test_best_of_k_guidance_uses_nested_forward_only_scopes_and_keeps_the_final_
     )
     trainer.handle_model_specific_args(args)
     trainer._validate_and_init_best_of_k(args)
+    trainer.on_train_start(args, _Accelerator(device), None, None, None)
     transformer = _BlockSwapGuidanceTransformer(device)
     batch = _training_batch()
     video_latents = torch.zeros(1, 24, 2, 4, 4, device=device)

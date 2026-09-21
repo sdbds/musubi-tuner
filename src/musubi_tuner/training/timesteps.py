@@ -102,7 +102,8 @@ def get_noise_coefficients_from_timesteps(
     dtype: torch.dtype,
 ) -> torch.Tensor:
     if timestep_sampling in BASE_NOISE_COEFFICIENT_TIMESTEP_SAMPLINGS:
-        sigma = ((timesteps.to(device=device, dtype=dtype) - 1.0) / 1000.0).clamp_(0.0, 1.0)
+        # Direct samplers mix in the timestep dtype, not the model weight dtype.
+        sigma = ((timesteps.to(device=device) - 1.0) / 1000.0).clamp_(0.0, 1.0)
         while sigma.ndim < n_dim:
             sigma = sigma.unsqueeze(-1)
         return sigma

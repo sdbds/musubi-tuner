@@ -151,6 +151,9 @@ batches always vary video noise, rank raw image/video MSE, and log
 batches. A mixed image/video run uses the same K for both batch kinds. The
 former experimental `--h3_video_best_of_k` spelling was removed; use
 `--h3_best_of_k K --h3_best_of_k_stream video` for its multi-frame behavior.
+This includes one-frame Ref2VA references and FL2VA `cond_000...` controls.
+Teacher matching still requires `K = 1`; best-of-K uses a training adapter
+or guidance loss instead.
 
 - **One of the three loss methods of `docs/minimax_h3.md` is mandatory for one-frame training.** With the plain flow target alone, de-distillation drift surfaces within ~50 steps as structural degradation — wobbly lines and broken proportions, like low-CFG output of an undistilled model — rather than the washout seen in video training (image steps average over far fewer target rows and repeat a small dataset quickly). A training adapter (`--base_weights`) or the guidance loss (`--h3_guidance_loss_scale 4.0 --h3_guidance_loss_sigma_min 0.15` with an uncond cache) restores clean structure; a short LR warmup (e.g. 50 steps) also helps the early phase. For character identity LoRAs with per-item references there is a third option, the subject-reference teacher (see [One-frame reference training](#one-frame-reference-training-ref2va-image-references)). Editing and reference training below take the adapter or the guidance loss.
 - `--video_only` is recommended for image-only runs: the silence placeholders are excluded from audio supervision by presence gating either way, so the audio loss would always be 0.

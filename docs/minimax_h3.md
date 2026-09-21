@@ -400,22 +400,6 @@ Add exactly one of the following.
 
 </details>
 
-`--h3_best_of_k K` enables MiniMax-H3 best-of-K when `K > 1`.
-`--h3_best_of_k_stream video` (the default) varies and ranks video noise by
-video MSE on multi-frame batches; `audio` varies and ranks audio noise by audio
-MSE. One-frame image batches always search video noise. The selected update
-still optimizes video loss plus weighted audio loss, so a stream-focused winner
-need not minimize that joint objective. An audio-search batch with zero
-effective audio weight falls back to one ordinary forward; `--video_only` with
-active audio search is rejected. MiniMax-H3 rejects the common
-`--xm_best_of_k` option for `K > 1`.
-
-The former experimental `--h3_video_best_of_k K` spelling is not an alias;
-replace it with `--h3_best_of_k K --h3_best_of_k_stream video`. See
-[Explorative Modeling and Forward XM](./explorative_modeling.md) for semantics,
-cost, runtime-kind metrics, compatibility, and the strict selected-score
-non-finite policy.
-
 ### Training adapter
 
 ```text
@@ -490,6 +474,26 @@ student は常に `--task t2va` です。teacher は 3 種類あり、それぞ�
 loss はゼロには収束しません（teacher はテキストから分からないことを知っているので、student が最善の予測をしても teacher には追い付けません）。教育帯域の残差は数百 step でプラトーに達することがあり、最も良い checkpoint はプラトーの時点かその直後にあることが多いので、途中の checkpoint を保存して評価してください。仕組み、sigma ごとに分けたログ（`teacher/*`）の読み方、メタデータのキーは advanced 文書にあります。
 
 </details>
+
+### Best-of-K
+
+`--h3_best_of_k K` enables MiniMax-H3 best-of-K when `K > 1`.
+`--h3_best_of_k_stream video` (the default) varies and ranks video noise by
+video MSE on multi-frame batches; `audio` varies and ranks audio noise by audio
+MSE. One-frame image batches always search video noise. The selected update
+still optimizes video loss plus weighted audio loss, so a stream-focused winner
+need not minimize that joint objective. An audio-search batch with zero
+effective audio weight falls back to one ordinary forward; `--video_only` with
+active audio search is rejected. MiniMax-H3 rejects the common
+`--xm_best_of_k` option for `K > 1`. Best-of-K supports the training adapter
+and guidance loss, but rejects `--h3_teacher_matching` when `K > 1` because
+the teacher's decomposed loss is not the candidate-ranking MSE.
+
+The former experimental `--h3_video_best_of_k K` spelling is not an alias;
+replace it with `--h3_best_of_k K --h3_best_of_k_stream video`. See
+[Explorative Modeling and Forward XM](./explorative_modeling.md) for semantics,
+cost, runtime-kind metrics, compatibility, and the strict selected-score
+non-finite policy.
 
 ### Audio policy
 

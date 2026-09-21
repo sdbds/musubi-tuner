@@ -4,7 +4,6 @@ import argparse
 import gc
 import logging
 from collections.abc import Mapping, Sequence
-from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -264,7 +263,7 @@ def _teacher_text_keys(teacher_conditions: str) -> tuple[str, str]:
 class _H3TrainingState:
     runtime: _H3RuntimeBatch
     audio_latents: torch.Tensor
-    base_time: torch.Tensor
+    timesteps: torch.Tensor
     sigma_video: torch.Tensor
     sigma_audio: torch.Tensor
     model_t_video: torch.Tensor
@@ -307,7 +306,9 @@ class _H3BestOfKSelection:
         if self.kind == "audio":
             noisy_audio = (1.0 - state.sigma_audio) * state.audio_latents + state.sigma_audio * noise
             return replace(inputs, audio_noise=noise, noisy_audio=noisy_audio)
-        noisy_video = (1.0 - state.sigma_video) * video_latents + state.sigma_video * noise
+        noisy_video = ((1.0 - state.sigma_video) * video_latents.float() + state.sigma_video * noise.float()).to(
+            video_latents.dtype
+        )
         return replace(inputs, video_noise=noise, noisy_video=noisy_video)
 
     def score(self, video_losses: torch.Tensor, audio_losses: torch.Tensor) -> torch.Tensor:
@@ -1570,9 +1571,8 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             condition_roles=uncond_condition_roles or None,
             time_overrides=runtime.layout.time_overrides,
         )
-        autocast = accelerator.autocast if hasattr(accelerator, "autocast") else nullcontext
         with self.block_swap_forward_only(accelerator, transformer):
-            with torch.no_grad(), autocast():
+            with torch.no_grad(), accelerator.autocast():
                 uncond = transformer(
                     video_latents=noisy_model_input,
                     audio_latents=noisy_audio_input,
@@ -1709,10 +1709,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         noise_scheduler,
         dit_dtype: torch.dtype,
     ) -> tuple[_H3TrainingState, _H3NoisyInputs]:
-        teacher_conditions = (
-            normalize_teacher_conditions(args.h3_teacher_conditions) if getattr(args, "h3_teacher_matching", False) else None
-        )
-        # _runtime_batch_plan rejects batches larger than one item (batch_size=1 rule)
+        teacher_conditions = normalize_teacher_conditions(args.h3_teacher_conditions) if args.h3_teacher_matching else None
         runtime = _runtime_batch_plan(
             batch, latents, task=args.task, teacher_conditions=teacher_conditions, one_frame=bool(args.one_frame)
         )
@@ -1723,7 +1720,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         self._audio_items_seen += int(runtime.audio_present.numel())
         self._audio_supervised_seen += int(runtime.audio_present.sum().item())
         device = latents.device
-        pool = batch.get("timesteps")
+        pool = batch["timesteps"]
         if pool is not None and len(pool) != 1:
             raise ValueError("MiniMax-H3 R1 requires exactly one timestep value for its single-item batch")
         noisy_video, timesteps = self.get_noisy_model_input_and_timesteps(
@@ -1757,7 +1754,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         state = _H3TrainingState(
             runtime=runtime,
             audio_latents=audio_latents,
-            base_time=base,
+            timesteps=timesteps,
             sigma_video=sigma_video,
             sigma_audio=sigma_audio,
             model_t_video=1.0 - sigma_video,
@@ -1796,7 +1793,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             batch,
             inputs.video_noise,
             inputs.noisy_video,
-            state.base_time * 1000.0 + 1.0,
+            state.timesteps,
             network_dtype,
             audio_latents=state.audio_latents,
             audio_noise=inputs.audio_noise,
@@ -1840,7 +1837,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             network_dtype,
             network=network,
         )
-        return self.compute_loss(args, output, state.base_time, noise_scheduler, dit_dtype, network_dtype, global_step)
+        return self.compute_loss(args, output, state.timesteps, noise_scheduler, dit_dtype, network_dtype, global_step)
 
     def process_batch_best_of_k(
         self,
@@ -1875,7 +1872,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             return self.compute_loss(
                 args,
                 output,
-                state.base_time,
+                state.timesteps,
                 noise_scheduler,
                 dit_dtype,
                 network_dtype,
@@ -1948,7 +1945,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         loss, metrics = self.compute_loss(
             args,
             output,
-            state.base_time,
+            state.timesteps,
             noise_scheduler,
             dit_dtype,
             network_dtype,
@@ -2085,7 +2082,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         global_step: int,
     ) -> tuple[torch.Tensor, dict[str, float]]:
         del timesteps, noise_scheduler, dit_dtype, global_step
-        teacher_matching = bool(getattr(args, "h3_teacher_matching", False))
+        teacher_matching = bool(args.h3_teacher_matching)
         guidance_log = output.extra.get("guidance_log") or {}
         if not teacher_matching:
             video, audio = self._compute_per_sample_component_losses(output, network_dtype)
