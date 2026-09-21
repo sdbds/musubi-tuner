@@ -383,7 +383,7 @@ def test_explicit_coefficients_broadcast_with_declared_dtype_tolerance(dtype, rt
     noise = torch.flip(latents, dims=(-1,))
     timesteps = torch.tensor([251.0, 751.0], dtype=torch.float32)
     sigma = get_noise_coefficients("uniform", None, timesteps, torch.device("cpu"), len(shape), dtype)
-    expected_sigma = torch.tensor([0.25, 0.75], dtype=dtype).reshape(2, *([1] * (len(shape) - 1)))
+    expected_sigma = torch.tensor([0.25, 0.75], dtype=timesteps.dtype).reshape(2, *([1] * (len(shape) - 1)))
 
     torch.testing.assert_close(sigma, expected_sigma, rtol=rtol, atol=atol)
     torch.testing.assert_close(
@@ -1113,6 +1113,55 @@ def test_standard_xm_selects_mixed_winners_and_builds_one_gradient_graph(monkeyp
     assert trainer.scale.grad is not None
     assert torch.isfinite(trainer.scale.grad)
     assert trainer.scale.grad.item() == pytest.approx(2.5)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("shape", [(2, 1, 2, 2), (2, 1, 1, 2, 2)])
+@pytest.mark.parametrize(
+    "device",
+    ["cpu", pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable"))],
+)
+def test_standard_xm_replays_selected_inputs_without_rounding_model_timesteps(monkeypatch, dtype, shape, device):
+    trainer = _ToyXMTrainer(device)
+    trainer._validate_and_init_best_of_k(_xm_args())
+    with torch.no_grad():
+        trainer.scale.fill_(0.5)
+    latents = torch.zeros(shape, dtype=dtype, device=device)
+    noise_shape = (2, *([1] * (len(shape) - 1)))
+    candidate_zero = torch.tensor([1.0, 4.0], dtype=dtype, device=device).reshape(noise_shape).expand(shape)
+    candidate_one = torch.tensor([5.0, 2.0], dtype=dtype, device=device).reshape(noise_shape).expand(shape)
+    monkeypatch.setattr(trainer_base_module, "draw_candidate_noise", lambda reference, generator: candidate_one)
+    batch = {"timesteps": [0.00001, 0.8005], "condition": torch.ones(2, 1, device=device)}
+
+    loss, _ = trainer.process_batch_best_of_k(
+        _xm_args(),
+        _ToyAccelerator(device),
+        _ToyTransformer(),
+        None,
+        batch,
+        latents,
+        candidate_zero,
+        None,
+        dtype,
+        torch.float32,
+        None,
+        0,
+    )
+
+    first, second, winner = trainer.records
+    assert [record["grad_enabled"] for record in trainer.records] == [False, False, True]
+    expected_sigma = torch.tensor([0.00001, 0.8005], device=device).reshape(noise_shape)
+    torch.testing.assert_close(second["noisy_model_input"], expected_sigma * candidate_one, rtol=1e-6, atol=1e-7)
+    selected_input = torch.stack([first["noisy_model_input"][0], second["noisy_model_input"][1]])
+    selected_target = torch.stack([first["target"][0], second["target"][1]])
+    torch.testing.assert_close(winner["noisy_model_input"], selected_input, rtol=0, atol=0)
+    torch.testing.assert_close(winner["target"], selected_target, rtol=0, atol=0)
+    expected_scale = torch.tensor(0.5, device=device, requires_grad=True)
+    expected_loss = (expected_scale * selected_input - selected_target).square().flatten(1).mean(dim=1).mean()
+    expected_loss.backward()
+    loss.backward()
+    torch.testing.assert_close(loss, expected_loss, rtol=0, atol=0)
+    torch.testing.assert_close(trainer.scale.grad, expected_scale.grad, rtol=0, atol=0)
 
 
 def test_standard_xm_uses_forward_only_for_candidates_and_training_for_winner(monkeypatch):

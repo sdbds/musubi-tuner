@@ -1456,6 +1456,9 @@ class NetworkTrainer:
 
         # Samples may choose different candidates because sigma is per sample and fixed across candidates.
         winner_input = (1.0 - sigma) * latents + sigma * winner_noise
+        # Avoid the timestep round-trip for samples that selected the original input.
+        candidate_zero_mask = (winner_indices == 0).reshape(batch_size, *([1] * (latents.ndim - 1)))
+        winner_input = torch.where(candidate_zero_mask, noisy_candidate_zero.detach(), winner_input)
         output = self.call_dit(
             args,
             accelerator,
