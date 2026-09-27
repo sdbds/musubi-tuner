@@ -333,7 +333,7 @@ def create_network_from_weights(
         lora_name = key.split(".")[0]
         if "alpha" in key:
             modules_alpha[lora_name] = value
-        elif "lokr_w1" in key:
+        elif key.endswith(".lokr_w1"):
             lokr_shapes.setdefault(lora_name, {})["w1_shape"] = tuple(value.shape)
         elif "lokr_w2_a" in key:
             # low-rank mode: dim = w2_a.shape[1]
