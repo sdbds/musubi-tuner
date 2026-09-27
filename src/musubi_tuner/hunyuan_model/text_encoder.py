@@ -6,7 +6,6 @@ import torch
 import torch.nn as nn
 from transformers import (
     CLIPTextModel,
-    CLIPTokenizer,
     AutoTokenizer,
     AutoModel,
     CLIPConfig,
@@ -17,6 +16,8 @@ from transformers.utils import ModelOutput
 from transformers.models.llama import LlamaModel
 from safetensors.torch import load_file
 from accelerate import init_empty_weights
+
+from musubi_tuner.utils.clip_utils import CLIPTokenizer, clip_text_transformer, load_clip_text_model_state_dict
 
 import logging
 
@@ -178,16 +179,16 @@ def use_default(value, default):
 def load_clip_l(text_encoder_path: str, dtype: Optional[Union[str, torch.dtype]] = None):
     if os.path.isdir(text_encoder_path):
         # load from directory, configs are in the directory
-        text_encoder = CLIPTextModel.from_pretrained(text_encoder_path, torch_dtype=dtype)
+        text_encoder = CLIPTextModel.from_pretrained(text_encoder_path, dtype=dtype)
     else:
         # load from file, we create the model with the appropriate config
         config = CLIPConfig(**CLIP_CONFIG)
         with init_empty_weights():
-            text_encoder = CLIPTextModel._from_config(config, torch_dtype=dtype)
+            text_encoder = CLIPTextModel._from_config(config, dtype=dtype)
 
         state_dict = load_file(text_encoder_path)
 
-        text_encoder.load_state_dict(state_dict, strict=True, assign=True)
+        load_clip_text_model_state_dict(text_encoder, state_dict, strict=True, assign=True)
     # if dtype is not None:
     #     text_encoder.to(dtype=dtype)
 
@@ -208,12 +209,12 @@ def load_clip_l_tokenizer(tokenizer_path: str):
 def load_llm(text_encoder_path: str, dtype: Optional[Union[str, torch.dtype]] = None):
     if os.path.isdir(text_encoder_path):
         # load from directory, configs are in the directory
-        text_encoder = AutoModel.from_pretrained(text_encoder_path, low_cpu_mem_usage=True, torch_dtype=dtype)
+        text_encoder = AutoModel.from_pretrained(text_encoder_path, low_cpu_mem_usage=True, dtype=dtype)
     else:
         # load from file, we create the model with the appropriate config
         config = LlamaConfig(**LLAMA_CONFIG)
         with init_empty_weights():
-            text_encoder = LlamaForCausalLM._from_config(config, torch_dtype=dtype)
+            text_encoder = LlamaForCausalLM._from_config(config, dtype=dtype)
 
         state_dict = load_file(text_encoder_path)
 
@@ -248,7 +249,7 @@ def load_text_encoder(
     dtype = text_encoder_dtype
     if text_encoder_type == "clipL":
         text_encoder = load_clip_l(text_encoder_path, dtype=dtype)
-        text_encoder.final_layer_norm = text_encoder.text_model.final_layer_norm
+        text_encoder.final_layer_norm = clip_text_transformer(text_encoder).final_layer_norm
     elif text_encoder_type == "llm":
         text_encoder = load_llm(text_encoder_path, dtype=dtype)
         if hasattr(text_encoder, "norm"):
