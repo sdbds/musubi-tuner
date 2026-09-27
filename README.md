@@ -64,6 +64,14 @@ If you find this project helpful, please consider supporting its development via
 
 GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- September 27, 2026
+    - Updated the dependencies in `pyproject.toml`: `transformers` 4.57.6 -> 5.17.0, `diffusers` 0.32.1 -> 0.40.0, `accelerate` 1.6.0 -> 1.15.0, `huggingface-hub` 0.34.3 -> 1.32.0. [PR #1139](https://github.com/kohya-ss/musubi-tuner/pull/1139)
+        - This is mainly a security maintenance update (the 4.x line of `transformers` and `diffusers` < 0.38 no longer receive fixes). The previous versions of the libraries still work with this release, so you do not have to update them immediately, but it is recommended to run `pip install -e .` again in your environment at your earliest convenience.
+        - `diffusers` 0.40 requires PyTorch 2.6 or later, so PyTorch 2.6.0 or later is now required.
+        - `transformers` 5.6 changed the internal structure of `CLIPTextModel`, and in 5.x `CLIPTokenizer` no longer applies the `ftfy` text normalization of the original CLIP tokenizer (straightening curly quotes, converting full-width characters, etc.). Musubi Tuner handles both, so loading CLIP-L checkpoints and the text encoder outputs of HunyuanVideo, FramePack, FLUX.1 Kontext and Kandinsky 5 are unchanged from previous versions.
+        - `transformers` 5.6 switched the attention implementation of T5 (T5-XXL of FLUX.1 Kontext, byT5 of HunyuanVideo 1.5) to SDPA, which is faster and uses less memory. The bf16/fp16 outputs of T5 differ very slightly from previous versions (the accuracy against fp32 is the same). This may change generated images or trained weights in minor details; cached text encoder outputs from previous versions are still usable. The outputs of the other text encoders are identical.
+        - The text encoder outputs of all architectures were compared between the previous and the new versions. They are identical except for T5 (above), after the following adjustments: the Llama 3 tokenizer of HunyuanVideo / FramePack is loaded from `tokenizer.json` (`transformers` 5.x resolved it to a class that tokenizes Llama 3 text differently), the Mistral 3 tokenizer of FLUX.2 keeps the left padding of the previous versions, and Krea 2 passes the rotary positions of its prompt suffix explicitly.
+        - Two pre-existing bugs found by this comparison are fixed as well, so the text encoder outputs of these architectures change from previous versions regardless of the library versions (re-caching is recommended): the T5-XXL of FLUX.1 Kontext was left in training mode, so its dropout (0.1) was active while caching, making the cached outputs noisy and non-reproducible; and the rotary embedding of the Ideogram 4 text encoder (Qwen3-VL) was left uninitialized after the checkpoint was loaded, so the positional information was garbage (and could produce NaN).
 - September 24, 2026
     - Added support for Windows on ARM64 (e.g. NVIDIA RTX Spark PCs). [PR #1132](https://github.com/kohya-ss/musubi-tuner/pull/1132), [PR #1133](https://github.com/kohya-ss/musubi-tuner/pull/1133), [PR #1134](https://github.com/kohya-ss/musubi-tuner/pull/1134)
         - `opencv-python` is now optional (a Pillow/NumPy fallback is used when it is missing) and is skipped automatically on Windows on ARM64, where it has no wheel. For details, please refer to [Windows on ARM64](#windows-on-arm64).
@@ -171,7 +179,7 @@ Python 3.10 or later is required (verified with 3.10 and 3.12; the dependencies 
 
 Create a virtual environment and install PyTorch and torchvision matching your CUDA version. 
 
-PyTorch 2.5.1 or later is required (see [note](#PyTorch-version)).
+PyTorch 2.6.0 or later is required (see [note](#PyTorch-version)).
 
 ```bash
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124

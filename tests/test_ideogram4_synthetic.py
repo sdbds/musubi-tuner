@@ -148,11 +148,18 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
             @staticmethod
             def from_dict(*args, **kwargs):
                 calls["config"] = (args, kwargs)
-                return object()
+                return SimpleNamespace(text_config=object())
+
+        class FakeRotary(nn.Module):
+            def __init__(self, config, device=None):
+                super().__init__()
+                self.inv_freq = torch.zeros(2, device=device)
 
         class FakeModel(nn.Module):
             def __init__(self):
                 super().__init__()
+                self.language_model = nn.Module()
+                self.language_model.rotary_emb = FakeRotary(None)
 
             def load_state_dict(self, state_dict, strict=False, assign=True):
                 calls["load_state_dict"] = (state_dict, strict, assign)
@@ -242,16 +249,27 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
         original_load_state_dict = ideogram4_utils._load_state_dict
         original_init_empty_weights = ideogram4_utils.init_empty_weights
 
+        text_config = object()
+
         class FakeConfig:
             @staticmethod
             def from_dict(*args, **kwargs):
-                return object()
+                return SimpleNamespace(text_config=text_config)
+
+        class FakeRotary(nn.Module):
+            # the real rotary embedding computes inv_freq from the config in __init__ and keeps it as a
+            # non-persistent buffer, which to_empty() would leave uninitialized
+            def __init__(self, config, device=None):
+                super().__init__()
+                self.config = config
+                self.inv_freq = nn.Buffer(torch.tensor([1.0, 0.5], device=device), persistent=False)
 
         class FakeModel(nn.Module):
             def __init__(self):
                 super().__init__()
                 self.language_model = nn.Module()
                 self.language_model.loaded = nn.Linear(2, 2, device="meta")
+                self.language_model.rotary_emb = FakeRotary(text_config)
 
             def eval(self):
                 self.eval_called = True
@@ -294,6 +312,10 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
         self.assertFalse(any(param.is_meta for param in model.parameters()))
         self.assertTrue(model.eval_called)
         self.assertTrue(torch.equal(model.language_model.loaded.weight, torch.ones(2, 2)))
+        # to_empty() re-created inv_freq uninitialized; the loader rebuilt the rotary embedding from the text config
+        rotary = model.language_model.rotary_emb
+        self.assertIs(rotary.config, text_config)
+        self.assertTrue(torch.equal(rotary.inv_freq, torch.tensor([1.0, 0.5])))
 
     def test_build_inputs_and_patchify_roundtrip(self):
         features = [torch.ones(3, 8), torch.ones(5, 8)]

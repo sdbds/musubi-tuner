@@ -58,6 +58,14 @@
 
 GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- 2026/09/27
+    - `pyproject.toml` の依存関係を更新しました: `transformers` 4.57.6 -> 5.17.0、`diffusers` 0.32.1 -> 0.40.0、`accelerate` 1.6.0 -> 1.15.0、`huggingface-hub` 0.34.3 -> 1.32.0。[PR #1139](https://github.com/kohya-ss/musubi-tuner/pull/1139)
+        - 主にセキュリティ対応のための更新です（`transformers` の 4.x 系と `diffusers` 0.38 未満には修正が提供されなくなっています）。従来のバージョンでもこのリリースは動作しますので直ちに更新する必要はありませんが、お手すきの際に環境で `pip install -e .` を再実行することをお勧めします。
+        - `diffusers` 0.40 は PyTorch 2.6 以降を必要とするため、PyTorch 2.6.0 以降が必要になりました。
+        - `transformers` 5.6 で `CLIPTextModel` の内部構造が変更され、また 5.x では `CLIPTokenizer` がオリジナルの CLIP tokenizer の `ftfy` によるテキスト正規化（曲がった引用符の変換、全角文字の変換など）を行わなくなりました。Musubi Tuner 側で両方に対応しているため、CLIP-L チェックポイントの読み込みと、HunyuanVideo、FramePack、FLUX.1 Kontext、Kandinsky 5 の Text Encoder の出力は従来と変わりません。
+        - `transformers` 5.6 で T5（FLUX.1 Kontext の T5-XXL、HunyuanVideo 1.5 の byT5）の attention の実装が SDPA に変更されました。高速化とメモリ使用量の削減が期待できます。T5 の bf16/fp16 の出力は従来のバージョンとごくわずかに異なります（fp32 に対する精度は同等です）。生成画像や学習結果が細部で変化する可能性がありますが、従来のバージョンでキャッシュした Text Encoder の出力もそのまま使用できます。他の Text Encoder の出力は同一です。
+        - 全アーキテクチャの Text Encoder 出力を新旧バージョンで比較し、以下の調整により T5（上記）以外は同一であることを確認しています: HunyuanVideo / FramePack の Llama 3 tokenizer を `tokenizer.json` から読み込むようにしました（`transformers` 5.x では Llama 3 のテキストを異なる方法でトークン化するクラスに解決されていました）。FLUX.2 の Mistral 3 tokenizer は従来と同じ左パディングを維持します。Krea 2 はプロンプト末尾（suffix）の RoPE 位置を明示的に渡すようにしました。
+        - この比較で見つかった既存のバグを 2 件修正しました。これらのアーキテクチャの Text Encoder 出力はライブラリのバージョンに関係なく従来と変わるため、再キャッシュをお勧めします: FLUX.1 Kontext の T5-XXL が学習モードのままで dropout（0.1）が有効な状態でキャッシュしていたため、キャッシュ出力にノイズが乗り再現性がありませんでした。また Ideogram 4 の Text Encoder（Qwen3-VL）の RoPE がチェックポイント読み込み後に未初期化のままで、位置情報が不正（NaN になることも）でした。
 - 2026/09/16
     - MiniMax-H3に実験的に対応しました（LoRA学習、映像と音声の同時生成）。最初の[PR #1018](https://github.com/kohya-ss/musubi-tuner/pull/1018)とその後のフォローアップを含め、sdbds氏に感謝します。
         - 詳細は[ドキュメント](./docs/minimax_h3.md)および[one-frame（画像）学習のドキュメント](./docs/minimax_h3_1f.md)を参照してください。マージ済みの機能と今後の作業は[MiniMax-H3 support roadmap](https://github.com/kohya-ss/musubi-tuner/issues/1029)で管理しています。
@@ -161,7 +169,7 @@ Python 3.10以上を使用してください（3.10で動作確認済み）。
 
 適当な仮想環境を作成し、ご利用のCUDAバージョンに合わせたPyTorchとtorchvisionをインストールしてください。
 
-PyTorchはバージョン2.5.1以上を使用してください（[補足](#PyTorchのバージョンについて)）。
+PyTorchはバージョン2.6.0以上を使用してください（[補足](#PyTorchのバージョンについて)）。
 
 ```bash
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
