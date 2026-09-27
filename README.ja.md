@@ -19,6 +19,7 @@
     - [ドキュメント](#ドキュメント)
 - [インストール](#インストール)
     - [pipによるインストール](#pipによるインストール)
+    - [Windows on ARM64](#windows-on-arm64)
     - [uvによるインストール](#uvによるインストール)
     - [Linux/MacOS](#linuxmacos)
     - [Windows](#windows)
@@ -58,6 +59,23 @@
 
 GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- 2026/09/27
+    - `pyproject.toml` の依存関係を更新しました: `transformers` 4.57.6 -> 5.17.0、`diffusers` 0.32.1 -> 0.40.0、`accelerate` 1.6.0 -> 1.15.0、`huggingface-hub` 0.34.3 -> 1.32.0。[PR #1139](https://github.com/kohya-ss/musubi-tuner/pull/1139)
+        - 主にセキュリティ対応のための更新です（`transformers` の 4.x 系と `diffusers` 0.38 未満には修正が提供されなくなっています）。従来のバージョンでもこのリリースは動作しますので直ちに更新する必要はありませんが、お手すきの際に環境で `pip install -e .` を再実行することをお勧めします。
+        - `diffusers` 0.40 は PyTorch 2.6 以降を必要とするため、PyTorch 2.6.0 以降が必要になりました。
+        - `transformers` 5.6 で `CLIPTextModel` の内部構造が変更され、また 5.x では `CLIPTokenizer` がオリジナルの CLIP tokenizer の `ftfy` によるテキスト正規化（曲がった引用符の変換、全角文字の変換など）を行わなくなりました。Musubi Tuner 側で両方に対応しているため、CLIP-L チェックポイントの読み込みと、HunyuanVideo、FramePack、FLUX.1 Kontext、Kandinsky 5 の Text Encoder の出力は従来と変わりません。
+        - `transformers` 5.6 で T5（FLUX.1 Kontext の T5-XXL、HunyuanVideo 1.5 の byT5）の attention の実装が SDPA に変更されました。高速化とメモリ使用量の削減が期待できます。T5 の bf16/fp16 の出力は従来のバージョンとごくわずかに異なります（fp32 に対する精度は同等です）。生成画像や学習結果が細部で変化する可能性がありますが、従来のバージョンでキャッシュした Text Encoder の出力もそのまま使用できます。他の Text Encoder の出力は同一です。
+        - 全アーキテクチャの Text Encoder 出力を新旧バージョンで比較し、以下の調整により T5（上記）以外は同一であることを確認しています: HunyuanVideo / FramePack の Llama 3 tokenizer を `tokenizer.json` から読み込むようにしました（`transformers` 5.x では Llama 3 のテキストを異なる方法でトークン化するクラスに解決されていました）。FLUX.2 の Mistral 3 tokenizer は従来と同じ左パディングを維持します。Krea 2 はプロンプト末尾（suffix）の RoPE 位置を明示的に渡すようにしました。
+        - この比較で見つかった既存のバグを 2 件修正しました。これらのアーキテクチャの Text Encoder 出力はライブラリのバージョンに関係なく従来と変わるため、再キャッシュをお勧めします: FLUX.1 Kontext の T5-XXL が学習モードのままで dropout（0.1）が有効な状態でキャッシュしていたため、キャッシュ出力にノイズが乗り再現性がありませんでした。また Ideogram 4 の Text Encoder（Qwen3-VL）の RoPE がチェックポイント読み込み後に未初期化のままで、位置情報が不正（NaN になることも）でした。
+    - 壊れたメディアファイルに対するlatentキャッシュの堅牢性を向上しました。[PR #1126](https://github.com/kohya-ss/musubi-tuner/pull/1126)、[PR #1127](https://github.com/kohya-ss/musubi-tuner/pull/1127)、[PR #1128](https://github.com/kohya-ss/musubi-tuner/pull/1128)、[PR #1130](https://github.com/kohya-ss/musubi-tuner/pull/1130)
+        - latentキャッシュスクリプトに`--skip_broken`を追加しました。デコードや検証に失敗したメディアファイルがあった場合、処理を停止する代わりに理由をログに出力してスキップします。指定しない場合は従来どおり最初の失敗で停止します。[ドキュメント](./docs/hunyuan_video.md#latent-pre-caching--latentの事前キャッシング)を参照してください。
+        - MiniMax-H3: 動画に埋め込まれた音声を映像の先頭フレームに揃えるようにしました（キャプチャソフトでは映像と音声の開始時刻がずれていることが珍しくありません）。また、タイムスタンプの小さな揺れやギャップは`Audio stream is discontinuous`で失敗せず、その場で修復されます。詳細は[MiniMax-H3のドキュメント](./docs/minimax_h3.md#geometry-and-media-contract--ジオメトリとメディアの規約)を参照してください。**この変更より前に作成したキャッシュは、映像と音声の開始時刻がずれているファイルについて音声がずれたままです。該当するデータセットはlatentキャッシュを再作成してください（該当ファイルはキャッシュスクリプトがログに出力します）。**詳細な報告をいただいたTophness氏に感謝します。[Issue #1066](https://github.com/kohya-ss/musubi-tuner/issues/1066)
+    - コントリビューターの方々のPull Requestによるバグ修正を取り込みました（詳細はrelease notesを参照してください）。rockerBOO氏、li-lizhe氏、Jnalley123氏、FurkanGozukara氏に感謝します。[PR #1138](https://github.com/kohya-ss/musubi-tuner/pull/1138)
+- 2026/09/24
+    - Windows on ARM64（NVIDIA RTX Spark PCなど）に対応しました。[PR #1132](https://github.com/kohya-ss/musubi-tuner/pull/1132)、[PR #1133](https://github.com/kohya-ss/musubi-tuner/pull/1133)、[PR #1134](https://github.com/kohya-ss/musubi-tuner/pull/1134)
+        - `opencv-python`が任意になりました（インストールされていない場合はPillow/NumPyによる代替実装が使われます）。wheelが提供されていないWindows on ARM64では自動的にスキップされます。詳細は[Windows on ARM64](#windows-on-arm64)を参照してください。
+        - `pyproject.toml`の`av`と`safetensors`を、Windows ARM64のwheelが提供されている最初のバージョンである17.1.0と0.8.0に更新しました。`av` 17.1.0はFFmpeg 8.0を同梱しています。macOSのarm64 wheelはmacOS 14以降が必要です。
+        - `av`の更新により、HEVC動画で`*_cache_latents.py`がハングする問題も修正されます（`av` 14.0.1が同梱するFFmpeg 7.1.0のHEVCデコーダーにデッドロックがありました）。`pip install -e .`を再実行して`av`を更新してください。報告いただいたTophness氏に感謝します。[Issue #1124](https://github.com/kohya-ss/musubi-tuner/issues/1124)
 - 2026/09/16
     - MiniMax-H3に実験的に対応しました（LoRA学習、映像と音声の同時生成）。最初の[PR #1018](https://github.com/kohya-ss/musubi-tuner/pull/1018)とその後のフォローアップを含め、sdbds氏に感謝します。
         - 詳細は[ドキュメント](./docs/minimax_h3.md)および[one-frame（画像）学習のドキュメント](./docs/minimax_h3_1f.md)を参照してください。マージ済みの機能と今後の作業は[MiniMax-H3 support roadmap](https://github.com/kohya-ss/musubi-tuner/issues/1029)で管理しています。
@@ -157,11 +175,11 @@ Musubi Tunerの解説記事執筆や、関連ツールの開発に取り組ん�
 
 ### pipによるインストール
 
-Python 3.10以上を使用してください（3.10で動作確認済み）。
+Python 3.10以上を使用してください（3.10と3.12で動作確認済み。3.13と3.14でも依存関係はインストールできます）。
 
 適当な仮想環境を作成し、ご利用のCUDAバージョンに合わせたPyTorchとtorchvisionをインストールしてください。
 
-PyTorchはバージョン2.5.1以上を使用してください（[補足](#PyTorchのバージョンについて)）。
+PyTorchはバージョン2.6.0以上を使用してください（[補足](#PyTorchのバージョンについて)）。
 
 ```bash
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
@@ -175,13 +193,26 @@ pip install -e .
 
 オプションとして、FlashAttention、SageAttention（**推論にのみ使用できます**、インストール方法は[こちら](#SageAttentionのインストール方法)を参照）を使用できます。
 
-また、`ascii-magic`（データセットの確認に使用）、`matplotlib`（timestepsの可視化に使用）、`tensorboard`（学習ログの記録に使用）、`prompt-toolkit`を必要に応じてインストールしてください。
+また、`ascii-magic`（データセットの確認に使用）、`matplotlib`（timestepsの可視化に使用）、`tensorboard`（学習ログの記録に使用。Windows on ARM64では代わりに`tensorboardX`をインストールしてください。後述）、`prompt-toolkit`を必要に応じてインストールしてください。
 
 `prompt-toolkit`をインストールするとWan2.1およびFramePackのinteractive modeでの編集に、自動的に使用されます。特にLinux環境でプロンプトの編集が容易になります。
 
 ```bash
 pip install ascii-magic matplotlib tensorboard prompt-toolkit
 ```
+
+### Windows on ARM64
+
+Windows on ARM64（NVIDIA RTX Spark PCなど）に対応しています。Python 3.12以降を使用してください（`av`のWindows ARM64 wheelはPython 3.11以降、PyTorchのwheelはさらに新しいバージョンが必要です）。ご利用のGPUとPythonバージョンに対応したWindows on ARM64向けのPyTorchをインストールしたうえで、上記と同様に`pip install -e .`を実行してください。以下のパッケージはWindows ARM64のwheelが提供されていないため、自動的に処理されます。
+
+- `opencv-python`は`pyproject.toml`の環境マーカーによりスキップされます。学習とデータセットのパイプラインが使うOpenCVの機能はごく一部（`cv2.resize`、`cv2.cvtColor`、デバッグ用の`cv2.imshow`）のため、OpenCVがない場合はPillow/NumPyによる代替実装が`cv2`として登録されます。代替実装はデータセットのパイプラインが使う`INTER_AREA`と`INTER_LINEAR`のリサイズをOpenCVと同じ計算で再現しているので、キャッシュされるlatentは丸め誤差の範囲でOpenCVありの環境と一致します。`INTER_CUBIC`（推論スクリプトが開始・終了画像を拡大する場合に使用）はPillowで処理されるため、わずかに異なります。他のプラットフォームでも、OpenCVを避けたい場合は`pip install -e .`の後に`opencv-python`をアンインストールできます。代替実装が自動的に使われます。
+- `tensorboard` 2.xはWindows ARM64のwheelがない`grpcio`に依存しています（pipは黙って非常に古いtensorboard 1.10にフォールバックします）。代わりに`tensorboardX`をインストールしてください。`--log_with tensorboard`はそのまま動作します。ログは別のマシンのTensorBoardで参照してください。
+
+```bash
+pip install ascii-magic matplotlib tensorboardX prompt-toolkit
+```
+
+`triton`、`sageattention`、`flash-attn`などの任意パッケージはWindows on ARM64では動作確認していません。これらがなくてもスクリプトは動作します。
 
 ### uvによるインストール
 
@@ -267,9 +298,7 @@ sdbds氏によるWindows対応のSageAttentionのwheelが https://github.com/sdb
 
 ### PyTorchのバージョンについて
 
-`--attn_mode`に`torch`を指定する場合、2.5.1以降のPyTorchを使用してください（それより前のバージョンでは生成される動画が真っ黒になるようです）。
-
-古いバージョンを使う場合、xformersやSageAttentionを使用してください。
+PyTorch 2.6.0以降が必要です（`diffusers` 0.40がそれより前のバージョンに対応していません）。また、それより前のバージョンでは`--attn_mode torch`で生成される動画が真っ黒になる問題がありました。
 
 ## 免責事項
 

@@ -6,7 +6,7 @@ Please create a TOML file for dataset configuration.
 
 Image and video datasets are supported. The configuration file can include multiple datasets, either image or video datasets, with caption text files or metadata JSONL files.
 
-The cache directory must be different for each dataset.
+The cache directory must be different for each dataset. Sharing a cache directory between datasets mixes the cached items of the other dataset into training.
 
 Each video is extracted frame by frame without additional processing and used for training. It is recommended to use videos with a frame rate of 24fps for HunyuanVideo, 16fps for Wan2.1 and 30fps for FramePack. You can check the videos that will be trained using `--debug_mode video` when caching latent (see [here](/README.md#latent-caching)).
 <details>
@@ -246,7 +246,7 @@ JSONL file format for metadata:
 
 Relative paths in the JSONL (`video_path`, `control_path`, `audio_path`) are resolved against the working directory first (the historical behavior); when the file is not found there, they are resolved against the directory containing the JSONL file. If both locations contain the file, the working-directory match is used and a warning is logged.
 
-For audio-capable architectures, each record may also have an optional `audio_path` field pointing to the audio file for the video. If `audio_path` is omitted, the audio source is resolved automatically: a same-stem audio sidecar file (e.g. `video1.wav` next to `video1.mp4`; `.aac`/`.flac`/`.m4a`/`.mp3`/`.ogg`/`.opus`/`.wav`) is used if present (multiple candidates are an error), otherwise the audio track embedded in the video container is used. If none is found, the item is cached as audio-less (a silence placeholder with `audio_present=0`, excluded from audio supervision during training). Architectures without audio support ignore `audio_path`.
+For audio-capable architectures, each record may also have an optional `audio_path` field pointing to the audio file for the video. If `audio_path` is omitted, the audio source is resolved automatically: a same-stem audio sidecar file (e.g. `video1.wav` next to `video1.mp4`; `.aac`/`.flac`/`.m4a`/`.mp3`/`.ogg`/`.opus`/`.wav`) is used if present (multiple candidates are an error), otherwise the audio track embedded in the video container is used. Embedded audio is aligned to the video's first frame timestamp; a sidecar or explicit file starts at the first video frame from its first sample. If none is found, the item is cached as audio-less (a silence placeholder with `audio_present=0`, excluded from audio supervision during training). Architectures without audio support ignore `audio_path`.
 
 Keys outside the shared schema (`video_path`, `caption`, `control_path`, `audio_path`) are passed through to the architecture-specific cache scripts as per-item extras; for example, MiniMax-H3 reads its `references` and `teacher_caption` from them (relative paths inside such fields resolve from the JSONL directory). Architectures that do not define such fields ignore them. Directory-based datasets cannot carry per-item extras.
 
