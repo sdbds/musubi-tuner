@@ -58,7 +58,7 @@ from musubi_tuner.training.accelerator_setup import (
     collator_class,
     prepare_accelerator,
 )
-from musubi_tuner.training.sampling_prompts import should_sample_images
+from musubi_tuner.training.sampling_prompts import should_sample_at_epoch_end, should_sample_images
 from musubi_tuner.training.timesteps import (
     compute_density_for_timestep_sampling,
     compute_ideogram4_shift_timestep,
@@ -2058,6 +2058,7 @@ class NetworkTrainer:
 
         epoch_to_start = 0
         global_step = 0
+        last_sampled_step = None
         noise_scheduler = FlowMatchDiscreteScheduler(shift=args.discrete_flow_shift, reverse=True, solver="euler")
 
         loss_recorder = train_utils.LossRecorder()
@@ -2241,6 +2242,7 @@ class NetworkTrainer:
                         optimizer_eval_fn()
                         if should_sampling:
                             _do_sample(None, global_step)
+                            last_sampled_step = global_step
 
                         if should_saving:
                             accelerator.wait_for_everyone()
@@ -2302,7 +2304,8 @@ class NetworkTrainer:
                     if args.save_state:
                         train_utils.save_and_remove_state_on_epoch_end(args, accelerator, epoch + 1)
 
-            _do_sample(epoch + 1, global_step)
+            if should_sample_at_epoch_end(global_step, last_sampled_step):
+                _do_sample(epoch + 1, global_step)
             optimizer_train_fn()
 
             # end of epoch
