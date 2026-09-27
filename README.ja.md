@@ -59,7 +59,7 @@
 GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
 - 2026/09/27
-    - `pyproject.toml` の依存関係を更新しました: `transformers` 4.57.6 -> 5.17.0、`diffusers` 0.32.1 -> 0.40.0、`accelerate` 1.6.0 -> 1.15.0、`huggingface-hub` 0.34.3 -> 1.32.0。[PR #XXXX](https://github.com/kohya-ss/musubi-tuner/pull/XXXX)
+    - `pyproject.toml` の依存関係を更新しました: `transformers` 4.57.6 -> 5.17.0、`diffusers` 0.32.1 -> 0.40.0、`accelerate` 1.6.0 -> 1.15.0、`huggingface-hub` 0.34.3 -> 1.32.0。[PR #1139](https://github.com/kohya-ss/musubi-tuner/pull/1139)
         - 主にセキュリティ対応のための更新です（`transformers` の 4.x 系と `diffusers` 0.38 未満には修正が提供されなくなっています）。従来のバージョンでもこのリリースは動作しますので直ちに更新する必要はありませんが、お手すきの際に環境で `pip install -e .` を再実行することをお勧めします。
         - `diffusers` 0.40 は PyTorch 2.6 以降を必要とするため、PyTorch 2.6.0 以降が必要になりました。
         - `transformers` 5.6 で `CLIPTextModel` の内部構造が変更され、また 5.x では `CLIPTokenizer` がオリジナルの CLIP tokenizer の `ftfy` によるテキスト正規化（曲がった引用符の変換、全角文字の変換など）を行わなくなりました。Musubi Tuner 側で両方に対応しているため、CLIP-L チェックポイントの読み込みと、HunyuanVideo、FramePack、FLUX.1 Kontext、Kandinsky 5 の Text Encoder の出力は従来と変わりません。
