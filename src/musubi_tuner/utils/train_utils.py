@@ -63,24 +63,14 @@ def get_sanitized_config_or_none(args: argparse.Namespace):
 
 def reset_progress_bar_timing(progress_bar) -> None:
     """Exclude the first completed step from tqdm rate and ETA calculations."""
-
-    if getattr(progress_bar, "disable", False):
+    if progress_bar.disable:
         return
 
     completed = progress_bar.n
-    now = progress_bar._time()
+    progress_bar.reset()  # public API: resets start_t/last_print_t and the EMAs, but also zeroes n
     progress_bar.initial = completed
-    progress_bar.start_t = now
+    progress_bar.n = completed
     progress_bar.last_print_n = completed
-    progress_bar.last_print_t = now
-
-    # Match tqdm.reset()'s timing state without resetting the visible step count.
-    for attribute in ("_ema_dn", "_ema_dt", "_ema_miniters"):
-        average = getattr(progress_bar, attribute, None)
-        if average is not None:
-            average.last = 0
-            average.calls = 0
-
     progress_bar.refresh()
 
 
