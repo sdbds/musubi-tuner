@@ -345,9 +345,7 @@ def test_h3_training_sample_preserves_valid_frame_count(tmp_path: Path, monkeypa
 
     class FakeAccelerator:
         device = torch.device("cpu")
-
-        def get_tracker(self, name):
-            raise ValueError(name)
+        trackers = []  # no tracker registered
 
     monkeypatch.setattr(trainer_base, "save_videos_grid", lambda *args, **kwargs: None)
 
