@@ -44,6 +44,7 @@ from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_HUNYUAN_VIDEO
 import logging
 
 from musubi_tuner.utils import huggingface_utils, model_utils, train_utils, sai_model_spec
+from musubi_tuner.training.accelerator_setup import warn_if_tensorboard_unavailable
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -120,6 +121,7 @@ def prepare_accelerator(args: argparse.Namespace) -> Accelerator:
                 os.environ["WANDB_DIR"] = logging_dir
             if args.wandb_api_key is not None:
                 wandb.login(key=args.wandb_api_key)
+    warn_if_tensorboard_unavailable(log_with)
 
     kwargs_handlers = [
         (

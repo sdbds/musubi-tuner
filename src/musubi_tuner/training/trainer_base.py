@@ -105,17 +105,19 @@ DIRECT_TIMESTEP_SAMPLING_METHODS = frozenset(
 
 
 def wandb_tracker_and_module(accelerator):
-    """``(tracker, wandb)`` when a wandb tracker is active and wandb is importable, else ``(None, None)``."""
-    try:
-        tracker = accelerator.get_tracker("wandb")  # raises ValueError if wandb is not initialized
-    except (AttributeError, ValueError):
-        return None, None
-    try:
-        import wandb
-    except ImportError:
-        logger.warning("wandb tracker is active but wandb is not installed / wandb がインストールされていないようです")
-        return None, None
-    return tracker, wandb
+    """``(tracker, wandb)`` when a wandb tracker is active, else ``(None, None)``.
+
+    Looks the tracker up in ``accelerator.trackers`` directly: ``Accelerator.get_tracker`` returns a blank
+    no-op ``GeneralTracker`` (instead of raising) when no tracker is registered at all, which is
+    indistinguishable from an active wandb tracker by exception handling alone. accelerate only registers
+    a wandb tracker when the package is importable, so the import cannot fail here.
+    """
+    for tracker in accelerator.trackers:
+        if tracker.name == "wandb":
+            import wandb
+
+            return tracker, wandb
+    return None, None
 
 
 @dataclass
