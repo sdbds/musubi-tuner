@@ -299,6 +299,7 @@ def load_clip_l(
         sd = load_safetensors(ckpt_path, device=str(device), disable_mmap=disable_mmap, dtype=dtype)
     info = load_clip_text_model_state_dict(clip, sd, strict=True, assign=True)
     logger.info(f"Loaded CLIP-L: {info}")
+    clip.eval()  # _from_config leaves the model in training mode
     clip.to(device)
 
     if dtype is not None:
@@ -366,6 +367,7 @@ def load_t5xxl(
         sd = load_safetensors(ckpt_path, device=str(device), disable_mmap=disable_mmap, dtype=dtype)
     info = t5xxl.load_state_dict(sd, strict=True, assign=True)
     logger.info(f"Loaded T5xxl: {info}")
+    t5xxl.eval()  # _from_config leaves the model in training mode, and T5-XXL has dropout_rate 0.1
     t5xxl.to(device)
 
     if dtype is not None:

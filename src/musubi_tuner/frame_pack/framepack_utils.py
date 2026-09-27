@@ -17,6 +17,7 @@ from transformers import (
 )
 
 from musubi_tuner.utils.clip_utils import CLIPTokenizer, load_clip_text_model_state_dict
+from musubi_tuner.utils.tokenizer_utils import load_llama3_tokenizer
 from musubi_tuner.utils.safetensors_utils import load_split_weights
 from musubi_tuner.hunyuan_model.vae import load_vae as hunyuan_load_vae
 
@@ -122,7 +123,7 @@ def load_text_encoder1(
 ) -> tuple[LlamaTokenizerFast, LlamaModel]:
     # single file, split file and directory (contains 'text_encoder') support
     logger.info("Loading text encoder 1 tokenizer")
-    tokenizer1 = LlamaTokenizerFast.from_pretrained("hunyuanvideo-community/HunyuanVideo", subfolder="tokenizer")
+    tokenizer1 = load_llama3_tokenizer("hunyuanvideo-community/HunyuanVideo", subfolder="tokenizer")
 
     logger.info(f"Loading text encoder 1 from {args.text_encoder1}")
     if os.path.isdir(args.text_encoder1):

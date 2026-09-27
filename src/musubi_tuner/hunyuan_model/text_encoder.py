@@ -6,7 +6,6 @@ import torch
 import torch.nn as nn
 from transformers import (
     CLIPTextModel,
-    AutoTokenizer,
     AutoModel,
     CLIPConfig,
     LlamaForCausalLM,
@@ -18,6 +17,7 @@ from safetensors.torch import load_file
 from accelerate import init_empty_weights
 
 from musubi_tuner.utils.clip_utils import CLIPTokenizer, clip_text_transformer, load_clip_text_model_state_dict
+from musubi_tuner.utils.tokenizer_utils import load_llama3_tokenizer
 
 import logging
 
@@ -229,11 +229,11 @@ def load_llm(text_encoder_path: str, dtype: Optional[Union[str, torch.dtype]] = 
 
 def load_llm_tokenizer(tokenizer_path: str, padding_side="right"):
     if os.path.isdir(tokenizer_path):
-        tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+        tokenizer = load_llama3_tokenizer(tokenizer_path)
     else:
         # load from Hugging Face
         logger.info(f"Loading tokenizer from Hugging Face: {LLAVA_HUGGINGFACE_MODEL_ID}")
-        tokenizer = AutoTokenizer.from_pretrained(LLAVA_HUGGINGFACE_MODEL_ID, padding_side=padding_side)
+        tokenizer = load_llama3_tokenizer(LLAVA_HUGGINGFACE_MODEL_ID, padding_side=padding_side)
 
     return tokenizer
 
