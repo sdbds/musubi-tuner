@@ -101,6 +101,7 @@ def test_h3_epoch_end_stays_silent_unless_audio_supervision_was_expected(caplog,
 
 class _Accelerator:
     is_local_main_process = True
+    trackers = []  # no tracker registered
 
     def __init__(self, device="cpu"):
         self.device = torch.device(device)

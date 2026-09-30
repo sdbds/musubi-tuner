@@ -58,7 +58,7 @@ from musubi_tuner.training.accelerator_setup import (
     collator_class,
     prepare_accelerator,
 )
-from musubi_tuner.training.sampling_prompts import should_sample_images
+from musubi_tuner.training.sampling_prompts import should_sample_at_epoch_end, should_sample_images
 from musubi_tuner.training.explorative import create_candidate_generator, draw_candidate_noise, update_winners
 from musubi_tuner.training.timesteps import (
     BASE_NOISE_COEFFICIENT_TIMESTEP_SAMPLINGS,
@@ -89,17 +89,19 @@ SS_METADATA_MINIMUM_KEYS = [
 
 
 def wandb_tracker_and_module(accelerator):
-    """``(tracker, wandb)`` when a wandb tracker is active and wandb is importable, else ``(None, None)``."""
-    try:
-        tracker = accelerator.get_tracker("wandb")  # raises ValueError if wandb is not initialized
-    except (AttributeError, ValueError):
-        return None, None
-    try:
-        import wandb
-    except ImportError:
-        logger.warning("wandb tracker is active but wandb is not installed / wandb がインストールされていないようです")
-        return None, None
-    return tracker, wandb
+    """``(tracker, wandb)`` when a wandb tracker is active, else ``(None, None)``.
+
+    Looks the tracker up in ``accelerator.trackers`` directly: ``Accelerator.get_tracker`` returns a blank
+    no-op ``GeneralTracker`` (instead of raising) when no tracker is registered at all, which is
+    indistinguishable from an active wandb tracker by exception handling alone. accelerate only registers
+    a wandb tracker when the package is importable, so the import cannot fail here.
+    """
+    for tracker in accelerator.trackers:
+        if tracker.name == "wandb":
+            import wandb
+
+            return tracker, wandb
+    return None, None
 
 
 @dataclass
@@ -1981,10 +1983,12 @@ class NetworkTrainer:
 
         if args.dim_from_weights:
             if not args.network_weights:
-                raise ValueError("--dim_from_weights requires --network_weights")
-            logger.info(f"Loading network dimensions from weights: {args.network_weights}")
+                raise ValueError(
+                    "--dim_from_weights requires --network_weights / --dim_from_weightsには--network_weightsの指定が必要です"
+                )
+            logger.info(f"Loading network from weights: {args.network_weights}")
             weights_sd = load_file(args.network_weights)
-            network, _ = network_module.create_arch_network_from_weights(1, weights_sd, unet=transformer)
+            network = network_module.create_arch_network_from_weights(1, weights_sd, unet=transformer, **net_kwargs)
         else:
             # We use the name create_arch_network for compatibility with LyCORIS
             if hasattr(network_module, "create_arch_network"):
@@ -2339,6 +2343,7 @@ class NetworkTrainer:
 
         epoch_to_start = 0
         global_step = 0
+        last_sampled_step = None
         noise_scheduler = FlowMatchDiscreteScheduler(shift=args.discrete_flow_shift, reverse=True, solver="euler")
 
         loss_recorder = train_utils.LossRecorder()
@@ -2509,8 +2514,6 @@ class NetworkTrainer:
 
                 # Checks if the accelerator has performed an optimization step behind the scenes
                 if accelerator.sync_gradients:
-                    if global_step == 0:
-                        progress_bar.reset()  # exclude first step from progress bar, because it may take long due to initializations
                     progress_bar.update(1)
                     global_step += 1
 
@@ -2522,6 +2525,7 @@ class NetworkTrainer:
                         optimizer_eval_fn()
                         if should_sampling:
                             _do_sample(None, global_step)
+                            last_sampled_step = global_step
 
                         if should_saving:
                             accelerator.wait_for_everyone()
@@ -2539,6 +2543,8 @@ class NetworkTrainer:
                         optimizer_train_fn()
 
                 current_loss = loss.detach().item()
+                if accelerator.sync_gradients and global_step == 1:
+                    train_utils.reset_progress_bar_timing(progress_bar)
                 loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
                 avr_loss: float = loss_recorder.moving_average
                 logs = {"avr_loss": avr_loss}  # , "lr": lr_scheduler.get_last_lr()[0]}
@@ -2583,7 +2589,8 @@ class NetworkTrainer:
                     if args.save_state:
                         train_utils.save_and_remove_state_on_epoch_end(args, accelerator, epoch + 1)
 
-            _do_sample(epoch + 1, global_step)
+            if should_sample_at_epoch_end(global_step, last_sampled_step):
+                _do_sample(epoch + 1, global_step)
             optimizer_train_fn()
 
             # end of epoch

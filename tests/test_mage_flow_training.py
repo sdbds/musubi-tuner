@@ -393,6 +393,7 @@ def test_dim_from_weights_requires_network_weights_before_model_loading():
 
 def test_dim_from_weights_loads_rank_from_network_weights_path(monkeypatch):
     loaded_paths = []
+    factory_args = {}
 
     class FakeNetwork:
         def apply_to(self, *_args, **_kwargs):
@@ -402,28 +403,62 @@ def test_dim_from_weights_loads_rank_from_network_weights_path(monkeypatch):
             return None
 
     fake_network = FakeNetwork()
+
+    def create_network_from_weights(multiplier, weights_sd, *, unet, **kwargs):
+        factory_args.update(multiplier=multiplier, weights_sd=weights_sd, unet=unet, kwargs=kwargs)
+        return fake_network
+
     fake_module = SimpleNamespace(
-        create_arch_network_from_weights=lambda *_args, **_kwargs: (fake_network, None),
+        create_arch_network_from_weights=create_network_from_weights,
     )
+    weights_sd = {"lora": torch.zeros(1)}
     monkeypatch.setattr(trainer_base_module.importlib, "import_module", lambda _name: fake_module)
     monkeypatch.setattr(
         trainer_base_module,
         "load_file",
-        lambda path: loaded_paths.append(path) or {"lora": torch.zeros(1)},
+        lambda path: loaded_paths.append(path) or weights_sd,
     )
     args = SimpleNamespace(
         network_module="musubi_tuner.networks.lora_mage_flow",
         base_weights=None,
-        network_args=None,
+        network_args=["rank_dropout=0.2"],
         dim_from_weights=True,
         network_weights="adapter.safetensors",
         gradient_checkpointing=False,
     )
     accelerator = SimpleNamespace(print=lambda *_args: None)
+    transformer = object()
+    trainer = MageFlowNetworkTrainer()
+    monkeypatch.setattr(
+        trainer,
+        "prepare_network_kwargs",
+        lambda _args, _dataset, _module, kwargs: {**kwargs, "module_dropout": "0.1"},
+    )
 
-    MageFlowNetworkTrainer()._build_network(args, accelerator, object(), None, torch.bfloat16, None)
+    network = trainer._build_network(args, accelerator, transformer, None, torch.bfloat16, None)
 
+    assert network is fake_network
     assert loaded_paths == ["adapter.safetensors"]
+    assert factory_args["multiplier"] == 1
+    assert factory_args["weights_sd"] is weights_sd
+    assert factory_args["unet"] is transformer
+    assert factory_args["kwargs"] == {"rank_dropout": "0.2", "module_dropout": "0.1"}
+
+
+@pytest.mark.parametrize("network_weights", [None, ""])
+def test_dim_from_weights_build_rejects_missing_network_weights(network_weights):
+    args = SimpleNamespace(
+        network_module="musubi_tuner.networks.lora_mage_flow",
+        base_weights=None,
+        network_args=None,
+        dim_from_weights=True,
+        network_weights=network_weights,
+        gradient_checkpointing=False,
+    )
+    accelerator = SimpleNamespace(print=lambda *_args: None)
+
+    with pytest.raises(ValueError, match="--dim_from_weights requires --network_weights"):
+        MageFlowNetworkTrainer()._build_network(args, accelerator, object(), None, torch.bfloat16, None)
 
 
 def test_training_sample_vae_load_requires_decoder(monkeypatch):
