@@ -6,12 +6,14 @@ import pytest
 import torch
 
 from musubi_tuner.dlssnr.checkpoint import load_source, unpack_record
+from musubi_tuner.dlssnr.dataset import NRBatchPlan, collate_single_frames, load_single_frame_manifest
 from musubi_tuner.dlssnr.model import NRModel
 from musubi_tuner.dlssnr.numerics import fp32_execution
 from musubi_tuner.dlssnr.pipeline import forward_frame
 from musubi_tuner.networks.lora_dlssnr import base_target_sha256, inject, merge_adapter
 from musubi_tuner.training.dlssnr_services import assert_finite_gradients
 from musubi_tuner.training.dlssnr_trainer import NRTrainModule, build_optimizer, clear_lane15_state
+from test_dlssnr_buckets import write_pairs
 from test_dlssnr_packing import _source_dir
 
 
@@ -81,3 +83,48 @@ def test_original_weights_complete_a_finite_cuda_update(canonical_weights, lora)
             assert not torch.equal(before, model.blocks["70"].head.rgb.weight)
         assert torch.count_nonzero(model.blocks["0"].input_adapter.weight[:, 15]) == 0
         print({"lora": lora, "loss": metrics["loss"], "peak_cuda_mib": round(torch.cuda.max_memory_allocated() / 2**20, 1)})
+
+
+@pytest.mark.parametrize("lora", [False, True])
+def test_original_weights_update_across_landscape_and_portrait_buckets(tmp_path, canonical_weights, lora):
+    path = write_pairs(tmp_path, [(832, 480), (480, 832)])
+    data = load_single_frame_manifest(path, 320, 320, enable_bucket=True)
+    assert data.bucket_sizes == [(416, 240), (240, 416)]
+    plan = NRBatchPlan(data, 2)
+    with fp32_execution():
+        torch.manual_seed(42)
+        model = NRModel().cuda()
+        model.load_state_dict(canonical_weights, strict=True)
+        network = inject(model, {"profile": "vit_only", "rank": 4, "alpha": 4, "dropout": 0.0}) if lora else None
+        optimizer = (
+            torch.optim.AdamW(network.parameters(), lr=1e-4, weight_decay=0)
+            if lora
+            else build_optimizer(model, 1e-5, {"priors": 0.1, "scales": 0.1}, 0.0)
+        )
+        module = NRTrainModule(model, {"pre": 1.0, "out": 1.0, "edge": 0.05}, network=network)
+        before = model.blocks["70"].head.rgb.weight.detach().clone()
+        batches = []
+        for index in range(len(plan)):
+            batch = {
+                name: value.cuda() for name, value in collate_single_frames([data[item] for item in plan.indices(index)]).items()
+            }
+            batches.append(batch)
+            loss, _ = module(batch, [123])
+            loss.backward()
+            assert_finite_gradients(module)
+            model.enforce_lane15()
+            optimizer.step()
+            clear_lane15_state(model, optimizer)
+            optimizer.zero_grad(set_to_none=True)
+        if lora:
+            assert all(torch.count_nonzero(adapter.lora_up) > 0 for adapter in network.adapters)
+            torch.testing.assert_close(model.blocks["70"].head.rgb.weight, before, rtol=0, atol=0)
+            merged = NRModel().cuda()
+            merged.load_state_dict(merge_adapter(model.state_dict(), network))
+            with torch.no_grad():
+                for batch in batches:
+                    actual = forward_frame(model, batch["source"], batch["controls"], [123])
+                    reference = forward_frame(merged, batch["source"], batch["controls"], [123])
+                    torch.testing.assert_close(actual["raw_head"], reference["raw_head"], rtol=2e-4, atol=2e-4)
+        else:
+            assert not torch.equal(model.blocks["70"].head.rgb.weight, before)

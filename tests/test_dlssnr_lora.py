@@ -6,7 +6,8 @@ import pytest
 from musubi_tuner.dlssnr.model import ChannelLinear, GlobalAttn, NRModel, WindowAttn
 from musubi_tuner.dlssnr.numerics import apply_linear
 from musubi_tuner.networks.lora_dlssnr import DLSSNRLoRA, VIT_ONLY_ELEMENTS, inject, load_adapter, merge_adapter, save_adapter
-from musubi_tuner.training.dlssnr_trainer import load_train_config, single_frame_update
+from musubi_tuner.training.dlssnr_parser import setup_parser
+from musubi_tuner.training.dlssnr_trainer import single_frame_update
 
 
 @pytest.mark.parametrize("kind", ["window", "global"])
@@ -159,40 +160,16 @@ def test_multiscale_ranks_follow_width_and_skip_transitions():
         raise AssertionError("oversized rank was accepted")
 
 
-def test_lora_config_is_separate_from_full_training(tmp_path: Path):
-    full = tmp_path / "full.toml"
-    full.write_text(
-        """
-[data]
-train_manifest = "train.jsonl"
-source_encoding = "srgb_proxy"
-target_encoding = "srgb_proxy"
-controls_encoding = "dlssnr_lanes_10_14_v1"
-bucket_size = [48, 48]
-require_cache = false
-[training]
-mode = "single_frame"
-[precision]
-mixed_precision = "no"
-master_dtype = "float32"
-[lora]
-profile = "vit_only"
-rank = 16
-alpha = 16
-""".strip(),
-        encoding="utf-8",
-    )
-    try:
-        load_train_config(full)
-    except ValueError as exc:
-        assert "dlssnr_train_network.py" in str(exc)
-    else:
-        raise AssertionError("full training accepted [lora]")
-    lora = tmp_path / "lora.toml"
-    lora.write_text(full.read_text(encoding="utf-8") + "\n[parameter_groups]\nprior_lr_multiplier = 0.1\n", encoding="utf-8")
-    try:
-        load_train_config(lora, lora=True)
-    except ValueError as exc:
-        assert "parameter_groups" in str(exc)
-    else:
-        raise AssertionError("LoRA training accepted parameter groups")
+def test_lora_arguments_are_separate_from_full_training(tmp_path: Path):
+    common = [
+        "--dataset_config",
+        str(tmp_path / "dataset.toml"),
+        "--output_dir",
+        str(tmp_path / "out"),
+        "--output_name",
+        "run",
+    ]
+    with pytest.raises(SystemExit):
+        setup_parser().parse_args([*common, "--network_dim", "16"])
+    with pytest.raises(SystemExit):
+        setup_parser(lora=True).parse_args([*common, "--prior_lr_multiplier", "0.1"])

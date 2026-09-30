@@ -1,4 +1,4 @@
-"""Lazy, fixed-bucket paired clips with explicit encodings and motion semantics."""
+"""Lazy paired clips with shared buckets and synchronized spatial transforms."""
 
 from __future__ import annotations
 
@@ -7,10 +7,14 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from PIL import Image
 from torch.utils.data import Dataset
 
+from musubi_tuner.dataset.architectures import ARCHITECTURE_DLSSNR
+from musubi_tuner.dataset.bucket import BucketBatchManager, BucketSelector
 from musubi_tuner.dlssnr.filenames import validate_filename
+from musubi_tuner.dlssnr.geometry import resolve_geometry
 from musubi_tuner.dlssnr.identity import file_sha256, json_sha256
 
 
@@ -38,6 +42,47 @@ def _proxy_image(path: Path) -> torch.Tensor:
     return tensor
 
 
+def _proxy_size(path: Path) -> tuple[int, int]:
+    if path.suffix.lower() == ".npy":
+        array = np.load(path, mmap_mode="r", allow_pickle=False)
+        if not isinstance(array, np.ndarray) or array.ndim != 3 or array.shape[0] != 3 or array.dtype.kind not in "biuf":
+            raise ValueError(f"{path} must be a real numeric [3,H,W] npy array")
+        if min(array.shape[1:]) < 1:
+            raise ValueError(f"{path} must have positive source dimensions")
+        return int(array.shape[2]), int(array.shape[1])
+    with Image.open(path) as image:
+        return image.size
+
+
+def _resize_paired_frame(frame, bucket):
+    width, height = frame["source"].shape[-1], frame["source"].shape[-2]
+    bucket_width, bucket_height = bucket
+    scale = max(bucket_width / width, bucket_height / height)
+    resized_width, resized_height = int(width * scale + 0.5), int(height * scale + 0.5)
+    left, top = (resized_width - bucket_width) // 2, (resized_height - bucket_height) // 2
+    for name in ("source", "target", "controls", "motion", "history_valid", "temporal_valid", "loss_mask"):
+        value = frame[name]
+        if value is None:
+            continue
+        binary = value.dtype == torch.bool
+        if (resized_height, resized_width) != (height, width):
+            options = (
+                {"mode": "nearest-exact"} if binary else {"mode": "bilinear", "align_corners": False, "antialias": name != "motion"}
+            )
+            value = F.interpolate(value.float().unsqueeze(0), size=(resized_height, resized_width), **options)[0]
+        value = value[:, top : top + bucket_height, left : left + bucket_width].contiguous()
+        if name == "motion":
+            # Same crop on both frames cancels; displacements use actual rounded resize ratios.
+            value = value * value.new_tensor([resized_width / width, resized_height / height])[:, None, None]
+        frame[name] = value.bool() if binary else value
+        if not torch.isfinite(frame[name]).all():
+            raise ValueError(f"frame {frame['frame_index']}: {name} contains non-finite values after bucket transform")
+        if name in ("source", "target", "loss_mask"):
+            # Bilinear accumulation can round a bounded value a few ulps past 1.
+            frame[name] = frame[name].clamp(0, 1)
+    return frame
+
+
 def _controls(path: Path) -> torch.Tensor:
     tensor = _numeric(path)
     if tensor.ndim != 3 or tensor.shape[0] != 5:
@@ -63,13 +108,28 @@ def _mask(path: Path, height: int, width: int, *, binary: bool) -> torch.Tensor:
 
 class NRDataset(Dataset):
     def __init__(
-        self, path, width, height, sequence_length, *, single_frame=False, require_target=True, require_temporal_mask=True
+        self,
+        path,
+        width,
+        height,
+        sequence_length,
+        *,
+        single_frame=False,
+        require_target=True,
+        require_temporal_mask=True,
+        enable_bucket=False,
+        bucket_no_upscale=False,
     ):
         self.path = Path(path).resolve()
         self.width, self.height = width, height
         self.single_frame = single_frame
         self.require_target = require_target
         self.require_temporal_mask = require_temporal_mask
+        self.enable_bucket = enable_bucket
+        self.bucket_no_upscale = bucket_no_upscale if enable_bucket else False
+        self.bucket_sizes = []
+        self.original_sizes = []
+        selector = BucketSelector((width, height), True, self.bucket_no_upscale, ARCHITECTURE_DLSSNR) if enable_bucket else None
         self.rows = []
         self.sequence_ids = set()
         sample_ids = set()
@@ -140,7 +200,18 @@ class NRDataset(Dataset):
                             raise FileNotFoundError(f"{context}: missing {file}")
                         frame[key] = str(file)
                         self.files.add(file)
+            if selector is not None:
+                sizes = {_proxy_size(Path(frame["input_path"])) for frame in frames}
+                if len(sizes) != 1:
+                    raise ValueError(f"{context}: all frames in a clip must have the same source resolution")
+                original_size = sizes.pop()
+                bucket = selector.get_bucket_resolution(original_size)
+                resolve_geometry(*bucket)
+            else:
+                original_size, bucket = None, (width, height)
             self.rows.append(row)
+            self.original_sizes.append(original_size)
+            self.bucket_sizes.append(bucket)
         if not self.rows:
             raise ValueError(f"{self.path} has no samples")
 
@@ -149,17 +220,21 @@ class NRDataset(Dataset):
 
     def __getitem__(self, index):
         row = self.rows[index]
-        frames = [self._load_frame(frame, row.get("motion_layout")) for frame in row["frames"]]
+        frames = [self._load_frame(frame, row.get("motion_layout"), index) for frame in row["frames"]]
         metadata = {"sample_id": row["sample_id"], "sequence_id": row["sequence_id"], "crop_id": row.get("crop_id", 0)}
         return {**frames[0], **metadata} if self.single_frame else {"frames": frames, **metadata}
 
-    def _load_frame(self, frame, motion_layout):
+    def _load_frame(self, frame, motion_layout, sample_index):
         source = _proxy_image(Path(frame["input_path"]))
         target = _proxy_image(Path(frame["target_path"])) if "target_path" in frame else None
         controls = _controls(Path(frame["controls_path"]))
-        shape = (self.height, self.width)
+        shape = self.original_sizes[sample_index][::-1] if self.enable_bucket else (self.height, self.width)
         if source.shape[-2:] != shape or controls.shape[-2:] != shape or (target is not None and target.shape != source.shape):
-            raise ValueError(f"frame {frame['frame_index']} does not match bucket {self.width}x{self.height}")
+            expected = f"bucket {self.width}x{self.height}"
+            if self.enable_bucket:
+                bucket_width, bucket_height = self.bucket_sizes[sample_index]
+                expected = f"original paired grid {shape[1]}x{shape[0]} before bucketing to {bucket_width}x{bucket_height}"
+            raise ValueError(f"frame {frame['frame_index']}: source/target/controls do not match {expected}")
         motion = torch.zeros(2, *shape)
         history_valid = torch.zeros(1, *shape, dtype=torch.bool)
         if not frame["reset"]:
@@ -176,9 +251,7 @@ class NRDataset(Dataset):
         loss_mask = (
             _mask(Path(frame["loss_mask_path"]), *shape, binary=False) if "loss_mask_path" in frame else torch.ones(1, *shape)
         )
-        if self.require_target and not loss_mask.any():
-            raise ValueError(f"frame {frame['frame_index']}: loss mask has no supervised pixels")
-        return {
+        loaded = {
             "source": source,
             "target": target,
             "controls": controls,
@@ -189,6 +262,11 @@ class NRDataset(Dataset):
             "reset": frame["reset"],
             "frame_index": frame["frame_index"],
         }
+        if self.enable_bucket:
+            loaded = _resize_paired_frame(loaded, self.bucket_sizes[sample_index])
+        if self.require_target and not loaded["loss_mask"].any():
+            raise ValueError(f"frame {frame['frame_index']}: loss mask has no supervised pixels")
+        return loaded
 
     def validate(self):
         for index in range(len(self)):
@@ -198,21 +276,84 @@ class NRDataset(Dataset):
     def iter_frames(self, index):
         row = self.rows[index]
         for frame in row["frames"]:
-            yield self._load_frame(frame, row.get("motion_layout"))
+            yield self._load_frame(frame, row.get("motion_layout"), index)
 
     def fingerprint(self):
         return json_sha256(
-            {"bucket": [self.width, self.height], "files": {str(path): file_sha256(path) for path in sorted(self.files)}}
+            {
+                "resolution": [self.width, self.height],
+                "enable_bucket": self.enable_bucket,
+                "bucket_no_upscale": self.bucket_no_upscale,
+                "bucket_sizes": self.bucket_sizes,
+                "original_sizes": self.original_sizes,
+                "files": {str(path): file_sha256(path) for path in sorted(self.files)},
+            }
         )
 
 
-def load_single_frame_manifest(path, bucket_width, bucket_height, *, require_target=True):
+class NRBatchPlan:
+    """Deterministic same-bucket batches, including partial tails without duplication."""
+
+    def __init__(self, dataset, batch_size):
+        buckets = {}
+        for index, (bucket, row) in enumerate(zip(dataset.bucket_sizes, dataset.rows)):
+            buckets.setdefault((*bucket, len(row["frames"])), []).append(index)
+        self.manager = BucketBatchManager(buckets, batch_size)
+        self.prefix_counts = [0]
+        for index in range(len(self.manager)):
+            self.prefix_counts.append(self.prefix_counts[-1] + len(self.manager.get_batch_items(index)))
+
+    def __len__(self):
+        return len(self.manager)
+
+    def indices(self, microbatch_index):
+        return self.manager.get_batch_items(microbatch_index % len(self))
+
+    def sample_count(self, microbatches):
+        epochs, offset = divmod(microbatches, len(self))
+        return epochs * self.prefix_counts[-1] + self.prefix_counts[offset]
+
+    def report(self):
+        return {
+            "policy": "dlssnr_same_bucket_batches_v1",
+            "samples_per_epoch": self.prefix_counts[-1],
+            "batches_per_epoch": len(self),
+            "batch_size": self.manager.batch_size,
+            "order_sha256": json_sha256([self.indices(index) for index in range(len(self))]),
+            "buckets": [
+                {"resolution": list(key[:2]), "frames": key[2], "samples": len(self.manager.buckets[key])}
+                for key in self.manager.bucket_resos
+            ],
+        }
+
+
+def load_single_frame_manifest(
+    path, bucket_width, bucket_height, *, require_target=True, enable_bucket=False, bucket_no_upscale=False
+):
     return NRDataset(
-        path, bucket_width, bucket_height, 1, single_frame=True, require_target=require_target, require_temporal_mask=False
+        path,
+        bucket_width,
+        bucket_height,
+        1,
+        single_frame=True,
+        require_target=require_target,
+        require_temporal_mask=False,
+        enable_bucket=enable_bucket,
+        bucket_no_upscale=bucket_no_upscale,
     )
 
 
-def load_temporal_manifest(path, bucket_width, bucket_height, sequence_length, *, require_target=True, require_temporal_mask=None):
+def load_temporal_manifest(
+    path,
+    bucket_width,
+    bucket_height,
+    sequence_length,
+    *,
+    require_target=True,
+    require_temporal_mask=None,
+    enable_bucket=False,
+    bucket_no_upscale=False,
+):
     if require_temporal_mask is None:
         require_temporal_mask = require_target
     return NRDataset(
@@ -222,6 +363,8 @@ def load_temporal_manifest(path, bucket_width, bucket_height, sequence_length, *
         sequence_length,
         require_target=require_target,
         require_temporal_mask=require_temporal_mask,
+        enable_bucket=enable_bucket,
+        bucket_no_upscale=bucket_no_upscale,
     )
 
 

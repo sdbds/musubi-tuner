@@ -6,15 +6,16 @@ import pytest
 import torch
 from PIL import Image
 
+from musubi_tuner.dlssnr.config import build_train_config
 from musubi_tuner.dlssnr.dataset import load_single_frame_manifest
 from musubi_tuner.dlssnr.geometry import resolve_geometry
 from musubi_tuner.dlssnr.model import DenseFFN, NRModel, WindowAttn
 from musubi_tuner.dlssnr.numerics import PHASE_SHIFTS, _scatter_windows, _window_qkv, window_attention
 from musubi_tuner.dlssnr.preprocess import build_features, center_proxy
 from musubi_tuner.dlssnr.profiles import canonical_names
+from musubi_tuner.training.dlssnr_parser import setup_parser
 from musubi_tuner.training.dlssnr_trainer import (
     build_optimizer,
-    load_train_config,
     single_frame_update,
 )
 
@@ -156,20 +157,25 @@ def test_manifest_and_config_reject_bad_single_frame_inputs(tmp_path: Path):
     config = tmp_path / "train.toml"
     config.write_text(
         """
-[data]
+[general]
+resolution = [48, 48]
+[[datasets]]
 train_manifest = "train.jsonl"
-source_encoding = "srgb_proxy"
-target_encoding = "srgb_proxy"
-controls_encoding = "dlssnr_lanes_10_14_v1"
-bucket_size = [48, 48]
-require_cache = false
-[training]
-mode = "temporal"
-[precision]
-mixed_precision = "no"
-master_dtype = "float32"
 """.strip(),
         encoding="utf-8",
     )
+    args = setup_parser().parse_args(
+        [
+            "--dataset_config",
+            str(config),
+            "--output_dir",
+            str(tmp_path / "out"),
+            "--output_name",
+            "run",
+            "--development_smoke",
+            "--training_mode",
+            "temporal",
+        ]
+    )
     with pytest.raises(ValueError, match="sequence_length"):
-        load_train_config(config)
+        build_train_config(args)
