@@ -1,0 +1,65 @@
+schema_version = 1
+
+[model]
+model_dir = "../models/canonical_dlssnr"
+profile = "dlss_nr_310_8_0"
+numerics_profile = "train_surrogate"
+deployment_target = "float_runtime"
+
+[data]
+train_manifest = "../data/train_single.jsonl"
+validation_manifest = "../data/validation_single.jsonl"
+cache_directory = "../cache/dlssnr_lora"
+source_encoding = "srgb_proxy"
+target_encoding = "srgb_proxy"
+controls_encoding = "dlssnr_lanes_10_14_v1"
+bucket_size = [512, 512] # width, height
+require_cache = false
+
+[training]
+mode = "single_frame"
+device = "auto"
+development_smoke = false
+seed = 42
+batch_size = 1
+sequence_length = 1
+burn_in = 0
+tbptt_length = 1
+gradient_accumulation_steps = 1
+max_train_steps = 1000
+gradient_checkpointing = false
+
+[optimizer]
+type = "AdamW"
+learning_rate = 1e-4
+weight_decay = 0.0
+lr_scheduler = "constant"
+
+[lora]
+profile = "vit_only"
+rank = 16
+alpha = 16
+dropout = 0.0
+qkv_mode = "fused_head_major"
+
+[precision]
+mixed_precision = "no"
+master_dtype = "float32"
+
+[loss]
+pre = 1.0
+out = 1.0
+edge = 0.05
+temporal = 0.0
+
+[evaluation]
+sample_every_n_steps = 100
+sequence_manifest = "../data/validation_sequences.jsonl"
+min_sequence_frames = 64
+compare_baseline = true
+
+[output]
+output_dir = "../output/dlssnr_lora"
+output_name = "dlssnr_310_8_0_lora_vit"
+save_every_n_steps = 100
+save_state = true
