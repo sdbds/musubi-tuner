@@ -19,7 +19,7 @@ def setup_parser(*, lora=False) -> argparse.ArgumentParser:
         "--model_dir", type=Path, help="Pretrained canonical model directory; required outside development smoke runs."
     )
     parser.add_argument("--profile", default=PROFILE_ID, choices=[PROFILE_ID])
-    parser.add_argument("--numerics_profile", default="train_surrogate", choices=["train_surrogate"])
+    parser.add_argument("--numerics_profile", default="train_surrogate", choices=["train_surrogate", "train_experimental"])
     parser.add_argument("--deployment_target", default="float_runtime", choices=["float_runtime", "native_roundtrip"])
     parser.add_argument(
         "--forward_validation_report",
@@ -32,11 +32,24 @@ def setup_parser(*, lora=False) -> argparse.ArgumentParser:
         help="Developer-only: allow incomplete conversion provenance or random initialization without --model_dir.",
     )
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
-    parser.add_argument("--mixed_precision", default="no", choices=["no"], help="Only FP32 training is implemented.")
+    parser.add_argument(
+        "--mixed_precision", default="no", choices=["no", "fp16", "bf16"], help="CUDA AMP requires train_experimental."
+    )
+    parser.add_argument("--max_overflow_retries", type=int, default=16, help="Retry the same FP16 batch after gradient overflow.")
+    parser.add_argument("--fp8_base", action="store_true", help="Experimental FP8 frozen projection storage (LoRA only).")
+    parser.add_argument("--fp8_scaled", action="store_true", help="Use block64/channel scaled storage; requires --fp8_base.")
+    backends = parser.add_mutually_exclusive_group()
+    backends.add_argument(
+        "--attention_backend", choices=["native", "sdpa", "flash_attn", "xformers", "sage_attn"], default="native"
+    )
+    for backend in ("sdpa", "flash_attn", "xformers", "sage_attn"):
+        backends.add_argument(f"--{backend}", dest="attention_backend", action="store_const", const=backend)
+    parser.add_argument("--attention_scope", choices=["all", "global"], default="all")
     parser.add_argument("--training_mode", default="single_frame", choices=["single_frame", "temporal"])
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max_train_steps", type=int, default=1000, help="Number of optimizer updates.")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
+    parser.add_argument("--gradient_checkpointing", action="store_true", help="Recompute NR blocks during backward to save memory.")
     parser.add_argument("--sequence_length", type=int, default=None, help="Temporal mode requires all three clip-length arguments.")
     parser.add_argument("--burn_in", type=int, default=None)
     parser.add_argument("--tbptt_length", type=int, default=None)

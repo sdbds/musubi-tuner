@@ -16,12 +16,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from musubi_tuner.dlssnr.model import NRModel, ChannelLinear
-from musubi_tuner.dlssnr.numerics import apply_linear
 from musubi_tuner.dlssnr.profiles import PROFILE_ID, block_channels
 
 VIT_ONLY_ELEMENTS = 2_097_152
 RANK_BY_WIDTH = {32: 2, 64: 4, 128: 8, 256: 8, 512: 16, 1024: 16}
-LORA_SCHEMA = "dlssnr_lora_v1"
+LORA_SCHEMA = "dlssnr_lora_v2"
+LEGACY_LORA_SCHEMA = "dlssnr_lora_v1"
 LORA_FORWARD = "canonical_weight_plus_delta_v1"
 
 
@@ -54,7 +54,8 @@ class LoRADelta(nn.Module):
         return F.linear(hidden, self.lora_up) * self.scale
 
     def delta_weight(self) -> torch.Tensor:
-        return self.scale * (self.lora_up @ self.lora_down)
+        with torch.autocast(self.lora_up.device.type, enabled=False):
+            return self.scale * (self.lora_up @ self.lora_down)
 
 
 class DLSSNRLoRA(nn.Module):
@@ -84,11 +85,11 @@ class DLSSNRLoRA(nn.Module):
         def forward(x: torch.Tensor, module: ChannelLinear = module, adapter: LoRADelta = adapter) -> torch.Tensor:
             # Real NR weights amplify split-GEMM rounding through cosine attention.
             # Use the same effective weight and projection as a merged checkpoint.
-            result = apply_linear(module.weight + adapter.delta_weight(), x)
+            result = module.project(module.materialized_weight() + adapter.delta_weight(), x)
             if adapter.training and adapter.dropout > 0:
-                hidden = apply_linear(adapter.lora_down, x)
+                hidden = module.project(adapter.lora_down, x)
                 dropped = F.dropout(hidden, adapter.dropout) - hidden
-                result = result + apply_linear(adapter.lora_up, dropped) * adapter.scale
+                result = result + module.project(adapter.lora_up, dropped) * adapter.scale
             return result
 
         module.forward = forward  # type: ignore[method-assign]
@@ -194,11 +195,20 @@ def _is_excluded(weight_name: str) -> bool:
 
 
 def merge_adapter(base: dict[str, torch.Tensor], network: DLSSNRLoRA) -> dict[str, torch.Tensor]:
+    from musubi_tuner.dlssnr.fp8 import canonical_tensor_sha256
+
+    quantization = getattr(network, "base_quantization", None)
+    if quantization is not None:
+        if any(value.dtype == torch.float8_e4m3fn for value in base.values()):
+            raise ValueError("materialize the quantized effective base before merging an FP8 adapter")
+        identity = canonical_tensor_sha256((name, base[name]) for name in sorted(base) if ".opaque." not in name)
+        if identity != quantization["effective_base_sha256"]:
+            raise ValueError("FP8 adapter effective quantized base identity does not match")
     merged = {key: value.detach().clone() for key, value in base.items()}
     for adapter in network.adapters:
         if adapter.target not in merged:
             raise KeyError(f"base is missing LoRA target {adapter.target}")
-        merged[adapter.target] = merged[adapter.target] + adapter.delta_weight().to(dtype=merged[adapter.target].dtype)
+        merged[adapter.target] = merged[adapter.target] + adapter.delta_weight().detach().to(merged[adapter.target])
     return merged
 
 
@@ -206,30 +216,43 @@ def merge_to_directory(base_dir: str | Path, adapter_path: str | Path, output_di
     """Write a canonical directory whose weights are base + adapter. The base file is not modified."""
     from safetensors import safe_open
     from musubi_tuner.dlssnr.artifacts import inspect_canonical, save_canonical
+    from musubi_tuner.dlssnr.fp8 import materialize_state_dict, quantize_frozen_base
 
     base = Path(base_dir)
     output = Path(output_dir)
     if output.resolve() == base.resolve():
         raise ValueError("refusing to overwrite the source canonical directory")
     inspect_canonical(base, development_smoke=True)
-    output.mkdir(parents=True, exist_ok=True)
     model = NRModel().to(dtype=torch.float32)
     model.load_canonical(str(base / "model.safetensors"))
     with safe_open(str(adapter_path), framework="pt") as handle:
         metadata = handle.metadata() or {}
-    if metadata.get("schema") != LORA_SCHEMA:
-        raise ValueError(f"unsupported LoRA schema {metadata.get('schema')}")
+    policy, quantization = _read_adapter_runtime(metadata)
     report = json.loads(metadata.get("report") or "{}")
     network = _network_from_report(model, report)
     identity = base_target_sha256(model, network.target_names)
+    network.runtime_policy = policy
+    if quantization is not None:
+        model.requires_grad_(False)
+        network.base_quantization = quantize_frozen_base(model, scaled=quantization["scaled"])
     load_adapter(network, adapter_path, identity)
-    merged = merge_adapter(model.state_dict(), network)
-    model.load_state_dict(merged, strict=True)
+    merged = merge_adapter(materialize_state_dict(model), network)
+    materialized = NRModel().to(dtype=torch.float32)
+    materialized.load_state_dict(merged, strict=True)
+    output_policy = {**policy, "fp8_base": False, "fp8_scaled": False} if policy is not None else None
     save_canonical(
-        model,
+        materialized,
         output,
         source_dir=base,
-        metadata={"experimental_surrogate": True, "base_weight_sha256": identity, "adapter": str(adapter_path)},
+        metadata={
+            "experimental_surrogate": True,
+            "base_weight_sha256": identity,
+            "adapter": str(adapter_path),
+            "runtime_policy": output_policy,
+            "training_runtime_policy": policy,
+            "base_quantization": quantization,
+            "fp8_materialized": quantization is not None,
+        },
     )
     (output / "merge_report.json").write_text(
         json.dumps(
@@ -238,6 +261,9 @@ def merge_to_directory(base_dir: str | Path, adapter_path: str | Path, output_di
                 "base_weight_sha256": identity,
                 "adapter": str(adapter_path),
                 "targets": network.target_names,
+                "runtime_policy": output_policy,
+                "base_quantization": quantization,
+                "fp8_materialized": quantization is not None,
             },
             indent=2,
         ),
@@ -260,7 +286,11 @@ def _network_from_report(model: nn.Module, report: dict) -> DLSSNRLoRA:
 
 def save_adapter(network: DLSSNRLoRA, path: str | Path, base_sha256: str) -> None:
     from safetensors.torch import save_file
+    from musubi_tuner.dlssnr.runtime import default_runtime_policy
 
+    policy = getattr(network, "runtime_policy", None) or default_runtime_policy()
+    quantization = getattr(network, "base_quantization", None)
+    _validate_adapter_runtime(policy, quantization, base_sha256)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tensors = {key: value.detach().to(dtype=torch.float32).contiguous().cpu() for key, value in network.state_dict().items()}
@@ -280,6 +310,8 @@ def save_adapter(network: DLSSNRLoRA, path: str | Path, base_sha256: str) -> Non
             "qkv_mode": "fused_head_major",
             "targets": json.dumps(network.target_names),
             "report": json.dumps(network.report),
+            "base_quantization": json.dumps(quantization),
+            "runtime_policy": json.dumps(policy),
         },
     )
 
@@ -287,11 +319,11 @@ def save_adapter(network: DLSSNRLoRA, path: str | Path, base_sha256: str) -> Non
 def load_adapter(network: DLSSNRLoRA, path: str | Path, expected_base_sha256: str | None = None) -> None:
     from safetensors import safe_open
     from safetensors.torch import load_file
+    from musubi_tuner.dlssnr.runtime import default_runtime_policy
 
     with safe_open(str(path), framework="pt") as handle:
         metadata = handle.metadata() or {}
-    if metadata.get("schema") != LORA_SCHEMA:
-        raise ValueError(f"unsupported LoRA schema {metadata.get('schema')}")
+    policy, quantization = _read_adapter_runtime(metadata)
     if metadata.get("base_profile") != PROFILE_ID:
         raise ValueError(f"LoRA base profile {metadata.get('base_profile')} != {PROFILE_ID}")
     if metadata.get("forward_mode") != LORA_FORWARD:
@@ -305,23 +337,61 @@ def load_adapter(network: DLSSNRLoRA, path: str | Path, expected_base_sha256: st
         raise ValueError("LoRA base identity does not cover the complete model")
     if expected_base_sha256 is not None and metadata.get("base_weight_sha256") != expected_base_sha256:
         raise ValueError("LoRA base identity does not match the loaded checkpoint")
+    if quantization != getattr(network, "base_quantization", None):
+        raise ValueError("LoRA effective base quantization does not match the loaded base")
+    if policy != (getattr(network, "runtime_policy", None) or default_runtime_policy()):
+        raise ValueError("LoRA runtime policy does not match this network")
     tensors = load_file(str(path))
     if any(value.dtype != torch.float32 or not torch.isfinite(value).all() for value in tensors.values()):
         raise ValueError("adapter weights must be finite FP32")
     network.load_state_dict(tensors, strict=True)
 
 
+def _validate_adapter_runtime(policy, quantization, base_sha256):
+    from musubi_tuner.dlssnr.runtime import validate_runtime_policy
+
+    validate_runtime_policy(policy)
+    if policy["fp8_base"] != (quantization is not None):
+        raise ValueError("adapter runtime policy and base quantization disagree")
+    if quantization is not None:
+        if (
+            not isinstance(quantization, dict)
+            or quantization.get("schema") != "dlssnr_fp8_base_v1"
+            or quantization.get("dtype") != "float8_e4m3fn"
+            or type(quantization.get("scaled")) is not bool
+            or quantization["scaled"] != policy["fp8_scaled"]
+            or quantization.get("source_base_sha256") != base_sha256
+        ):
+            raise ValueError("invalid adapter base quantization recipe or source identity")
+
+
+def _read_adapter_runtime(metadata):
+    from musubi_tuner.dlssnr.runtime import default_runtime_policy
+
+    schema = metadata.get("schema")
+    if schema == LEGACY_LORA_SCHEMA:
+        if (
+            json.loads(metadata.get("runtime_policy", "null")) is not None
+            or json.loads(metadata.get("base_quantization", "null")) is not None
+        ):
+            raise ValueError("legacy LoRA schema cannot encode an experimental runtime or quantization recipe")
+        return default_runtime_policy(), None
+    if schema != LORA_SCHEMA:
+        raise ValueError(f"unsupported LoRA schema {schema}")
+    if "runtime_policy" not in metadata or "base_quantization" not in metadata:
+        raise ValueError("v2 adapter is missing required runtime policy or base quantization metadata")
+    policy, quantization = json.loads(metadata["runtime_policy"]), json.loads(metadata["base_quantization"])
+    _validate_adapter_runtime(policy, quantization, metadata.get("base_weight_sha256"))
+    return policy, quantization
+
+
 def base_target_sha256(model: nn.Module, target_names: list[str]) -> str:
     """Identify the complete base, including frozen layers outside the target map."""
-    import hashlib
+    from musubi_tuner.dlssnr.fp8 import canonical_tensor_sha256, iter_canonical_tensors
 
-    named = dict(model.named_parameters())
-    if missing := set(target_names) - named.keys():
+    names = set(dict(model.named_parameters())) | {
+        f"{name}.weight" for name, module in model.named_modules() if isinstance(module, ChannelLinear)
+    }
+    if missing := set(target_names) - names:
         raise ValueError(f"unknown base targets: {sorted(missing)}")
-    digest = hashlib.sha256()
-    for name in sorted(named):
-        digest.update(name.encode("utf-8"))
-        digest.update(str(tuple(named[name].shape)).encode("ascii"))
-        digest.update(str(named[name].dtype).encode("ascii"))
-        digest.update(named[name].detach().contiguous().cpu().numpy().tobytes())
-    return digest.hexdigest()
+    return canonical_tensor_sha256(iter_canonical_tensors(model))

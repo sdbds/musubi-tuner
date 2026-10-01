@@ -144,12 +144,14 @@ def build_train_config(args, *, lora=False) -> dict:
         "tbptt_length": lengths[2],
         "gradient_accumulation_steps": args.gradient_accumulation_steps,
         "max_train_steps": args.max_train_steps,
-        "gradient_checkpointing": False,
+        "gradient_checkpointing": args.gradient_checkpointing,
+        "max_overflow_retries": args.max_overflow_retries,
     }
     for field in ("batch_size", "sequence_length", "tbptt_length", "gradient_accumulation_steps", "max_train_steps"):
         _integer(training[field], f"--{field}")
     _integer(training["burn_in"], "--burn_in", 0)
     _integer(training["seed"], "--seed", 0)
+    _integer(training["max_overflow_retries"], "--max_overflow_retries", 0)
     if mode == "single_frame":
         if lengths != [1, 0, 1]:
             raise ValueError("single-frame mode requires sequence_length=1, burn_in=0, tbptt_length=1")
@@ -162,13 +164,33 @@ def build_train_config(args, *, lora=False) -> dict:
             raise ValueError("temporal loss requires at least two supervised frames (tbptt_length >= 2)")
     else:
         raise ValueError("--training_mode must be single_frame or temporal")
-    if args.device not in ("auto", "cpu", "cuda") or args.mixed_precision != "no":
-        raise ValueError("NR training is single-process FP32 on auto, cpu or cuda")
-    if args.profile != PROFILE_ID or args.numerics_profile != "train_surrogate":
+    if args.device not in ("auto", "cpu", "cuda") or args.mixed_precision not in ("no", "fp16", "bf16"):
+        raise ValueError("NR requires device auto/cpu/cuda and precision no/fp16/bf16")
+    if args.profile != PROFILE_ID or args.numerics_profile not in ("train_surrogate", "train_experimental"):
         raise ValueError("unsupported DLSS-NR profile or numerics")
+    if args.mixed_precision != "no":
+        if args.numerics_profile != "train_experimental":
+            raise ValueError("mixed precision requires --numerics_profile train_experimental")
+        if args.device == "cpu":
+            raise ValueError("NR mixed precision currently requires CUDA")
+    if args.fp8_scaled and not args.fp8_base:
+        raise ValueError("--fp8_scaled requires --fp8_base")
+    if args.fp8_base:
+        if not lora:
+            raise ValueError("--fp8_base is only supported for a frozen LoRA base")
+        if args.numerics_profile != "train_experimental":
+            raise ValueError("FP8 storage requires --numerics_profile train_experimental")
     if args.deployment_target not in ("float_runtime", "native_roundtrip"):
         raise ValueError("unknown deployment_target")
-    model = {"profile": args.profile, "numerics_profile": args.numerics_profile, "deployment_target": args.deployment_target}
+    if args.numerics_profile == "train_experimental" and args.deployment_target != "float_runtime":
+        raise ValueError("train_experimental only supports deployment_target float_runtime")
+    model = {
+        "profile": args.profile,
+        "numerics_profile": args.numerics_profile,
+        "deployment_target": args.deployment_target,
+        "attention_backend": args.attention_backend,
+        "attention_scope": args.attention_scope,
+    }
     for name in ("model_dir", "forward_validation_report"):
         value = getattr(args, name)
         if value is not None:
@@ -230,7 +252,12 @@ def build_train_config(args, *, lora=False) -> dict:
         "data": data,
         "training": training,
         "optimizer": optimizer,
-        "precision": {"mixed_precision": "no", "master_dtype": "float32"},
+        "precision": {
+            "mixed_precision": args.mixed_precision,
+            "master_dtype": "float32",
+            "fp8_base": args.fp8_base,
+            "fp8_scaled": args.fp8_scaled,
+        },
         "loss": loss,
         "evaluation": evaluation,
         "output": output,
@@ -255,6 +282,9 @@ def build_train_config(args, *, lora=False) -> dict:
         for name, value in groups.items():
             _number(value, f"--{name}")
         config["parameter_groups"] = groups
+    from musubi_tuner.dlssnr.runtime import runtime_policy, validate_runtime_policy
+
+    validate_runtime_policy(runtime_policy(config), training=True)
     return config
 
 

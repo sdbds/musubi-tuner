@@ -108,6 +108,11 @@ def apply_linear(weight: torch.Tensor | torch.nn.Module, x: torch.Tensor) -> tor
     return F.linear(x, weight)
 
 
+def _matmul(left, right, compute_dtype=None):
+    with torch.autocast(left.device.type, dtype=compute_dtype, enabled=compute_dtype is not None):
+        return torch.matmul(left, right).float()
+
+
 def _cosine(values: torch.Tensor) -> torch.Tensor:
     norm = torch.linalg.vector_norm(values, dim=-1, keepdim=True)
     scaled = values / norm.clamp_min(1e-12)
@@ -129,6 +134,9 @@ def window_attention(
     temperature: torch.Tensor,
     skip_scale: torch.Tensor,
     phase: int,
+    *,
+    compute_dtype: torch.dtype | None = None,
+    backend: str = "native",
 ) -> torch.Tensor:
     """Shifted 8x8 window attention. `y` is NCHW. Out-of-field tokens stay in the softmax."""
     batch, channels, height, width = y.shape
@@ -142,10 +150,15 @@ def window_attention(
     query, key, value = _window_qkv(qkv, height, width, windows_y, windows_x, shift_x, shift_y, heads)
     query = e4m3_ste(cosine_half(query) * half_ste(temperature).view(1, 1, heads, 1, 1))
     key, value = e4m3_ste(cosine_half(key)), e4m3_ste(value)
-    scores = half_ste(torch.matmul(query, key.transpose(-1, -2)) + half_ste(prior).view(1, 1, heads, 64, 64))
-    exponential = exp_weight(scores)
-    probability = e4m3_ste(exponential * half_ste(sum64_half(exponential, window=True).reciprocal()))
-    mixed = e4m3_ste(torch.matmul(probability, value))
+    if backend == "native":
+        scores = half_ste(_matmul(query, key.transpose(-1, -2), compute_dtype) + half_ste(prior).view(1, 1, heads, 64, 64))
+        exponential = exp_weight(scores)
+        probability = e4m3_ste(exponential * half_ste(sum64_half(exponential, window=True).reciprocal()))
+        mixed = e4m3_ste(_matmul(probability, value, compute_dtype))
+    else:
+        from musubi_tuner.dlssnr.attention import attention
+
+        mixed = e4m3_ste(attention(query, key, value, backend=backend, prior=half_ste(prior), compute_dtype=compute_dtype))
     mixed = mixed.permute(0, 1, 3, 2, 4).reshape(batch, windows_y * windows_x, 64, channels)
     attended = _scatter_windows(mixed, height, width, windows_y, windows_x, shift_x, shift_y)
     skip = half_ste(y) if channels == 32 else e4m3_ste(y)
@@ -196,6 +209,9 @@ def global_attention(
     proj_weight: torch.Tensor | torch.nn.Module,
     temperature: torch.Tensor,
     skip_scale: torch.Tensor,
+    *,
+    compute_dtype: torch.dtype | None = None,
+    backend: str = "native",
 ) -> torch.Tensor:
     """Global attention over every spatial token. Q also gets sqrt(32). There is no prior."""
     batch, channels, height, width = y.shape
@@ -209,21 +225,26 @@ def global_attention(
     query = query.permute(0, 2, 1, 3)
     key = key.permute(0, 2, 1, 3)
     value = value.permute(0, 2, 1, 3)
-    count = height * width
-    padding = (-count) % 64
-    key = F.pad(key, (0, 0, 0, padding))
-    value = F.pad(value, (0, 0, 0, padding))
-    scores = half_ste(torch.matmul(query, key.transpose(-1, -2)))
-    exponential = exp_weight(scores, vit=True)
-    block_totals = sum64_half(exponential.reshape(batch, heads, count, -1, 64))
-    total = block_totals[..., 0, :]
-    for index in range(1, block_totals.shape[-2]):
-        total = half_ste(total + block_totals[..., index, :])
-    if padding:
-        correction = half_ste(exp_weight(scores.new_zeros(()), vit=True) * padding)
-        total = half_ste(total - correction)
-    accumulated = half_ste(torch.matmul(e4m3_ste(exponential), value))
-    mixed = e4m3_ste(accumulated * half_ste(total.reciprocal()))
+    if backend == "native":
+        count = height * width
+        padding = (-count) % 64
+        key = F.pad(key, (0, 0, 0, padding))
+        value = F.pad(value, (0, 0, 0, padding))
+        scores = half_ste(_matmul(query, key.transpose(-1, -2), compute_dtype))
+        exponential = exp_weight(scores, vit=True)
+        block_totals = sum64_half(exponential.reshape(batch, heads, count, -1, 64))
+        total = block_totals[..., 0, :]
+        for index in range(1, block_totals.shape[-2]):
+            total = half_ste(total + block_totals[..., index, :])
+        if padding:
+            correction = half_ste(exp_weight(scores.new_zeros(()), vit=True) * padding)
+            total = half_ste(total - correction)
+        accumulated = half_ste(_matmul(e4m3_ste(exponential), value, compute_dtype))
+        mixed = e4m3_ste(accumulated * half_ste(total.reciprocal()))
+    else:
+        from musubi_tuner.dlssnr.attention import attention
+
+        mixed = e4m3_ste(attention(query, key, value, backend=backend, compute_dtype=compute_dtype))
     mixed = mixed.permute(0, 2, 1, 3).reshape(batch, height * width, channels)
     projected = apply_linear(proj_weight, mixed).transpose(1, 2).reshape(batch, channels, height, width)
     return e4m3_ste(projected + half_ste(e4m3_ste(y) * half_ste(skip_scale).view(1, -1, 1, 1)))

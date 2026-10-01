@@ -43,7 +43,6 @@ def make_args(tmp_path, options=(), *, lora=False, dataset=None):
         ["--max_grad_norm", "-1"],
         ["--sample_every_n_steps", "1"],
         ["--lr_scheduler", "linear"],
-        ["--gradient_checkpointing"],
     ],
 )
 def test_rejects_invalid_or_unsupported_cli_configuration(tmp_path, options):

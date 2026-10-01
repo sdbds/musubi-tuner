@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 
-from musubi_tuner.dlssnr.infer import generate_stills, load_model, require_surrogate
+from musubi_tuner.dlssnr.infer import add_runtime_arguments, generate_stills, load_model, runtime_overrides_from_args
 
 
 def main() -> None:
@@ -12,15 +12,14 @@ def main() -> None:
     parser.add_argument("--model_dir", required=True)
     parser.add_argument("--sample_manifest", required=True)
     parser.add_argument("--output_dir", required=True)
-    parser.add_argument("--numerics_profile", default="train_surrogate")
+    add_runtime_arguments(parser)
     parser.add_argument("--bucket_width", type=int, required=True)
     parser.add_argument("--bucket_height", type=int, required=True)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     args = parser.parse_args()
-    require_surrogate(args.numerics_profile)
     written = generate_stills(
-        load_model(args.model_dir, args.device),
+        load_model(args.model_dir, args.device, runtime_overrides=runtime_overrides_from_args(args)),
         args.sample_manifest,
         args.bucket_width,
         args.bucket_height,

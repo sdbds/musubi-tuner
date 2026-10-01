@@ -1,4 +1,4 @@
-"""Shared single-process FP32 runner for NR full and LoRA supervised training."""
+"""Shared optimizer-boundary runner for NR full and LoRA supervised training."""
 
 from __future__ import annotations
 
@@ -21,18 +21,25 @@ from musubi_tuner.dlssnr.dataset import (
 from musubi_tuner.dlssnr.evaluation import evaluate
 from musubi_tuner.dlssnr.identity import file_sha256, implementation_identity
 from musubi_tuner.dlssnr.model import NRModel
-from musubi_tuner.dlssnr.numerics import SURROGATE_FLAGS, fp32_execution
+from musubi_tuner.dlssnr.numerics import fp32_execution
+from musubi_tuner.dlssnr.runtime import configure_model_runtime, numerics_metadata, runtime_policy, validate_runtime_device
 from musubi_tuner.dlssnr.profiles import PROFILE_ID
 from musubi_tuner.dlssnr.temporal import SEED_POLICY, stable_frame_seed
 from musubi_tuner.dlssnr.training_step import loss_denominators, training_loss
 from musubi_tuner.training.dlssnr_services import (
     assert_finite_gradients,
     assert_finite_parameters,
+    capture_rng,
+    coordinated_call,
     create_accelerator,
     create_nr_optimizer,
     evaluation_mode,
+    gather_rank_values,
     move_batch,
+    optimizer_update,
     reject_unsupported_runtime,
+    reduce_values,
+    restore_rng,
 )
 from musubi_tuner.training.dlssnr_state import read_state, restore_state, save_state
 
@@ -108,7 +115,9 @@ class NRTrainModule(torch.nn.Module):
         self.burn_in = burn_in
 
     def forward(self, batch, seeds, normalizers=None):
-        return training_loss(self.model, batch, seeds, self.loss_weights, self.burn_in, normalizers)
+        # Accelerator owns scaling; NR owns exactly which products use autocast.
+        with torch.autocast(batch["source"].device.type, enabled=False):
+            return training_loss(self.model, batch, seeds, self.loss_weights, self.burn_in, normalizers)
 
 
 def _one_update(model, optimizer, batch, seeds, weights, burn_in):
@@ -192,49 +201,41 @@ class NRSupervisedTrainer:
 
     @fp32_execution()
     def train(self, resume=None):
-        from musubi_tuner.networks.lora_dlssnr import base_target_sha256, inject, load_adapter
+        accelerator = create_accelerator(self.config["training"], self.config["precision"])
+        try:
+            self._train(accelerator, resume)
+        finally:
+            accelerator.end_training()
+            accelerator.free_memory()
+
+    def _train(self, accelerator, resume):
+        from musubi_tuner.networks.lora_dlssnr import load_adapter
         from musubi_tuner.dlssnr.convert import _git_commit
 
         config = self.config
+        policy = runtime_policy(config)
         training, output = config["training"], config["output"]
-        train_data, validation = _datasets(config)
+        coordinated_call(accelerator, lambda: validate_runtime_device(policy, accelerator.device, training=True))
+        train_data, validation = coordinated_call(accelerator, lambda: _datasets(config))
         batch_plan = NRBatchPlan(train_data, training["batch_size"])
-        batch_plan.manager.show_bucket_info()
+        if accelerator.is_main_process:
+            batch_plan.manager.show_bucket_info()
         source_dir = config["model"].get("model_dir")
-        source_identity = (
-            inspect_canonical(
-                source_dir,
-                development_smoke=training["development_smoke"],
-                validation_report=config["model"].get("forward_validation_report"),
-            )
-            if source_dir
-            else {}
+        source_identity = coordinated_call(
+            accelerator,
+            lambda: (
+                inspect_canonical(
+                    source_dir,
+                    development_smoke=training["development_smoke"],
+                    validation_report=config["model"].get("forward_validation_report"),
+                )
+                if source_dir
+                else {}
+            ),
         )
         source_forward_validated = "forward_validation_report" in source_identity
-        accelerator = create_accelerator(training)
-        set_seed(training["seed"])
-        model = NRModel().to(dtype=torch.float32)
-        if source_dir:
-            model.load_canonical(str(Path(source_dir) / "model.safetensors"))
-        base_identity = base_target_sha256(model, [])
-        network = inject(model, config["lora"]) if self.lora else None
+        model, network, optimizer, base_identity = coordinated_call(accelerator, lambda: self._initialize_model(policy))
         optimizer_cfg = config["optimizer"]
-        if self.lora:
-            optimizer = create_nr_optimizer(network.parameters(), optimizer_cfg)
-        else:
-            groups = config["parameter_groups"]
-            optimizer = build_optimizer(
-                model,
-                optimizer_cfg["learning_rate"],
-                {
-                    "priors": groups["prior_lr_multiplier"],
-                    "scales": groups["scale_lr_multiplier"],
-                    "temporal_blend": groups["temporal_blend_lr_multiplier"],
-                },
-                0.0,
-                include_temporal=training["mode"] == "temporal",
-                optimizer_config=optimizer_cfg,
-            )
         train_module = NRTrainModule(model, config["loss"], training["burn_in"], network)
         _check_optimizer(train_module, optimizer)
         parameter_map = {
@@ -251,42 +252,81 @@ class NRSupervisedTrainer:
             }
             for group in optimizer.param_groups
         ]
+        data_identity = coordinated_call(
+            accelerator, lambda: {name: dataset.fingerprint() for name, dataset in {"train": train_data, **validation}.items()}
+        )
+        devices = gather_rank_values(
+            accelerator,
+            {
+                "rank": accelerator.process_index,
+                "type": accelerator.device.type,
+                "cuda_device": torch.cuda.get_device_name(accelerator.device) if accelerator.device.type == "cuda" else None,
+            },
+        )
+        from musubi_tuner.dlssnr.attention import backend_identity
+
         identity = {
             "config_sha256": config_sha256(config),
             "source": source_identity,
             "base_parameters_sha256": base_identity,
-            "data": {name: dataset.fingerprint() for name, dataset in {"train": train_data, **validation}.items()},
+            "base_quantization": getattr(model, "base_quantization", None),
+            "data": data_identity,
             "implementation": implementation_identity(),
             "lora": self.lora,
+            "runtime_policy": policy,
+            "attention_implementation": backend_identity(policy["attention_backend"]),
+            "world_size": accelerator.num_processes,
             "device_type": accelerator.device.type,
             "torch_version": str(torch.__version__),
             "optimizer_class": f"{type(optimizer).__module__}.{type(optimizer).__qualname__}",
             "seed_policy": SEED_POLICY,
             "bucket_plan": batch_plan.report(),
             "cuda_version": torch.version.cuda if accelerator.device.type == "cuda" else None,
-            "cuda_device": torch.cuda.get_device_name(accelerator.device) if accelerator.device.type == "cuda" else None,
+            "devices": devices,
         }
-        for name in ("config.py", "dataset.py", "filenames.py", "training_step.py", "losses.py"):
+        for name in (
+            "config.py",
+            "dataset.py",
+            "filenames.py",
+            "training_step.py",
+            "losses.py",
+            "runtime.py",
+            "fp8.py",
+            "attention.py",
+        ):
             identity["implementation"][name] = file_sha256(Path(__file__).parents[1] / "dlssnr" / name)
         for name in ("dlssnr_trainer.py", "dlssnr_services.py", "dlssnr_state.py", "optimizer_setup.py"):
             identity["implementation"][name] = file_sha256(Path(__file__).parent / name)
         for name in ("bucket.py", "architectures.py"):
             identity["implementation"][f"dataset/{name}"] = file_sha256(Path(__file__).parents[1] / "dataset" / name)
         identity["implementation"]["lora_dlssnr.py"] = file_sha256(Path(__file__).parents[1] / "networks/lora_dlssnr.py")
-        restored = read_state(resume, identity) if resume else None
+        if policy["fp8_base"]:
+            identity["implementation"]["fp8_optimization_utils.py"] = file_sha256(
+                Path(__file__).parents[1] / "modules/fp8_optimization_utils.py"
+            )
+        if any(value != identity for value in gather_rank_values(accelerator, identity)):
+            raise ValueError("DDP ranks disagree on config, data, base or runtime identity")
+        restored = coordinated_call(accelerator, lambda: read_state(resume, identity)) if resume else None
         completed = restored["global_update"] if restored else 0
         cursor = restored["consumed_samples"] if restored else 0
         steps, accum = training["max_train_steps"], training["gradient_accumulation_steps"]
-        if completed > steps or cursor != batch_plan.sample_count(completed * accum):
+        world, rank = accelerator.num_processes, accelerator.process_index
+        if completed > steps or cursor != batch_plan.sample_count(completed * accum * world):
             raise ValueError("resume counters are inconsistent with max_train_steps or the consumed batch plan")
         output_dir = Path(output["output_dir"]) / output["output_name"]
-        try:
-            output_dir.mkdir(parents=True, exist_ok=restored is not None)
-        except FileExistsError:
-            raise FileExistsError(
-                f"run directory already exists: {output_dir}; choose a different output_name or use --resume"
-            ) from None
+
+        def create_run_dir():
+            try:
+                output_dir.mkdir(parents=True, exist_ok=restored is not None)
+            except FileExistsError:
+                raise FileExistsError(
+                    f"run directory already exists: {output_dir}; choose a different output_name or use --resume"
+                ) from None
+
+        coordinated_call(accelerator, create_run_dir, main_only=True)
         wrapped, optimizer = accelerator.prepare(train_module, optimizer)
+        if world > 1:
+            set_seed(training["seed"] + rank)
         logger.info(
             "NR device=%s trainable=%d mode=%s lora=%s",
             accelerator.device,
@@ -298,89 +338,171 @@ class NRSupervisedTrainer:
             "config": config,
             "identity": identity,
             "profile": PROFILE_ID,
-            "numerics": SURROGATE_FLAGS,
+            "numerics": numerics_metadata(policy),
+            "runtime_policy": policy,
+            "base_quantization": getattr(model, "base_quantization", None),
             "trainer_commit": _git_commit(),
             "trainable_parameters": parameter_map,
             "optimizer_groups": optimizer_groups,
             "bucket_plan": batch_plan.report(),
             "device": str(accelerator.device),
             "source_forward_validated": source_forward_validated,
-            "experimental_surrogate": training["development_smoke"] or not source_forward_validated,
+            "experimental_surrogate": policy["numerics_profile"] == "train_experimental"
+            or training["development_smoke"]
+            or not source_forward_validated,
             "temporal_trained": training["mode"] == "temporal",
         }
         baseline = None
-        if validation and config["evaluation"]["compare_baseline"]:
+
+        def run_evaluation():
             with evaluation_mode(train_module):
-                baseline = evaluate(model, validation, training["seed"], accelerator.device)
+                return evaluate(model, validation, training["seed"], accelerator.device)
+
+        if validation and config["evaluation"]["compare_baseline"]:
+            baseline = coordinated_call(accelerator, run_evaluation, main_only=True)
         if restored:
+
+            def restore():
+                if network is not None:
+                    load_adapter(network, Path(resume) / "adapter.safetensors", base_identity)
+                else:
+                    model.load_canonical(str(Path(resume) / "model.safetensors"))
+                restore_state(restored, optimizer, accelerator=accelerator)
+
+            coordinated_call(accelerator, restore)
+
+        def write_initial_metadata():
+            write_json(output_dir / "run_config.json", metadata)
             if network is not None:
-                load_adapter(network, Path(resume) / "adapter.safetensors", base_identity)
-            else:
-                model.load_canonical(str(Path(resume) / "model.safetensors"))
-            restore_state(restored, optimizer)
-        write_json(output_dir / "run_config.json", metadata)
-        if network is not None:
-            write_json(output_dir / "lora_report.json", network.report)
+                write_json(output_dir / "lora_report.json", network.report)
+
+        coordinated_call(accelerator, write_initial_metadata, main_only=True)
         if training["development_smoke"]:
             logger.warning("EXPERIMENTAL NR smoke run: native/float compatibility has not been validated")
         elif not source_forward_validated:
             logger.warning("NR source forward compatibility is unvalidated; training does not certify native/DLL compatibility")
-        try:
-            for step in range(completed, steps):
+
+        def save_product(folder, update, *, with_state=False):
+            coordinated_call(
+                accelerator,
+                lambda: self._save_product(folder, model, network, source_dir, metadata, base_identity, update),
+                main_only=True,
+            )
+            if with_state:
+                save_state(folder, optimizer, identity, update, cursor, accelerator=accelerator)
+
+        for step in range(completed, steps):
+            microbatches = coordinated_call(
+                accelerator,
+                lambda: [
+                    _microbatch(train_data, (step * accum + micro) * world + rank, config, batch_plan) for micro in range(accum)
+                ],
+            )
+            denominators = {name: 0.0 for name in config["loss"]}
+            for batch, _ in microbatches:
+                for name, count in loss_denominators(batch, training["burn_in"]).items():
+                    denominators[name] += count
+            denominators = reduce_values(accelerator, denominators)
+            attempt_rng = capture_rng(accelerator.device)
+            for attempt in range(training["max_overflow_retries"] + 1):
                 train_module.train()
                 optimizer.zero_grad(set_to_none=True)
-                microbatches = [_microbatch(train_data, step * accum + micro, config, batch_plan) for micro in range(accum)]
-                denominators = {name: 0.0 for name in config["loss"]}
-                for batch, _ in microbatches:
-                    for name, count in loss_denominators(batch, training["burn_in"]).items():
-                        denominators[name] += count
+                if attempt:
+                    restore_rng(attempt_rng)
                 metrics = {}
                 for batch, seeds in microbatches:
                     with accelerator.accumulate(wrapped):
-                        loss, measured = wrapped(move_batch(batch, accelerator.device), seeds, denominators)
-                        # Losses already use the effective batch's valid-element denominator.
-                        accelerator.backward(loss * accum)
+                        loss, measured = coordinated_call(
+                            accelerator, lambda: wrapped(move_batch(batch, accelerator.device), seeds, denominators)
+                        )
+                        # Undo Accelerate's accumulation division and DDP's gradient averaging.
+                        accelerator.backward(loss * accum * world)
+                    del loss
                     for name, value in measured.items():
                         metrics[name] = max(metrics.get(name, 0), value) if name == "blend_max" else metrics.get(name, 0) + value
                 if not accelerator.sync_gradients:
                     raise RuntimeError("optimizer update is not at an accumulation boundary")
                 model.enforce_lane15()
-                assert_finite_gradients(train_module)
-                if optimizer_cfg["max_grad_norm"]:
-                    accelerator.clip_grad_norm_(train_module.parameters(), optimizer_cfg["max_grad_norm"])
-                optimizer.step()
-                if accelerator.optimizer_step_was_skipped:
-                    raise RuntimeError("unexpected skipped FP32 optimizer update")
-                clear_lane15_state(model, optimizer)
-                assert_finite_parameters(train_module)
-                cursor += sum(len(seeds) for _, seeds in microbatches)
-                update = step + 1
+                if optimizer_update(accelerator, train_module, optimizer, optimizer_cfg["max_grad_norm"]):
+                    break
+                logger.warning("NR FP16 overflow at update %d, retry %d", step + 1, attempt + 1)
+            else:
+                raise RuntimeError("FP16 gradient overflow exceeded --max_overflow_retries; no successful update saved")
+            clear_lane15_state(model, optimizer)
+            coordinated_call(accelerator, lambda: assert_finite_parameters(train_module))
+            count = reduce_values(accelerator, {"samples": sum(len(seeds) for _, seeds in microbatches)})
+            cursor += int(count["samples"])
+            update = step + 1
+            metrics = reduce_values(accelerator, metrics, max_keys=("blend_max",))
+            metrics["overflow_retries"] = attempt
+
+            def write_metrics():
                 logger.info("NR update %d/%d loss=%.6f", update, steps, metrics["loss"])
                 with (output_dir / "metrics.jsonl").open("a", encoding="utf-8") as handle:
                     handle.write(json.dumps({"update": update, "consumed_samples": cursor, **metrics}, allow_nan=False) + "\n")
-                interval = config["evaluation"]["sample_every_n_steps"]
-                if validation and ((interval and update % interval == 0) or update == steps):
-                    with evaluation_mode(train_module):
-                        candidate = evaluate(model, validation, training["seed"], accelerator.device)
-                    write_json(
+
+            coordinated_call(accelerator, write_metrics, main_only=True)
+            interval = config["evaluation"]["sample_every_n_steps"]
+            if validation and ((interval and update % interval == 0) or update == steps):
+                candidate = coordinated_call(accelerator, run_evaluation, main_only=True)
+                coordinated_call(
+                    accelerator,
+                    lambda: write_json(
                         output_dir / "evaluation" / f"step{update:06d}.json",
-                        {"update": update, "numerics_profile": "train_surrogate", "baseline": baseline, "candidate": candidate},
-                    )
-                save_every = output["save_every_n_steps"]
-                if save_every and update % save_every == 0:
-                    prefix = "state-step" if output["save_state"] else "step"
-                    folder = output_dir / f"{prefix}{update:06d}"
-                    self._save_product(folder, model, network, source_dir, metadata, base_identity, update)
-                    if output["save_state"]:
-                        save_state(folder, optimizer, identity, update, cursor)
-            if output["save_state"] and (not output["save_every_n_steps"] or steps % output["save_every_n_steps"]):
-                folder = output_dir / f"state-step{steps:06d}"
-                self._save_product(folder, model, network, source_dir, metadata, base_identity, steps)
-                save_state(folder, optimizer, identity, steps, cursor)
-            self._save_product(output_dir / "final", model, network, source_dir, metadata, base_identity, steps)
-        finally:
-            accelerator.end_training()
-            accelerator.free_memory()
+                        {
+                            "update": update,
+                            "numerics_profile": policy["numerics_profile"],
+                            "runtime_policy": policy,
+                            "baseline": baseline,
+                            "candidate": candidate,
+                        },
+                    ),
+                    main_only=True,
+                )
+            save_every = output["save_every_n_steps"]
+            if save_every and update % save_every == 0:
+                prefix = "state-step" if output["save_state"] else "step"
+                save_product(output_dir / f"{prefix}{update:06d}", update, with_state=output["save_state"])
+        if output["save_state"] and (not output["save_every_n_steps"] or steps % output["save_every_n_steps"]):
+            save_product(output_dir / f"state-step{steps:06d}", steps, with_state=True)
+        save_product(output_dir / "final", steps)
+
+    def _initialize_model(self, policy):
+        from musubi_tuner.networks.lora_dlssnr import base_target_sha256, inject
+
+        config = self.config
+        training, optimizer_cfg = config["training"], config["optimizer"]
+        set_seed(training["seed"])
+        model = NRModel().to(dtype=torch.float32)
+        source_dir = config["model"].get("model_dir")
+        if source_dir:
+            model.load_canonical(str(Path(source_dir) / "model.safetensors"))
+        configure_model_runtime(model, policy, training=True)
+        base_identity = base_target_sha256(model, [])
+        network = inject(model, config["lora"]) if self.lora else None
+        if network is not None:
+            network.runtime_policy = dict(policy)
+            if policy["fp8_base"]:
+                from musubi_tuner.dlssnr.fp8 import quantize_frozen_base
+
+                network.base_quantization = quantize_frozen_base(model, scaled=policy["fp8_scaled"])
+        if self.lora:
+            optimizer = create_nr_optimizer(network.parameters(), optimizer_cfg)
+        else:
+            groups = config["parameter_groups"]
+            optimizer = build_optimizer(
+                model,
+                optimizer_cfg["learning_rate"],
+                {
+                    "priors": groups["prior_lr_multiplier"],
+                    "scales": groups["scale_lr_multiplier"],
+                    "temporal_blend": groups["temporal_blend_lr_multiplier"],
+                },
+                0.0,
+                include_temporal=training["mode"] == "temporal",
+                optimizer_config=optimizer_cfg,
+            )
+        return model, network, optimizer, base_identity
 
     @staticmethod
     def _save_product(folder, model, network, source_dir, metadata, base_identity, update):
@@ -411,7 +533,7 @@ class NRSupervisedTrainer:
 
 
 def _train_from_args(args, *, lora):
-    reject_unsupported_runtime()
+    reject_unsupported_runtime(args.mixed_precision)
     config = build_train_config(args, lora=lora)
     NRSupervisedTrainer(config, lora=lora).train(args.resume)
 
