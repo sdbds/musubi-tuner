@@ -5,10 +5,31 @@ from __future__ import annotations
 import os
 import random
 from contextlib import contextmanager
+from types import SimpleNamespace
 
 import numpy as np
 import torch
 from accelerate import Accelerator
+
+from musubi_tuner.training.optimizer_setup import create_optimizer
+
+
+def create_nr_optimizer(parameters, config):
+    args = SimpleNamespace(
+        optimizer_type=config["type"],
+        optimizer_args=config["args"],
+        learning_rate=config["learning_rate"],
+        lr_scheduler=config["lr_scheduler"],
+        max_grad_norm=config["max_grad_norm"],
+    )
+    _, _, optimizer, _, _ = create_optimizer(args, parameters)
+    if isinstance(optimizer, torch.optim.LBFGS):
+        raise ValueError("closure-based optimizers such as LBFGS are not supported by the NR update loop")
+    if callable(getattr(optimizer, "train", None)) or callable(getattr(optimizer, "eval", None)):
+        raise ValueError("schedule-free optimizer train/eval weight switching is not implemented for NR")
+    if args.learning_rate is None or args.lr_scheduler != "constant":
+        raise ValueError("NR requires an explicit learning rate and a constant scheduler")
+    return optimizer
 
 
 def reject_unsupported_runtime():

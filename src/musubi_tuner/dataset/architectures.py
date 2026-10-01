@@ -41,6 +41,8 @@ ARCHITECTURE_MAGE_FLOW_EDIT = "mfe"
 ARCHITECTURE_MAGE_FLOW_EDIT_FULL = "mage_flow_edit"
 ARCHITECTURE_MINIMAX_H3 = "mmh3"
 ARCHITECTURE_MINIMAX_H3_FULL = "minimax_h3"
+ARCHITECTURE_DLSSNR = "nr"
+ARCHITECTURE_DLSSNR_FULL = "dlssnr"
 
 
 def round_down_frame_count(frame_count: int, architecture: str, vae_frame_stride: int) -> int:

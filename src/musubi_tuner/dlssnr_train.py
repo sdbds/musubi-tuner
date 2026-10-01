@@ -2,23 +2,16 @@
 
 from __future__ import annotations
 
-import argparse
 import logging
 
-from musubi_tuner.training.dlssnr_trainer import train_from_config
+from musubi_tuner.training.dlssnr_parser import setup_parser
+from musubi_tuner.training.dlssnr_trainer import train_from_args
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Fine-tune DLSS-NR on paired frames or finite temporal clips.")
-    parser.add_argument("--config_file", required=True)
-    parser.add_argument("--max_train_steps", type=int, default=None)
-    parser.add_argument("--resume", default=None, help="Exact state directory written at an optimizer update boundary.")
-    parser.add_argument("--development_smoke", action="store_true", help="Explicitly allow unvalidated experimental runs.")
-    args = parser.parse_args()
+    args = setup_parser().parse_args()
     logging.basicConfig(level=logging.INFO)
-    train_from_config(
-        args.config_file, max_steps=args.max_train_steps, resume=args.resume, development_smoke=args.development_smoke
-    )
+    train_from_args(args)
 
 
 if __name__ == "__main__":

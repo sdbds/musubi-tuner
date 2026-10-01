@@ -1,0 +1,11 @@
+# Dataset-only configuration. Training and LoRA settings are CLI arguments.
+[general]
+resolution = [512, 512] # bucket area budget; exact size when enable_bucket = false
+batch_size = 1
+enable_bucket = true
+bucket_no_upscale = true
+
+[[datasets]]
+train_manifest = "../data/train_single.jsonl"
+# validation_manifest = "../data/validation_single.jsonl"
+# sequence_manifest = "../data/validation_sequences.jsonl"

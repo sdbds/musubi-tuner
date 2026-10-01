@@ -3,6 +3,7 @@ import shutil
 from pathlib import Path
 
 import numpy as np
+import toml
 import torch
 import torch.nn as nn
 import pytest
@@ -12,7 +13,8 @@ from musubi_tuner.dataset.architectures import ARCHITECTURE_WAN
 from musubi_tuner.dlssnr.infer import generate_sequence, generate_stills, require_surrogate
 from musubi_tuner.dlssnr.model import NRModel
 from musubi_tuner.networks.lora_dlssnr import inject, merge_adapter
-from musubi_tuner.training.dlssnr_trainer import load_train_config, train_from_config
+from musubi_tuner.dlssnr_train import setup_parser
+from musubi_tuner.training.dlssnr_trainer import train_from_args
 
 
 class TinyHistory(nn.Module):
@@ -39,36 +41,28 @@ def test_old_architecture_ids_are_unchanged():
 
 
 def test_unsupported_runtime_switches_are_rejected(tmp_path: Path, monkeypatch):
-    config = _single_config(tmp_path, tmp_path / "out")
-    text = config.read_text(encoding="utf-8").replace("gradient_checkpointing = false", "gradient_checkpointing = true")
-    config.write_text(text, encoding="utf-8")
-    try:
-        load_train_config(config)
-    except ValueError as exc:
-        assert "checkpoint" in str(exc)
-    else:
-        raise AssertionError("checkpointing was accepted")
+    args = _single_args(tmp_path, tmp_path / "out")
+    with pytest.raises(SystemExit):
+        setup_parser().parse_args(
+            [
+                "--dataset_config",
+                str(args.dataset_config),
+                "--output_dir",
+                str(args.output_dir),
+                "--output_name",
+                "run",
+                "--gradient_checkpointing",
+            ]
+        )
     monkeypatch.setenv("WORLD_SIZE", "2")
-    try:
-        train_from_config(config)
-    except RuntimeError as exc:
-        assert "multi-GPU" in str(exc)
-    else:
-        raise AssertionError("multi-GPU was accepted")
+    with pytest.raises(RuntimeError, match="multi-GPU"):
+        train_from_args(args)
     monkeypatch.setenv("WORLD_SIZE", "1")
     monkeypatch.setenv("ACCELERATE_MIXED_PRECISION", "bf16")
-    try:
-        train_from_config(config)
-    except RuntimeError as exc:
-        assert "mixed precision" in str(exc)
-    else:
-        raise AssertionError("bf16 Accelerate launch was accepted")
-    try:
+    with pytest.raises(RuntimeError, match="mixed precision"):
+        train_from_args(args)
+    with pytest.raises(ValueError, match="train_surrogate"):
         require_surrogate("native_reference")
-    except ValueError as exc:
-        assert "train_surrogate" in str(exc)
-    else:
-        raise AssertionError("native inference was accepted")
 
 
 def test_inference_writes_proxy_pngs_without_a_target(tmp_path: Path):
@@ -131,13 +125,14 @@ def test_resume_matches_an_uninterrupted_run(tmp_path: Path):
     _write_frame(data)
     (data / "train.jsonl").write_text(_still_row(True) + "\n", encoding="utf-8")
     out = tmp_path / "run"
-    config = _single_config(data, out)
-    train_from_config(config, max_steps=2)
+    args = _single_args(data, out)
+    train_from_args(args)
     out = out / "run"
     first = out / "final" / "model.safetensors"
     saved = tmp_path / "first.safetensors"
     shutil.copyfile(first, saved)
-    train_from_config(config, max_steps=2, resume=out / "state-step000001")
+    args.resume = out / "state-step000001"
+    train_from_args(args)
     from safetensors.torch import load_file
 
     left = load_file(saved)
@@ -145,15 +140,9 @@ def test_resume_matches_an_uninterrupted_run(tmp_path: Path):
     assert left.keys() == right.keys()
     worst = max((left[key] - right[key]).abs().max().item() for key in left)
     assert worst < 1e-6, worst
-    changed = config.read_text(encoding="utf-8").replace("learning_rate = 1e-3", "learning_rate = 2e-3")
-    other = tmp_path / "other.toml"
-    other.write_text(changed, encoding="utf-8")
-    try:
-        train_from_config(other, max_steps=2, resume=out / "state-step000001")
-    except ValueError as exc:
-        assert "identity" in str(exc)
-    else:
-        raise AssertionError("a changed config was resumed")
+    args.learning_rate = 2e-3
+    with pytest.raises(ValueError, match="identity"):
+        train_from_args(args)
 
 
 def _write_frame(directory: Path) -> None:
@@ -205,48 +194,33 @@ def _clip_row(directory: Path) -> str:
     )
 
 
-def _single_config(data: Path, output: Path) -> Path:
-    path = data / "train.toml"
+def _single_args(data: Path, output: Path):
+    path = data / "dataset.toml"
     path.write_text(
-        f"""
-schema_version = 1
-[data]
-train_manifest = "{(data / "train.jsonl").as_posix()}"
-source_encoding = "srgb_proxy"
-target_encoding = "srgb_proxy"
-controls_encoding = "dlssnr_lanes_10_14_v1"
-bucket_size = [48, 48]
-require_cache = false
-[training]
-mode = "single_frame"
-development_smoke = true
-seed = 4
-batch_size = 1
-sequence_length = 1
-burn_in = 0
-tbptt_length = 1
-gradient_accumulation_steps = 1
-max_train_steps = 2
-gradient_checkpointing = false
-[optimizer]
-type = "AdamW"
-learning_rate = 1e-3
-weight_decay = 0.0
-lr_scheduler = "constant"
-[precision]
-mixed_precision = "no"
-master_dtype = "float32"
-[loss]
-pre = 1.0
-out = 1.0
-edge = 0.0
-temporal = 0.0
-[output]
-output_dir = "{output.as_posix()}"
-output_name = "run"
-save_every_n_steps = 1
-save_state = true
-""".strip(),
+        toml.dumps(
+            {"general": {"resolution": [48, 48], "batch_size": 1}, "datasets": [{"train_manifest": str(data / "train.jsonl")}]}
+        ),
         encoding="utf-8",
     )
-    return path
+    return setup_parser().parse_args(
+        [
+            "--dataset_config",
+            str(path),
+            "--development_smoke",
+            "--seed",
+            "4",
+            "--max_train_steps",
+            "2",
+            "--learning_rate",
+            "0.001",
+            "--loss_edge",
+            "0",
+            "--output_dir",
+            str(output),
+            "--output_name",
+            "run",
+            "--save_every_n_steps",
+            "1",
+            "--save_state",
+        ]
+    )
