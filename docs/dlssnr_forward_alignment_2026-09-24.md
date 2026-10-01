@@ -14,8 +14,9 @@ preclamp, temporal and export validation are separate requirements.
 **Result:** a large reduction in image disagreement, but not full acceptance.
 9 of 19 image/control cases meet all three display thresholds. One is the
 caller-prefilled zero-intensity bypass, so 8 of 18 nontrivial cases pass.
-No successful forward-validation report was produced; normal training's gate
-remains unchanged.
+No successful forward-validation report was produced; the training gate was
+unchanged at the time of this experiment. The current [training contract](dlssnr.md#训练输入与验证证据)
+allows training without a report, but does not change these acceptance results.
 
 ## Actual Parameter Audit
 

@@ -14,9 +14,12 @@ Users must provide their own weights, paired RGB data, encoded control lanes and
 for non-reset temporal frames, motion and validity masks. No weights, DLLs or game
 assets are included. See [source attribution](../src/musubi_tuner/dlssnr/NOTICE.md).
 
-Normal training requires a forward-validation report bound to the weights and
-implementation. That validation is not complete: current experiments require
-the explicit `--development_smoke` switch. The surrogate uses half/E4M3 forward
+Normal full/LoRA training requires pretrained canonical weights, complete
+conversion provenance and a successful source round-trip, but no forward-validation
+report. Optional evidence is checked only when explicitly supplied; training
+eligibility does not certify native/DLL compatibility. `--development_smoke`
+remains a developer-only option for incomplete provenance or random initialization.
+The surrogate uses half/E4M3 forward
 publications with surrogate gradients and FP32 master weights; it is not ordinary
 FP32 SiLU/softmax and is not bit-identical to the DLL. Mixed precision,
 distributed training and gradient checkpointing are rejected. Outputs precede
@@ -86,17 +89,21 @@ TOML 中的 `[model]`、`[training]`、`[optimizer]`、`[lora]`、`[loss]`、`[o
 
 原生参考前向、真实片段上的兼容性和质量验收尚未完成。布局字节 round-trip、浮点训练测试和原生兼容是不同结论。
 
-2026-09-24 已完成第一轮 Steam 截图与本地 310.8.0 显卡适配版 DLL 的对照，结论是**当前 FP32 前向不一致**。4 张截图、19 组图片/参数组合覆盖 style、intensity、tone、structure、skin 和 auto mask；默认参数的输出与 DLL 之间 MAE 为 0.0294 至 0.0420。相同 packed 权重不代表前向计算正确，不建议据此开始正式训练。详见 [截图前向实验记录](dlssnr_forward_experiment_2026-09-24.md)。
+2026-09-24 已完成第一轮 Steam 截图与本地 310.8.0 显卡适配版 DLL 的对照，结论是**当前 FP32 前向不一致**。4 张截图、19 组图片/参数组合覆盖 style、intensity、tone、structure、skin 和 auto mask；默认参数的输出与 DLL 之间 MAE 为 0.0294 至 0.0420。相同 packed 权重不代表前向计算正确，也不能据此宣称训练产物兼容原生 DLL。详见 [截图前向实验记录](dlssnr_forward_experiment_2026-09-24.md)。
 
 同日后续已排除主要默认参数因素，并修复 cubic 激活及关键数值边界。默认参数下四图 MAE 降至 0.00262 至 0.00520，19 组中 9 组达到原有三项显示指标门槛（含一组零强度直通），**尚未完成全部前向验收**。全量测试为 172 passed，包含真实权重 CUDA 全量/LoRA 更新及合并对照。详见 [可训练前向对齐记录](dlssnr_forward_alignment_2026-09-24.md)。数值实现版本已更新，旧训练状态不能跨版本 exact resume。
 
-## 正式运行与实验运行
+## 训练输入与验证证据
 
-正常训练必须提供 `--model_dir`、完整 canonical 来源文件、通过 round-trip 的转换报告，以及绑定当前权重和数值实现的 forward validation report。缺少这些证据时，入口会停止，而不会隐式随机初始化。
+正常全量和 LoRA 训练必须提供 `--model_dir`、canonical 权重、匹配的 schema/profile、完整来源文件和通过 source round-trip 的转换报告；仍会检查实际数据和张量。**forward validation report 不再是训练前置条件**，不需要为此开启开发模式。缺少模型或来源文件时仍会停止，不会隐式随机初始化或绕过来源检查。
 
-当前开发实验须显式传 `--development_smoke`。这允许尚未通过参考验收的 canonical 权重；只有这种模式允许省略 `--model_dir` 使用随机权重。输出会标记 `experimental_surrogate`，不应作为兼容模型发布。
+`--development_smoke` 仅保留给明确的开发 smoke 测试：允许来源文件不完整，或省略 `--model_dir` 使用随机权重。它不等于普通训练开关，也不能绕过显式提交的无效验收报告。
 
-验证报告默认读取 `model_dir/forward_validation_report.json`，也可通过 `--forward_validation_report` 指定。契约为 `dlssnr_forward_validation_v1`，包含 `profile`、`numerics_profile`、当前 `model_sha256`、`implementation_sha256`、固定的 `reference_identity`、`float_validated` 和 `checks`。检查项为 `raw_head`、`neural_preclamp`、`rendered_proxy`；全部必须来自实际参考验证。实现指纹由 `json_sha256(implementation_identity())` 计算。普通训练 evaluation 不能代替这份报告，也不要手工填入通过标记。
+需要绑定验收证据时，显式传入 `--forward_validation_report`；报告必须对应 `--model_dir`，路径不存在、身份不匹配或检查未通过都会报错，开发模式也不例外。普通训练不会自动读取目录内的 `forward_validation_report.json`，避免未请求的旧报告改变训练或恢复行为。工具调用可使用 `inspect_canonical(..., require_forward_validation=True)` 强制要求证据；未提供 `validation_report` 路径时，该调用才读取 canonical 目录内的默认报告。
+
+报告契约仍为 `dlssnr_forward_validation_v1`，包含 `profile`、`numerics_profile`、当前 `model_sha256`、`implementation_sha256`、固定的 `reference_identity`、`float_validated` 和 `checks`。检查项为 `raw_head`、`neural_preclamp`、`rendered_proxy`；全部必须来自实际参考验证。实现指纹由 `json_sha256(implementation_identity())` 计算。普通训练 evaluation 不能代替这份报告，也不要手工填入通过标记。
+
+运行元数据以 `source_forward_validated` 单独记录是否检查过有效的基座报告。无报告时该字段为 `false`，并保留 `experimental_surrogate=true`，但不会把 `development_smoke` 自动设为 `true`。开发 smoke 产物也始终保留实验标记。无论基座是否有报告，新训练产物的 `float_validated`、`temporal_validated`、`native_export_validated` 均为 `false`；基座证据不能证明更新后权重的兼容性。
 
 ## 命令
 
@@ -115,8 +122,7 @@ python dlssnr_train.py \
   --optimizer_type AdamW --learning_rate 1e-5 \
   --optimizer_args weight_decay=0.0 \
   --output_dir output/dlssnr_full_single --output_name dlssnr_310_8_0_full \
-  --max_train_steps 1000 --save_every_n_steps 100 --save_state \
-  --development_smoke
+  --max_train_steps 1000 --save_every_n_steps 100 --save_state
 ```
 
 时序全量训练：
@@ -128,8 +134,7 @@ python dlssnr_train.py \
   --training_mode temporal --sequence_length 4 --burn_in 2 --tbptt_length 2 \
   --loss_temporal 0.10 --optimizer_type AdamW --learning_rate 1e-5 \
   --output_dir output/dlssnr_full_temporal --output_name dlssnr_310_8_0_temporal \
-  --max_train_steps 1000 --save_every_n_steps 100 --save_state \
-  --development_smoke
+  --max_train_steps 1000 --save_every_n_steps 100 --save_state
 ```
 
 ViT LoRA。rank、alpha 和优化器都直接从参数选择，使用同一份单帧数据集 TOML：
@@ -142,8 +147,7 @@ python dlssnr_train_network.py \
   --optimizer_type AdamW --learning_rate 1e-4 \
   --optimizer_args weight_decay=0.0 betas=0.9,0.999 \
   --output_dir output/dlssnr_lora --output_name dlssnr_310_8_0_lora_vit \
-  --max_train_steps 1000 --save_every_n_steps 100 --save_state \
-  --development_smoke
+  --max_train_steps 1000 --save_every_n_steps 100 --save_state
 ```
 
 常用参数：
@@ -161,6 +165,8 @@ python dlssnr_train_network.py \
 | `--sample_every_n_steps` / `--min_sequence_frames` | 验证间隔和时序评估的最小帧数。非零验证间隔要求数据 TOML 配置验证清单。 |
 | `--no-compare_baseline` | 关闭初始基座对照，默认开启。 |
 | `--save_state` / `--save_every_n_steps` / `--resume` | 保存训练状态、周期和恢复点；未给 `--save_state` 时仅保存权重。 |
+| `--forward_validation_report` | 可选基座验收证据；仅显式指定时检查，不是训练前置条件。 |
+| `--development_smoke` | 仅限开发测试，显式允许不完整来源或随机初始化；普通训练不需要。 |
 
 例如，将优化器选项换成 `--optimizer_type SGD --optimizer_args momentum=0.9 weight_decay=0.0`，会实际构造 SGD，而不是只改变配置标签。Adafactor 必须显式给 `--optimizer_args relative_step=False warmup_init=False`。当前仍只支持 constant LR；schedule-free 的权重切换和需要 closure 的优化器不支持，会明确报错。
 
@@ -212,7 +218,7 @@ LoRA 前向使用权重侧的 `W + alpha/r * B@A`，与合并权重走相同的�
 
 `--save_state` 在定期及最终更新边界生成 `state-stepNNNNNN/`。状态包含 optimizer、实际已消费样本数、CPU/CUDA/Python/NumPy RNG、展开配置与数据/组批计划/基座/实现指纹，并有文件完整性清单。恢复位置由 optimizer 更新次数和梯度累积次数定位到同桶批次，同时核验实际消费数，支持桶尾小批次和跨轮恢复。不传此参数时仍按保存间隔输出 `stepNNNNNN/` 权重，但这些目录不能 exact resume。
 
-仅修改数据 TOML 注释或 CLI 参数排列顺序不会阻止恢复；修改学习率、优化器、rank、分桶设置等有效参数、引用的数据内容、基座或训练实现会拒绝 exact resume。CUDA 反向部分算子的非确定性仍需按数值容差验收，不承诺所有硬件间逐位一致。
+仅修改数据 TOML 注释或 CLI 参数排列顺序不会阻止恢复；修改学习率、优化器、rank、分桶设置等有效参数、引用的数据内容、基座或训练实现会拒绝 exact resume。显式报告的路径和内容也属于恢复身份，不能在恢复时增删或替换；未显式请求的目录内报告不参与该身份。此次训练准入调整改变了训练实现指纹，之前版本的状态不能直接 exact resume。CUDA 反向部分算子的非确定性仍需按数值容差验收，不承诺所有硬件间逐位一致。
 
 旧版 `dlssnr_train_state_v1` 不再视为精确恢复点。旧 adapter 若缺少完整基座身份、rank/alpha 或 forward mode 元数据，也不会被静默接受。保留旧文件，重新生成受校验的产物。
 

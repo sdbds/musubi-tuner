@@ -22,9 +22,15 @@ def setup_parser(*, lora=False) -> argparse.ArgumentParser:
     parser.add_argument("--numerics_profile", default="train_surrogate", choices=["train_surrogate"])
     parser.add_argument("--deployment_target", default="float_runtime", choices=["float_runtime", "native_roundtrip"])
     parser.add_argument(
-        "--forward_validation_report", type=Path, help="Evidence bound to the pretrained weights and implementation."
+        "--forward_validation_report",
+        type=Path,
+        help="Optional evidence bound to the source weights and implementation; checked when explicitly supplied.",
     )
-    parser.add_argument("--development_smoke", action="store_true", help="Explicitly allow unvalidated experimental runs.")
+    parser.add_argument(
+        "--development_smoke",
+        action="store_true",
+        help="Developer-only: allow incomplete conversion provenance or random initialization without --model_dir.",
+    )
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
     parser.add_argument("--mixed_precision", default="no", choices=["no"], help="Only FP32 training is implemented.")
     parser.add_argument("--training_mode", default="single_frame", choices=["single_frame", "temporal"])

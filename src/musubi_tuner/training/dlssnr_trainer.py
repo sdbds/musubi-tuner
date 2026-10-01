@@ -210,6 +210,7 @@ class NRSupervisedTrainer:
             if source_dir
             else {}
         )
+        source_forward_validated = "forward_validation_report" in source_identity
         accelerator = create_accelerator(training)
         set_seed(training["seed"])
         model = NRModel().to(dtype=torch.float32)
@@ -303,7 +304,8 @@ class NRSupervisedTrainer:
             "optimizer_groups": optimizer_groups,
             "bucket_plan": batch_plan.report(),
             "device": str(accelerator.device),
-            "experimental_surrogate": training["development_smoke"],
+            "source_forward_validated": source_forward_validated,
+            "experimental_surrogate": training["development_smoke"] or not source_forward_validated,
             "temporal_trained": training["mode"] == "temporal",
         }
         baseline = None
@@ -321,6 +323,8 @@ class NRSupervisedTrainer:
             write_json(output_dir / "lora_report.json", network.report)
         if training["development_smoke"]:
             logger.warning("EXPERIMENTAL NR smoke run: native/float compatibility has not been validated")
+        elif not source_forward_validated:
+            logger.warning("NR source forward compatibility is unvalidated; training does not certify native/DLL compatibility")
         try:
             for step in range(completed, steps):
                 train_module.train()

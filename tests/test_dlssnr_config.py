@@ -89,6 +89,12 @@ def test_pretrained_weights_are_required_unless_smoke_is_explicit(tmp_path):
     assert build_train_config(args)["training"]["development_smoke"]
 
 
+def test_explicit_forward_evidence_requires_a_source_model_even_for_smoke(tmp_path):
+    args = make_args(tmp_path, ["--forward_validation_report", "forward.json"])
+    with pytest.raises(ValueError, match="model_dir"):
+        build_train_config(args)
+
+
 def test_dataset_overrides_general_and_resolves_relative_paths(tmp_path):
     args = make_args(
         tmp_path,

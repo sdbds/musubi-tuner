@@ -268,7 +268,7 @@ def test_mixed_buckets_train_and_resume_exactly_with_partial_batches(tmp_path, l
     train(args)
     run = tmp_path / "output/dlssnr"
     filename = "adapter.safetensors" if lora else "model.safetensors"
-    expected = load_file(run / "final" / filename)
+    expected = {key: tensor.clone() for key, tensor in load_file(run / "final" / filename).items()}
     state = torch.load(run / "state-step000003/trainer_state.pt", weights_only=True)
     assert state["consumed_samples"] == 7
     args.resume = run / "state-step000001"
