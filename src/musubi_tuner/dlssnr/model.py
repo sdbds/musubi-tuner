@@ -3,15 +3,16 @@
 
 """Canonical DLSS-NR 310.8.0 module.
 
-Parameter names match the P0 checkpoint exactly. `forward` is the FP32 surrogate: it follows the block
-order, channel widths, head-major QKV, window phases, and skip wiring, and it does not reproduce native
-rounding. See `numerics.SURROGATE_FLAGS`.
+Parameter names match the P0 checkpoint exactly. The default FP32 surrogate follows the block order,
+channel widths, head-major QKV, window phases and skip wiring, but not native matrix accumulations.
+Experimental compute/attention policies are model-local. See `numerics.SURROGATE_FLAGS`.
 """
 
 from __future__ import annotations
 
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint
 
 from musubi_tuner.dlssnr.geometry import Geometry
 from musubi_tuner.dlssnr.arithmetic import cubic_half, e4m3_ste, half_ste
@@ -30,9 +31,23 @@ class ChannelLinear(nn.Module):
     def __init__(self, out_features: int, in_features: int) -> None:
         super().__init__()
         self.weight = nn.Parameter(torch.empty(out_features, in_features))
+        self.compute_dtype = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return apply_linear(self.weight, x)
+        return self.project(self.materialized_weight(), x)
+
+    def materialized_weight(self) -> torch.Tensor:
+        weight = self.weight.float() if self.weight.dtype == torch.float8_e4m3fn else self.weight
+        scale = getattr(self, "scale_weight", None)
+        if scale is None:
+            return weight
+        if scale.ndim == 3:
+            return (weight.reshape(scale.shape[0], scale.shape[1], 64) * scale).reshape_as(weight)
+        return weight * scale
+
+    def project(self, weight: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+        with torch.autocast(x.device.type, dtype=self.compute_dtype, enabled=self.compute_dtype is not None):
+            return apply_linear(weight, x).float()
 
 
 class DenseFFN(nn.Module):
@@ -98,6 +113,8 @@ class WindowAttn(nn.Module):
     def __init__(self, channels: int, phase: int) -> None:
         super().__init__()
         self.phase = phase
+        self.compute_dtype = None
+        self.attention_backend = "native"
         self.qkv = ChannelLinear(channels * 3, channels)
         self.proj = ChannelLinear(channels, channels)
         self.prior = nn.Parameter(torch.empty(channels // 32, 64, 64))
@@ -105,19 +122,39 @@ class WindowAttn(nn.Module):
         self.skip_scale = nn.Parameter(torch.empty(channels))
 
     def forward(self, y: torch.Tensor) -> torch.Tensor:
-        return window_attention(y, self.qkv, self.proj, self.prior, self.temperature, self.skip_scale, self.phase)
+        return window_attention(
+            y,
+            self.qkv,
+            self.proj,
+            self.prior,
+            self.temperature,
+            self.skip_scale,
+            self.phase,
+            compute_dtype=self.compute_dtype,
+            backend=self.attention_backend,
+        )
 
 
 class GlobalAttn(nn.Module):
     def __init__(self, channels: int = 1024) -> None:
         super().__init__()
+        self.compute_dtype = None
+        self.attention_backend = "native"
         self.qkv = ChannelLinear(channels * 3, channels)
         self.proj = ChannelLinear(channels, channels)
         self.temperature = nn.Parameter(torch.empty(channels // 32))
         self.skip_scale = nn.Parameter(torch.empty(channels))
 
     def forward(self, y: torch.Tensor) -> torch.Tensor:
-        return global_attention(y, self.qkv, self.proj, self.temperature, self.skip_scale)
+        return global_attention(
+            y,
+            self.qkv,
+            self.proj,
+            self.temperature,
+            self.skip_scale,
+            compute_dtype=self.compute_dtype,
+            backend=self.attention_backend,
+        )
 
 
 class NRModel(nn.Module):
@@ -128,7 +165,11 @@ class NRModel(nn.Module):
         for block in range(71):
             blocks[str(block)] = self._make_block(block, phases[block])
         self.blocks = blocks
+        self.gradient_checkpointing = False
         self.reset_parameters()
+
+    def enable_gradient_checkpointing(self) -> None:
+        self.gradient_checkpointing = True
 
     @staticmethod
     def _make_block(block: int, phase: int | None) -> nn.Module:
@@ -213,6 +254,8 @@ class NRModel(nn.Module):
     def load_canonical(self, path: str) -> None:
         from safetensors.torch import load_file
 
+        if getattr(self, "base_quantization", None) is not None:
+            raise ValueError("load canonical weights into a fresh FP32 model before quantizing its frozen base")
         tensors = load_file(path)
         for block in range(31, 39):
             opaque = tensors.pop(f"blocks.{block}.opaque.layer3", None)
@@ -229,47 +272,48 @@ class NRModel(nn.Module):
     def forward(self, features: torch.Tensor, geometry: Geometry) -> torch.Tensor:
         """features [B, 16, full_h, full_w] -> raw head [B, 4, full_h, full_w]."""
         levels = geometry.levels
+        checkpointing = self.gradient_checkpointing and self.training and torch.is_grad_enabled()
         block0 = self.blocks["0"]
         adapted = half_ste(block0.input_adapter(half_ste(features)))
-        full = block0.attn(block0.ffn(adapted, residual=adapted))
+        full = _run_block(block0, adapted, checkpointing, separate_residual=True)
         state = pool2x2(full, levels[0][1], levels[0][0])
-        state = _run_window_stage(self.blocks, state, range(1, 5))
+        state = _run_window_stage(self.blocks, state, range(1, 5), checkpointing=checkpointing)
         skip32 = state
         state = self.blocks["4"].down(pool2x2(state, levels[1][1], levels[1][0]))
 
-        state = _run_window_stage(self.blocks, state, range(5, 9))
+        state = _run_window_stage(self.blocks, state, range(5, 9), checkpointing=checkpointing)
         skip64 = state
         state = self.blocks["8"].down(pool2x2(state, levels[2][1], levels[2][0]))
 
-        state = _run_window_stage(self.blocks, state, range(9, 15))
+        state = _run_window_stage(self.blocks, state, range(9, 15), checkpointing=checkpointing)
         skip128 = state
         state = self.blocks["14"].down(pool2x2(state, levels[3][1], levels[3][0]))
 
-        state = _run_window_stage(self.blocks, state, range(15, 23))
+        state = _run_window_stage(self.blocks, state, range(15, 23), checkpointing=checkpointing)
         skip256 = state
         state = self.blocks["22"].down(pool2x2(state, levels[4][1], levels[4][0]))
 
-        state = _run_window_stage(self.blocks, state, range(23, 31))
+        state = _run_window_stage(self.blocks, state, range(23, 31), checkpointing=checkpointing)
         skip512 = state
         pooled = pool2x2(state, levels[5][1], levels[5][0])
         state = self.blocks["30"].to_vit(pooled)
-        state = _run_window_stage(self.blocks, state, range(31, 39))
+        state = _run_window_stage(self.blocks, state, range(31, 39), checkpointing=checkpointing)
 
         block39 = self.blocks["39"]
         projected = half_ste(block39.proj(e4m3_ste(state)))
         state = _merge_skip(projected, skip512, block39.skip_scale, levels[4])
-        state = _run_window_stage(self.blocks, state, range(40, 48))
+        state = _run_window_stage(self.blocks, state, range(40, 48), checkpointing=checkpointing)
 
-        state = _decode_stage(self.blocks, state, 48, range(48, 56), skip256, levels[3])
-        state = _decode_stage(self.blocks, state, 56, range(56, 62), skip128, levels[2])
-        state = _decode_stage(self.blocks, state, 62, range(62, 66), skip64, levels[1])
-        state = _decode_stage(self.blocks, state, 66, range(66, 70), skip32, levels[0])
+        state = _decode_stage(self.blocks, state, 48, range(48, 56), skip256, levels[3], checkpointing=checkpointing)
+        state = _decode_stage(self.blocks, state, 56, range(56, 62), skip128, levels[2], checkpointing=checkpointing)
+        state = _decode_stage(self.blocks, state, 62, range(62, 66), skip64, levels[1], checkpointing=checkpointing)
+        state = _decode_stage(self.blocks, state, 66, range(66, 70), skip32, levels[0], checkpointing=checkpointing)
 
         block70 = self.blocks["70"]
         upsampled = nearest_upsample(e4m3_ste(state), geometry.full_height, geometry.full_width)
         low = half_ste(upsampled * half_ste(block70.merge.up_scale).view(1, -1, 1, 1))
         merged = half_ste(low + e4m3_ste(full) * half_ste(block70.merge.adapter_scale).view(1, -1, 1, 1))
-        state = block70.attn(block70.ffn(merged, residual=merged))
+        state = _run_block(block70, merged, checkpointing, separate_residual=True)
         rgb = block70.head.rgb(state)
         logit = block70.head.logit(state)
         return torch.cat((rgb, logit), dim=1)
@@ -290,10 +334,21 @@ def _attach_up(module: nn.Module, out_channels: int, in_channels: int) -> None:
     module.up.skip_scale = nn.Parameter(torch.empty(out_channels))
 
 
-def _run_window_stage(blocks: nn.ModuleDict, state: torch.Tensor, block_ids: range) -> torch.Tensor:
+def _run_block(block, state, checkpointing, *, separate_residual=False):
+    # Bind this block outside the stage loop so backward cannot replay a later block.
+    def forward(value):
+        hidden = block.ffn(value, residual=value) if separate_residual else block.ffn(value)
+        return block.attn(hidden)
+
+    if checkpointing and block.training and torch.is_grad_enabled():
+        return checkpoint(forward, state, use_reentrant=False, preserve_rng_state=True)
+    return forward(state)
+
+
+def _run_window_stage(blocks: nn.ModuleDict, state: torch.Tensor, block_ids: range, *, checkpointing=False) -> torch.Tensor:
     for block_id in block_ids:
         block = blocks[str(block_id)]
-        state = block.attn(block.ffn(state))
+        state = _run_block(block, state, checkpointing)
     return state
 
 
@@ -302,11 +357,13 @@ def _merge_skip(projected: torch.Tensor, skip: torch.Tensor, scale: torch.Tensor
     return half_ste(upsampled + e4m3_ste(skip) * half_ste(scale).view(1, -1, 1, 1))
 
 
-def _decode_stage(blocks, state, first: int, block_ids: range, skip: torch.Tensor, high: tuple[int, int]) -> torch.Tensor:
+def _decode_stage(
+    blocks, state, first: int, block_ids: range, skip: torch.Tensor, high: tuple[int, int], *, checkpointing=False
+) -> torch.Tensor:
     block = blocks[str(first)]
     projected = half_ste(block.up(e4m3_ste(state)))
     state = _merge_skip(projected, skip, block.up.skip_scale, high)
     if first == 66:
-        state = block.attn(block.ffn(state, residual=state))
-        return _run_window_stage(blocks, state, range(first + 1, block_ids.stop))
-    return _run_window_stage(blocks, state, block_ids)
+        state = _run_block(block, state, checkpointing, separate_residual=True)
+        return _run_window_stage(blocks, state, range(first + 1, block_ids.stop), checkpointing=checkpointing)
+    return _run_window_stage(blocks, state, block_ids, checkpointing=checkpointing)

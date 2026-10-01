@@ -51,7 +51,7 @@ def test_unsupported_runtime_switches_are_rejected(tmp_path: Path, monkeypatch):
                 str(args.output_dir),
                 "--output_name",
                 "run",
-                "--gradient_checkpointing",
+                "--gradient_checkpointing_cpu_offload",
             ]
         )
     monkeypatch.setenv("WORLD_SIZE", "2")
