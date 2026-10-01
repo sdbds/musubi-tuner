@@ -199,7 +199,7 @@ def test_full_and_lora_resume_with_accumulation_and_comments(tmp_path, small_mat
     train(args)
     output = tmp_path / "output" / "dlssnr"
     filename = "adapter.safetensors" if lora else "model.safetensors"
-    expected = load_file(output / "final" / filename)
+    expected = {key: tensor.clone() for key, tensor in load_file(output / "final" / filename).items()}
     saved = output / "state-step000001"
     assert (saved / "trainer_state.pt").is_file()
     assert (output / "final" / "training_metadata.json").is_file()
@@ -215,6 +215,76 @@ def test_full_and_lora_resume_with_accumulation_and_comments(tmp_path, small_mat
     Image.fromarray(np.full((48, 48, 3), 61, np.uint8)).save(tmp_path / "target.png")
     with pytest.raises(ValueError, match="identity|data"):
         train(args)
+
+
+@pytest.mark.parametrize("lora", [False, True])
+def test_normal_training_without_evidence_preserves_unvalidated_metadata_and_resume(tmp_path, small_math, lora):
+    from test_dlssnr_artifacts import make_canonical
+
+    args = make_args(tmp_path, lora=lora)
+    args.development_smoke = False
+    args.model_dir = make_canonical(tmp_path / "base", SmallNR())
+    train = trainer.train_lora_from_args if lora else trainer.train_from_args
+    train(args)
+    output = args.output_dir / "dlssnr"
+    run = json.loads((output / "run_config.json").read_text(encoding="utf-8"))
+    assert run["config"]["training"]["development_smoke"] is False
+    assert run["source_forward_validated"] is False
+    assert run["experimental_surrogate"] is True
+    assert "forward_validation_report" not in run["identity"]["source"]
+    metadata = json.loads((output / "final/training_metadata.json").read_text(encoding="utf-8"))
+    for name in ("float_validated", "temporal_validated", "native_export_validated"):
+        assert metadata[name] is False
+    filename = "adapter.safetensors" if lora else "model.safetensors"
+    expected = {key: tensor.clone() for key, tensor in load_file(output / "final" / filename).items()}
+    (args.model_dir / "forward_validation_report.json").write_text("unrequested sidecar", encoding="utf-8")
+    args.resume = output / "state-step000001"
+    train(args)
+    actual = load_file(output / "final" / filename)
+    for key in expected:
+        torch.testing.assert_close(actual[key], expected[key], rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("lora", [False, True])
+def test_explicit_source_evidence_never_validates_trained_outputs(tmp_path, small_math, lora):
+    from test_dlssnr_artifacts import make_canonical, make_validation_report
+    from musubi_tuner.dlssnr.identity import file_sha256
+
+    args = make_args(tmp_path, lora=lora)
+    args.development_smoke = False
+    args.model_dir = make_canonical(tmp_path / "base", SmallNR())
+    args.forward_validation_report = make_validation_report(args.model_dir)
+    args.max_train_steps = 1
+    train = trainer.train_lora_from_args if lora else trainer.train_from_args
+    train(args)
+    output = args.output_dir / "dlssnr"
+    metadata = json.loads((output / "final/training_metadata.json").read_text(encoding="utf-8"))
+    assert metadata["source_forward_validated"] is True
+    assert metadata["identity"]["source"]["forward_validation_report"] == file_sha256(args.forward_validation_report)
+    for name in ("float_validated", "temporal_validated", "native_export_validated"):
+        assert metadata[name] is False
+    args.resume = output / "state-step000001"
+    report = json.loads(args.forward_validation_report.read_text(encoding="utf-8"))
+    report["reference_identity"] = {"test_fixture": "different synthetic evidence"}
+    args.forward_validation_report.write_text(json.dumps(report), encoding="utf-8")
+    with pytest.raises(ValueError, match="identity"):
+        train(args)
+
+
+@pytest.mark.parametrize("lora", [False, True])
+@pytest.mark.parametrize("development_smoke", [False, True])
+def test_training_rejects_invalid_explicit_source_evidence(tmp_path, small_math, lora, development_smoke):
+    from test_dlssnr_artifacts import make_canonical
+
+    args = make_args(tmp_path, lora=lora)
+    args.development_smoke = development_smoke
+    args.model_dir = make_canonical(tmp_path / "base", SmallNR())
+    args.forward_validation_report = args.model_dir / "invalid.json"
+    args.forward_validation_report.write_text("{}", encoding="utf-8")
+    train = trainer.train_lora_from_args if lora else trainer.train_from_args
+    with pytest.raises(ValueError, match="forward validation"):
+        train(args)
+    assert not args.output_dir.exists()
 
 
 @pytest.mark.parametrize("field,value", [("learning_rate", 0.002), ("optimizer_type", "SGD"), ("network_dim", 8)])
@@ -324,7 +394,7 @@ def test_checkpoint_checksum_rejects_modified_weights(tmp_path, small_math):
     folder = tmp_path / "output/dlssnr/state-step000001"
     from safetensors.torch import save_file
 
-    weights = load_file(folder / "adapter.safetensors")
+    weights = {key: tensor.clone() for key, tensor in load_file(folder / "adapter.safetensors").items()}
     weights[next(iter(weights))].add_(1)
     save_file(weights, str(folder / "adapter.safetensors"))
     args.resume = folder

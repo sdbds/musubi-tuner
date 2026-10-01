@@ -5,7 +5,9 @@
 The current `train_surrogate` is **not equivalent** to the supplied DLSS-NR
 310.8.0 DLL on the tested screenshots. This is a failed parity experiment, not
 a successful `dlssnr_forward_validation_v1` report. Training's validation gate
-must remain closed. No model/trainer/numerics code was changed in this experiment.
+remained closed at the time. No model/trainer/numerics code was changed in this experiment.
+The current [training contract](dlssnr.md#训练输入与验证证据) no longer requires this
+report to start training; that does not turn this experiment into passing evidence.
 
 The DLL's default-style output visibly changes skin, surface detail and lighting.
 The current FP32 network output stays much closer to the input. Adding the

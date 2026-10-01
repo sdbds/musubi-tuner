@@ -46,7 +46,12 @@ def save_tensors(path, tensors):
         temporary.unlink(missing_ok=True)
 
 
-def inspect_canonical(folder, *, development_smoke=False, validation_report=None):
+def inspect_canonical(folder, *, development_smoke=False, validation_report=None, require_forward_validation=False):
+    """Check canonical provenance, and forward evidence only when explicitly requested.
+
+    An explicit report is always checked, including in development smoke mode.
+    Requiring evidence without a path selects the canonical directory's report.
+    """
     folder = Path(folder).resolve()
     if not (folder / "model.safetensors").is_file():
         raise FileNotFoundError(f"missing canonical weights in {folder}")
@@ -82,9 +87,10 @@ def inspect_canonical(folder, *, development_smoke=False, validation_report=None
         conversion = json.loads((folder / "conversion_report.json").read_text(encoding="utf-8"))
         if conversion.get("roundtrip") != "byte_identical" or conversion.get("profile") != PROFILE_ID:
             raise ValueError("canonical conversion has not passed source round-trip validation")
-        report_file = Path(validation_report) if validation_report else folder / "forward_validation_report.json"
+    if validation_report is not None or require_forward_validation:
+        report_file = Path(validation_report) if validation_report is not None else folder / "forward_validation_report.json"
         if not report_file.is_file():
-            raise ValueError("baseline forward validation is required; use explicit development_smoke for unvalidated experiments")
+            raise ValueError("baseline forward validation report is missing; evidence was explicitly requested")
         report = json.loads(report_file.read_text(encoding="utf-8"))
         required_checks = ("raw_head", "neural_preclamp", "rendered_proxy")
         if (

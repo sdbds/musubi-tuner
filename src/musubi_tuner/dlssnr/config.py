@@ -175,6 +175,8 @@ def build_train_config(args, *, lora=False) -> dict:
             model[name] = str(Path(value).resolve())
     if not model.get("model_dir") and not args.development_smoke:
         raise ValueError("--model_dir is required; random initialization is only allowed in --development_smoke")
+    if model.get("forward_validation_report") and not model.get("model_dir"):
+        raise ValueError("--forward_validation_report requires --model_dir to identify the source weights")
 
     optimizer_type = args.optimizer_type or "AdamW"
     optimizer_args = _key_value_args(args.optimizer_args, "--optimizer_args")
