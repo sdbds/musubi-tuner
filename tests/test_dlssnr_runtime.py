@@ -91,7 +91,7 @@ def test_amp_runner_resumes_scaler_weights_and_successful_counters(tmp_path, pre
     train(args)
     folder = args.output_dir / args.output_name
     filename = "adapter.safetensors" if lora else "model.safetensors"
-    expected = load_file(folder / "final" / filename)
+    expected = {name: value.clone() for name, value in load_file(folder / "final" / filename).items()}
     saved = torch.load(folder / "state-step000002/trainer_state.pt", weights_only=True)
     assert saved["schema"] == "dlssnr_train_state_v3"
     scaler = saved["rank_states"][0]["scaler"]

@@ -10,6 +10,7 @@ from pathlib import Path
 
 import toml
 
+from musubi_tuner.dlssnr.controls import CONTROL_DEFAULTS, resolve_fixed_controls
 from musubi_tuner.dlssnr.filenames import validate_filename
 from musubi_tuner.dlssnr.geometry import resolve_geometry
 from musubi_tuner.dlssnr.profiles import PROFILE_ID
@@ -73,17 +74,24 @@ def load_dataset_config(path: str | Path) -> dict:
         )
     general = raw.get("general", {})
     datasets = raw.get("datasets")
-    settings = {"resolution", "batch_size", "enable_bucket", "bucket_no_upscale"}
+    settings = {"resolution", "batch_size", "enable_bucket", "bucket_no_upscale", "num_repeats", "caption_extension"}
     if not isinstance(general, dict) or (unknown := set(general) - settings):
         raise ValueError(f"dataset [general] supports only {sorted(settings)}")
-    if not isinstance(datasets, list) or len(datasets) != 1 or not isinstance(datasets[0], dict):
-        raise ValueError("DLSS-NR currently requires exactly one [[datasets]] manifest entry")
-    dataset = datasets[0]
-    paths = {"train_manifest", "validation_manifest", "sequence_manifest"}
-    if unknown := set(dataset) - paths - settings:
-        raise ValueError(f"unsupported dataset fields: {sorted(unknown)}; training settings belong on the command line")
-    effective = {**general, **dataset}
-    resolution = effective.get("resolution", [512, 512])
+    if not isinstance(datasets, list) or not datasets or any(not isinstance(item, dict) for item in datasets):
+        raise ValueError("DLSS-NR requires at least one [[datasets]] entry")
+    paths = {"train_manifest", "validation_manifest", "sequence_manifest", "image_directory", "control_directory"}
+    entries = []
+    for dataset in datasets:
+        if unknown := set(dataset) - paths - settings - set(CONTROL_DEFAULTS) - {"nr_controls_mode", "cache_directory"}:
+            raise ValueError(f"unsupported dataset fields: {sorted(unknown)}; training settings belong on the command line")
+        entries.append(_resolve_dataset_entry({**general, **dataset}, path.parent, paths))
+    if len(entries) == 1:
+        return entries[0]
+    return {"datasets": entries, "batch_size": entries[0]["batch_size"]}
+
+
+def _resolve_dataset_entry(effective, base_directory, paths):
+    resolution = effective.get("resolution", [1024, 1024])
     if type(resolution) is int:
         resolution = [resolution, resolution]
     if not isinstance(resolution, list) or len(resolution) != 2 or any(type(value) is not int for value in resolution):
@@ -91,8 +99,11 @@ def load_dataset_config(path: str | Path) -> dict:
     resolve_geometry(*resolution)
     batch_size = effective.get("batch_size", 1)
     _integer(batch_size, "dataset.batch_size")
-    if not effective.get("train_manifest"):
-        raise ValueError("dataset.train_manifest is required")
+    directory = bool(effective.get("image_directory"))
+    if directory == bool(effective.get("train_manifest")):
+        raise ValueError("dataset requires exactly one image_directory or train_manifest")
+    if directory != bool(effective.get("control_directory")):
+        raise ValueError("directory pairs require both image_directory and control_directory")
     data = {"bucket_size": resolution, "batch_size": batch_size}
     for name in ("enable_bucket", "bucket_no_upscale"):
         value = effective.get(name, False)
@@ -106,7 +117,18 @@ def load_dataset_config(path: str | Path) -> dict:
             value = effective[name]
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"dataset.{name} must be a nonempty path")
-            data[name] = str((path.parent / value).resolve())
+            data[name] = str((base_directory / value).resolve())
+    repeats = effective.get("num_repeats", 1)
+    _integer(repeats, "dataset.num_repeats")
+    if repeats != 1:
+        data["num_repeats"] = repeats
+    mode = effective.get("nr_controls_mode", "fixed" if directory else "files")
+    if mode not in ("fixed", "files") or directory and mode != "fixed":
+        raise ValueError("nr_controls_mode must be fixed for directories, or fixed/files for manifests")
+    if mode == "fixed":
+        data["fixed_controls"] = resolve_fixed_controls(effective)
+    elif set(CONTROL_DEFAULTS) & effective.keys():
+        raise ValueError("fixed condition parameters require nr_controls_mode=fixed")
     return data
 
 
@@ -158,6 +180,8 @@ def build_train_config(args, *, lora=False) -> dict:
         if args.loss_temporal != 0:
             raise ValueError("single-frame mode requires --loss_temporal=0")
     elif mode == "temporal":
+        if any("image_directory" in entry for entry in data.get("datasets", [data])):
+            raise ValueError("temporal training requires a manifest with explicit frames, motion and validity masks")
         if lengths[0] != lengths[1] + lengths[2] or lengths[1] < 1:
             raise ValueError("sequence_length must equal burn_in + tbptt_length, with both at least 1")
         if args.loss_temporal and lengths[2] < 2:
@@ -210,9 +234,7 @@ def build_train_config(args, *, lora=False) -> dict:
         _number(optimizer_args["weight_decay"], "optimizer weight_decay")
     if optimizer_type.lower() in ("adafactor", "transformers.optimization.adafactor"):
         if optimizer_args.get("relative_step", True) or optimizer_args.get("warmup_init", False):
-            raise ValueError("NR Adafactor requires --optimizer_args relative_step=False warmup_init=False (constant LR only)")
-    if args.lr_scheduler != "constant":
-        raise ValueError("only --lr_scheduler constant is implemented for NR")
+            raise ValueError("NR Adafactor requires --optimizer_args relative_step=False warmup_init=False")
     _number(args.learning_rate, "--learning_rate", positive=True)
     _number(args.max_grad_norm, "--max_grad_norm")
     optimizer = {
@@ -221,6 +243,7 @@ def build_train_config(args, *, lora=False) -> dict:
         "learning_rate": args.learning_rate,
         "lr_scheduler": args.lr_scheduler,
         "max_grad_norm": args.max_grad_norm,
+        "scheduler": validate_scheduler_config(args),
     }
     loss = {name: getattr(args, f"loss_{name}") for name in ("pre", "out", "edge", "temporal")}
     for name, value in loss.items():
@@ -236,7 +259,10 @@ def build_train_config(args, *, lora=False) -> dict:
         evaluation["sequence_manifest"] = data.pop("sequence_manifest")
     _integer(args.sample_every_n_steps, "--sample_every_n_steps", 0)
     _integer(args.min_sequence_frames, "--min_sequence_frames")
-    if args.sample_every_n_steps and not (data.get("validation_manifest") or evaluation.get("sequence_manifest")):
+    if args.sample_every_n_steps and not (
+        any(entry.get("validation_manifest") or entry.get("sequence_manifest") for entry in data.get("datasets", [data]))
+        or evaluation.get("sequence_manifest")
+    ):
         raise ValueError("evaluation requires a validation_manifest or sequence_manifest in the dataset TOML")
     validate_filename(args.output_name, "--output_name")
     _integer(args.save_every_n_steps, "--save_every_n_steps", 0)
@@ -291,3 +317,62 @@ def build_train_config(args, *, lora=False) -> dict:
 def config_sha256(config: dict) -> str:
     """Hash effective values, not CLI argument order or dataset TOML comments."""
     return hashlib.sha256(json.dumps(config, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+
+
+def validate_scheduler_config(args) -> dict:
+    names = (
+        "lr_scheduler",
+        "lr_warmup_steps",
+        "lr_decay_steps",
+        "lr_scheduler_num_cycles",
+        "lr_scheduler_power",
+        "lr_scheduler_timescale",
+        "lr_scheduler_min_lr_ratio",
+        "lr_scheduler_type",
+        "lr_scheduler_args",
+    )
+    values = {name: getattr(args, name) for name in names}
+    supported = {
+        "constant",
+        "constant_with_warmup",
+        "linear",
+        "cosine",
+        "cosine_with_restarts",
+        "cosine_with_min_lr",
+        "polynomial",
+        "inverse_sqrt",
+        "warmup_stable_decay",
+        "rex",
+        "piecewise_constant",
+    }
+    if not args.lr_scheduler_type and args.lr_scheduler not in supported:
+        raise ValueError(f"unsupported NR lr_scheduler {args.lr_scheduler!r}")
+    counts = {}
+    for name in ("lr_warmup_steps", "lr_decay_steps"):
+        value = values[name]
+        _number(value, name)
+        if value == 0:
+            values[name] = 0
+        if isinstance(value, float) and value >= 1:
+            raise ValueError(f"{name} must be integer steps or a ratio below 1")
+        counts[name] = int(value * args.max_train_steps) if isinstance(value, float) else value
+        if counts[name] > args.max_train_steps:
+            raise ValueError(f"{name} exceeds max_train_steps")
+    if args.lr_scheduler == "constant" and values["lr_warmup_steps"]:
+        raise ValueError("constant scheduler requires lr_warmup_steps=0")
+    if args.lr_scheduler == "warmup_stable_decay" and sum(counts.values()) > args.max_train_steps:
+        raise ValueError("scheduler warmup and decay exceed max_train_steps")
+    _integer(args.lr_scheduler_num_cycles, "lr_scheduler_num_cycles")
+    _number(args.lr_scheduler_power, "lr_scheduler_power", positive=True)
+    if args.lr_scheduler_timescale is not None:
+        _integer(args.lr_scheduler_timescale, "lr_scheduler_timescale")
+    if args.lr_scheduler == "inverse_sqrt" and not args.lr_scheduler_timescale and not counts["lr_warmup_steps"]:
+        raise ValueError("inverse_sqrt requires positive warmup or lr_scheduler_timescale")
+    if args.lr_scheduler_min_lr_ratio is not None:
+        _number(args.lr_scheduler_min_lr_ratio, "lr_scheduler_min_lr_ratio")
+        if args.lr_scheduler_min_lr_ratio > 1:
+            raise ValueError("lr_scheduler_min_lr_ratio must be <= 1")
+    values["lr_scheduler_power"] = float(args.lr_scheduler_power)
+    extras = _key_value_args(args.lr_scheduler_args, "lr_scheduler_args")
+    values["lr_scheduler_args"] = [f"{key}={value!r}" for key, value in sorted(extras.items())] if extras else None
+    return values

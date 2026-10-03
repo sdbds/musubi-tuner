@@ -6,11 +6,11 @@ This is an experimental, standalone supervised-training path for DLSS-NR 310.8.0
 not a diffusion trainer or an NVIDIA DLL replacement. It provides canonical
 weight conversion, default FP32 full/LoRA training, still/closed-loop inference, adapter
 merge, and checked optimizer-state resume. The two dataset examples enable the
-project's shared resolution buckets with a 512 x 512 area budget and `bucket_no_upscale` enabled.
+project's shared resolution buckets with a 1024 x 1024 area budget and `bucket_no_upscale` enabled.
 Set `enable_bucket = false` for the original strict fixed-resolution behavior.
 Each input and its target, controls, motion and masks must share the original pixel grid.
 
-Users must provide their own weights, paired RGB data, encoded control lanes and,
+Users must provide their own weights, paired RGB data, fixed condition settings or encoded control lanes and,
 for non-reset temporal frames, motion and validity masks. No weights, DLLs or game
 assets are included. See [source attribution](../src/musubi_tuner/dlssnr/NOTICE.md).
 
@@ -35,8 +35,8 @@ an existing run directory; use `--resume` for a matching checkpoint. Sample IDs
 must be portable filenames, unique without regard to case. The commands and
 manifest contract below apply to both full and LoRA training.
 
-Use `--dataset_config` for a **dataset-only TOML** with `[general]` and one
-`[[datasets]]` entry. Model, optimizer, LoRA, loss, evaluation and output settings
+Use `--dataset_config` for a **dataset-only TOML** with `[general]` and one or more
+`[[datasets]]` entries. Model, optimizer, LoRA, loss, evaluation and output settings
 are CLI arguments, using the project's standard names such as `--optimizer_type`,
 `--optimizer_args`, `--learning_rate`, `--network_dim` and `--network_alpha`.
 The old all-in-one `--config_file` training interface is no longer accepted.
@@ -52,18 +52,32 @@ configuration snapshot for provenance/resume, not another user configuration fil
 
 ```toml
 [general]
-resolution = [512, 512]
+resolution = [1024, 1024]
 batch_size = 1
 enable_bucket = true
 bucket_no_upscale = true
 
 [[datasets]]
-train_manifest = "../data/train_single.jsonl"
+image_directory = "../data/target"
+control_directory = "../data/input"
+num_repeats = 1
+nr_controls_mode = "fixed"
+nr_style = 0
+nr_tone = 1.0
+nr_structure = 1.0
+nr_skin = -1.0
+nr_auto_mask = true
 # validation_manifest = "../data/validation_single.jsonl"
 # sequence_manifest = "../data/validation_sequences.jsonl"
 ```
 
-`resolution`、`batch_size`、`enable_bucket` 和 `bucket_no_upscale` 可在 `[[datasets]]` 中覆盖 `[general]`。当前仍只支持一个 manifest 数据集入口，但同一清单可以混合横图、竖图和不同原始尺寸。编码、逐帧 motion 和 mask 等信息仍放在 JSONL manifest 中。
+`resolution`、`batch_size`、`enable_bucket`、`bucket_no_upscale` 和 `num_repeats` 可在各个 `[[datasets]]` 中覆盖 `[general]`。多个数据集分别保持其批量大小、重复次数、尺寸和条件设置。目录模式复用项目图像编辑的数据源匹配规则，但每张目标图必须且只能匹配一张输入控制图；缺配、多配、像素网格不一致会报错，不会静默选第一张或独立缩放。
+
+未填写 `resolution` 时默认使用 `[1024, 1024]`；显式填写的旧尺寸不变。开启分桶时这是面积预算，不会将每张图强制拉伸成正方形。
+
+五通道条件在加载时根据 `nr_style`、`nr_tone`、`nr_structure`、`nr_skin`、`nr_auto_mask` 生成，不落地额外 JSONL/NPY。tone/structure 范围为 `[0,1]`；skin 可为 `[0,1]` 或 `-1`（跟随 structure）。auto mask 是模型条件开关，不会生成训练监督蒙版，也不引入分割模型。style 只影响网络条件，输出仍不包含 DLL 后处理调色。
+
+旧数据仍可用 `train_manifest` 替代两个目录字段；默认 `nr_controls_mode = "files"`，读取原有 `controls_path`。选择 `fixed` 时 TOML 条件显式覆盖该数据集及其验证清单内的 `controls_path`，不读取被覆盖的 NPY。时序数据继续用清单明确声明帧序、motion 和有效性蒙版，不会把普通目录图片自动伪装成时序片段。`caption_extension` 和 `cache_directory` 可随公共数据集配置保留，但 NR 不读取 caption 或扩散缓存。
 
 TOML 中的 `[model]`、`[training]`、`[optimizer]`、`[lora]`、`[loss]`、`[output]` 等旧训练配置会明确报错，不再作为另一套超参数来源。自动生成的 `run_config.json` 保留完整展开值，仅供追溯和恢复校验。
 
@@ -255,7 +269,7 @@ python dlssnr_train_network.py \
 | `--forward_validation_report` | 可选基座验收证据；仅显式指定时检查，不是训练前置条件。 |
 | `--development_smoke` | 仅限开发测试，显式允许不完整来源或随机初始化；普通训练不需要。 |
 
-例如，将优化器选项换成 `--optimizer_type SGD --optimizer_args momentum=0.9 weight_decay=0.0`，会实际构造 SGD，而不是只改变配置标签。Adafactor 必须显式给 `--optimizer_args relative_step=False warmup_init=False`。当前仍只支持 constant LR；schedule-free 的权重切换和需要 closure 的优化器不支持，会明确报错。
+例如，将优化器选项换成 `--optimizer_type SGD --optimizer_args momentum=0.9 weight_decay=0.0`，会实际构造 SGD，而不是只改变配置标签。Adafactor 必须显式给 `--optimizer_args relative_step=False warmup_init=False`。学习率调度复用项目公共工厂，支持 constant、constant_with_warmup、linear、cosine、cosine_with_restarts、cosine_with_min_lr、polynomial、inverse_sqrt、warmup_stable_decay。相关 warmup/decay、cycles、power、timescale、min_lr_ratio 参数沿用公共 CLI。每次成功的全局 optimizer update 推进一次调度器；梯度累积、DDP rank 和溢出重试不额外推进。调度器状态随训练状态保存并参与恢复；改变调度配置不能 exact resume。schedule-free 的权重切换和需要 closure 的优化器仍不支持。
 
 从 optimizer 更新边界继续时，在**原来的完整训练命令**后追加恢复参数，保留原有有效参数和数据配置。例如：
 

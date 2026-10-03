@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from torch.utils.data import Dataset
 from musubi_tuner.dataset.architectures import ARCHITECTURE_DLSSNR
 from musubi_tuner.dataset.bucket import BucketBatchManager, BucketSelector
 from musubi_tuner.dlssnr.filenames import validate_filename
+from musubi_tuner.dlssnr.controls import fixed_control_tensor, resolve_fixed_controls
 from musubi_tuner.dlssnr.geometry import resolve_geometry
 from musubi_tuner.dlssnr.identity import file_sha256, json_sha256
 
@@ -119,6 +121,8 @@ class NRDataset(Dataset):
         require_temporal_mask=True,
         enable_bucket=False,
         bucket_no_upscale=False,
+        rows=None,
+        fixed_controls=None,
     ):
         self.path = Path(path).resolve()
         self.width, self.height = width, height
@@ -127,18 +131,30 @@ class NRDataset(Dataset):
         self.require_temporal_mask = require_temporal_mask
         self.enable_bucket = enable_bucket
         self.bucket_no_upscale = bucket_no_upscale if enable_bucket else False
+        self.fixed_controls = resolve_fixed_controls(fixed_controls) if fixed_controls is not None else None
         self.bucket_sizes = []
         self.original_sizes = []
         selector = BucketSelector((width, height), True, self.bucket_no_upscale, ARCHITECTURE_DLSSNR) if enable_bucket else None
         self.rows = []
         self.sequence_ids = set()
         sample_ids = set()
-        self.files = {self.path}
-        for line_number, line in enumerate(self.path.read_text(encoding="utf-8").splitlines(), 1):
-            if not line.strip():
-                continue
-            row = json.loads(line)
+        self.files = {self.path} if rows is None else set()
+        source_rows = (
+            (
+                (number, json.loads(line))
+                for number, line in enumerate(self.path.read_text(encoding="utf-8").splitlines(), 1)
+                if line.strip()
+            )
+            if rows is None
+            else enumerate(rows, 1)
+        )
+        for line_number, row in source_rows:
+            row = copy.deepcopy(row)
             context = f"{self.path}:{line_number}"
+            if not isinstance(row, dict):
+                raise ValueError(f"{context}: sample must be an object")
+            if self.fixed_controls is not None:
+                row.setdefault("controls_encoding", "dlssnr_lanes_10_14_v1")
             if row.get("schema") != "dlssnr_pairs_v1":
                 raise ValueError(f"{context}: schema must be dlssnr_pairs_v1")
             for key, value in (("source_encoding", "srgb_proxy"), ("controls_encoding", "dlssnr_lanes_10_14_v1")):
@@ -172,7 +188,11 @@ class NRDataset(Dataset):
                 reset = frame.get("reset")
                 if type(reset) is not bool or (index == 0 and not reset):
                     raise ValueError(f"{context}: reset must be boolean and the first frame must reset")
-                required = {"input_path", "controls_path"}
+                required = {"input_path"}
+                if self.fixed_controls is None:
+                    required.add("controls_path")
+                else:
+                    frame.pop("controls_path", None)
                 if require_target:
                     required.add("target_path")
                 if not reset:
@@ -227,7 +247,11 @@ class NRDataset(Dataset):
     def _load_frame(self, frame, motion_layout, sample_index):
         source = _proxy_image(Path(frame["input_path"]))
         target = _proxy_image(Path(frame["target_path"])) if "target_path" in frame else None
-        controls = _controls(Path(frame["controls_path"]))
+        controls = (
+            _controls(Path(frame["controls_path"]))
+            if self.fixed_controls is None
+            else fixed_control_tensor(self.fixed_controls, source.shape[-1], source.shape[-2])
+        )
         shape = self.original_sizes[sample_index][::-1] if self.enable_bucket else (self.height, self.width)
         if source.shape[-2:] != shape or controls.shape[-2:] != shape or (target is not None and target.shape != source.shape):
             expected = f"bucket {self.width}x{self.height}"
@@ -286,6 +310,8 @@ class NRDataset(Dataset):
                 "bucket_no_upscale": self.bucket_no_upscale,
                 "bucket_sizes": self.bucket_sizes,
                 "original_sizes": self.original_sizes,
+                "fixed_controls": self.fixed_controls,
+                "rows": self.rows,
                 "files": {str(path): file_sha256(path) for path in sorted(self.files)},
             }
         )
@@ -295,19 +321,27 @@ class NRBatchPlan:
     """Deterministic same-bucket batches, including partial tails without duplication."""
 
     def __init__(self, dataset, batch_size):
-        buckets = {}
+        group_indices = getattr(dataset, "group_indices", [0] * len(dataset))
+        batch_sizes = getattr(dataset, "batch_sizes", [batch_size])
+        groups = [{} for _ in batch_sizes]
         for index, (bucket, row) in enumerate(zip(dataset.bucket_sizes, dataset.rows)):
-            buckets.setdefault((*bucket, len(row["frames"])), []).append(index)
-        self.manager = BucketBatchManager(buckets, batch_size)
+            groups[group_indices[index]].setdefault((*bucket, len(row["frames"])), []).append(index)
+        self.managers = [BucketBatchManager(buckets, size) for buckets, size in zip(groups, batch_sizes)]
+        self.manager = self.managers[0]
+        self.batches = [manager.get_batch_items(index) for manager in self.managers for index in range(len(manager))]
         self.prefix_counts = [0]
-        for index in range(len(self.manager)):
-            self.prefix_counts.append(self.prefix_counts[-1] + len(self.manager.get_batch_items(index)))
+        for batch in self.batches:
+            self.prefix_counts.append(self.prefix_counts[-1] + len(batch))
 
     def __len__(self):
-        return len(self.manager)
+        return len(self.batches)
 
     def indices(self, microbatch_index):
-        return self.manager.get_batch_items(microbatch_index % len(self))
+        return self.batches[microbatch_index % len(self)]
+
+    def show_bucket_info(self):
+        for manager in self.managers:
+            manager.show_bucket_info()
 
     def sample_count(self, microbatches):
         epochs, offset = divmod(microbatches, len(self))
@@ -319,16 +353,18 @@ class NRBatchPlan:
             "samples_per_epoch": self.prefix_counts[-1],
             "batches_per_epoch": len(self),
             "batch_size": self.manager.batch_size,
+            "dataset_batch_sizes": [manager.batch_size for manager in self.managers],
             "order_sha256": json_sha256([self.indices(index) for index in range(len(self))]),
             "buckets": [
-                {"resolution": list(key[:2]), "frames": key[2], "samples": len(self.manager.buckets[key])}
-                for key in self.manager.bucket_resos
+                {"resolution": list(key[:2]), "frames": key[2], "samples": len(manager.buckets[key]), "dataset_index": index}
+                for index, manager in enumerate(self.managers)
+                for key in manager.bucket_resos
             ],
         }
 
 
 def load_single_frame_manifest(
-    path, bucket_width, bucket_height, *, require_target=True, enable_bucket=False, bucket_no_upscale=False
+    path, bucket_width, bucket_height, *, require_target=True, enable_bucket=False, bucket_no_upscale=False, fixed_controls=None
 ):
     return NRDataset(
         path,
@@ -340,6 +376,7 @@ def load_single_frame_manifest(
         require_temporal_mask=False,
         enable_bucket=enable_bucket,
         bucket_no_upscale=bucket_no_upscale,
+        fixed_controls=fixed_controls,
     )
 
 
@@ -353,6 +390,7 @@ def load_temporal_manifest(
     require_temporal_mask=None,
     enable_bucket=False,
     bucket_no_upscale=False,
+    fixed_controls=None,
 ):
     if require_temporal_mask is None:
         require_temporal_mask = require_target
@@ -365,7 +403,79 @@ def load_temporal_manifest(
         require_temporal_mask=require_temporal_mask,
         enable_bucket=enable_bucket,
         bucket_no_upscale=bucket_no_upscale,
+        fixed_controls=fixed_controls,
     )
+
+
+def load_directory_pairs(config):
+    from musubi_tuner.dataset.datasources import ImageDirectoryDatasource
+
+    source = ImageDirectoryDatasource(config["image_directory"], control_directory=config["control_directory"])
+    rows = []
+    for target in sorted(source.image_paths):
+        controls = source.control_paths.get(target, [])
+        if len(controls) != 1:
+            raise ValueError(f"{target}: paired NR data requires exactly one matching control image, found {len(controls)}")
+        rows.append(
+            {
+                "schema": "dlssnr_pairs_v1",
+                "sample_id": Path(target).stem,
+                "sequence_id": "directory:" + json_sha256(str(Path(controls[0]).resolve())),
+                "source_encoding": "srgb_proxy",
+                "target_encoding": "srgb_proxy",
+                "frames": [
+                    {
+                        "frame_index": 0,
+                        "reset": True,
+                        "input_path": str(Path(controls[0]).resolve()),
+                        "target_path": str(Path(target).resolve()),
+                    }
+                ],
+            }
+        )
+    return NRDataset(
+        config["image_directory"],
+        *config["bucket_size"],
+        1,
+        single_frame=True,
+        require_temporal_mask=False,
+        enable_bucket=config["enable_bucket"],
+        bucket_no_upscale=config["bucket_no_upscale"],
+        rows=rows,
+        fixed_controls=config["fixed_controls"],
+    )
+
+
+class NRDatasetCollection(Dataset):
+    """Combine paired sources without merging their batch-size or control policies."""
+
+    def __init__(self, datasets, configs):
+        self.datasets = datasets
+        self.batch_sizes = [config["batch_size"] for config in configs]
+        self.repeats = [config.get("num_repeats", 1) for config in configs]
+        self.references, self.rows, self.bucket_sizes, self.group_indices = [], [], [], []
+        self.sequence_ids = set().union(*(dataset.sequence_ids for dataset in datasets))
+        for group, (dataset, repeats) in enumerate(zip(datasets, self.repeats)):
+            for repeat in range(repeats):
+                for index, row in enumerate(dataset.rows):
+                    self.references.append((group, index))
+                    self.rows.append({**row, "sample_id": f"d{group}-r{repeat}-{row['sample_id']}"})
+                    self.bucket_sizes.append(dataset.bucket_sizes[index])
+                    self.group_indices.append(group)
+
+    def __len__(self):
+        return len(self.references)
+
+    def __getitem__(self, index):
+        group, local_index = self.references[index]
+        return {**self.datasets[group][local_index], "sample_id": self.rows[index]["sample_id"]}
+
+    def validate(self):
+        for dataset in self.datasets:
+            dataset.validate()
+
+    def fingerprint(self):
+        return json_sha256({"sources": [dataset.fingerprint() for dataset in self.datasets], "repeats": self.repeats})
 
 
 def collate_single_frames(samples):

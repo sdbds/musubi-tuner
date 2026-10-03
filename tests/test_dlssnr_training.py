@@ -152,6 +152,74 @@ def make_args(tmp_path, *, lora=False, accum=2, batch=1, mode="single_frame", ev
 
 
 @pytest.mark.parametrize("lora", [False, True])
+def test_linear_scheduler_counts_updates_and_resumes_exactly(tmp_path, small_math, lora):
+    args = make_args(tmp_path, lora=lora, accum=2)
+    args.lr_scheduler = "linear"
+    train = trainer.train_lora_from_args if lora else trainer.train_from_args
+    train(args)
+    output = tmp_path / "output/dlssnr"
+    first = torch.load(output / "state-step000001/trainer_state.pt", weights_only=True)
+    second = torch.load(output / "state-step000002/trainer_state.pt", weights_only=True)
+    assert first["scheduler"]["last_epoch"] == 1
+    assert second["scheduler"]["last_epoch"] == 2
+    assert first["optimizer"]["param_groups"][0]["lr"] == pytest.approx(0.0005)
+    assert second["optimizer"]["param_groups"][0]["lr"] == 0
+    filename = "adapter.safetensors" if lora else "model.safetensors"
+    expected = {name: tensor.clone() for name, tensor in load_file(output / "final" / filename).items()}
+    args.resume = output / "state-step000001"
+    train(args)
+    for name, tensor in load_file(output / "final" / filename).items():
+        torch.testing.assert_close(tensor, expected[name], rtol=0, atol=0)
+
+
+def test_scheduler_does_not_advance_on_retried_update(tmp_path, small_math, monkeypatch):
+    args = make_args(tmp_path)
+    args.lr_scheduler = "linear"
+    update = trainer.optimizer_update
+    attempts = []
+
+    def overflow_once(accelerator, module, optimizer, max_grad_norm):
+        attempts.append(optimizer.param_groups[0]["lr"])
+        return False if len(attempts) == 1 else update(accelerator, module, optimizer, max_grad_norm)
+
+    monkeypatch.setattr(trainer, "optimizer_update", overflow_once)
+    trainer.train_from_args(args)
+    assert attempts == pytest.approx([0.001, 0.001, 0.0005])
+    state = torch.load(tmp_path / "output/dlssnr/state-step000002/trainer_state.pt", weights_only=True)
+    assert state["scheduler"]["last_epoch"] == 2
+
+
+@pytest.mark.parametrize("lora", [False, True])
+def test_directory_pairs_train_with_fixed_conditions_and_scheduler(tmp_path, small_math, lora):
+    args = make_args(tmp_path, lora=lora)
+    inputs, targets = tmp_path / "inputs", tmp_path / "targets"
+    inputs.mkdir()
+    targets.mkdir()
+    with Image.open(tmp_path / "source.png") as source:
+        source.save(inputs / "pair.png")
+    with Image.open(tmp_path / "target.png") as target:
+        target.save(targets / "pair.png")
+    args.dataset_config.write_text(
+        toml.dumps(
+            {
+                "general": {"resolution": [48, 48]},
+                "datasets": [{"image_directory": "targets", "control_directory": "inputs", "nr_auto_mask": False}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    args.lr_scheduler = "cosine"
+    (trainer.train_lora_from_args if lora else trainer.train_from_args)(args)
+    output = tmp_path / "output/dlssnr"
+    metadata = json.loads((output / "run_config.json").read_text())
+    assert metadata["config"]["data"]["fixed_controls"]["nr_auto_mask"] is False
+    assert metadata["bucket_plan"]["samples_per_epoch"] == 1
+    state = torch.load(output / "state-step000002/trainer_state.pt", weights_only=True)
+    assert state["scheduler"]["last_epoch"] == 2
+    assert state["optimizer"]["param_groups"][0]["lr"] == 0
+
+
+@pytest.mark.parametrize("lora", [False, True])
 def test_output_names_isolate_weights_state_logs_and_evaluation(tmp_path, small_math, lora):
     args = make_args(tmp_path, lora=lora, evaluate=True)
     args.output_name = "experiment_a"

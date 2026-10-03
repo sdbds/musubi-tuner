@@ -13,10 +13,12 @@ from musubi_tuner.dlssnr.artifacts import inspect_canonical, save_canonical, wri
 from musubi_tuner.dlssnr.config import build_train_config, config_sha256
 from musubi_tuner.dlssnr.dataset import (
     NRBatchPlan,
+    NRDatasetCollection,
     collate_clips,
     collate_single_frames,
     load_single_frame_manifest,
     load_temporal_manifest,
+    load_directory_pairs,
 )
 from musubi_tuner.dlssnr.evaluation import evaluate
 from musubi_tuner.dlssnr.identity import file_sha256, implementation_identity
@@ -33,6 +35,7 @@ from musubi_tuner.training.dlssnr_services import (
     coordinated_call,
     create_accelerator,
     create_nr_optimizer,
+    create_nr_lr_scheduler,
     evaluation_mode,
     gather_rank_values,
     move_batch,
@@ -143,9 +146,39 @@ def temporal_clip_update(model, optimizer, batch, seeds, loss_weights, burn_in):
 
 def _datasets(config):
     data, training = config["data"], config["training"]
+    entries = data.get(
+        "datasets",
+        [
+            {
+                **data,
+                "batch_size": training["batch_size"],
+                **{key: config["evaluation"][key] for key in ("sequence_manifest",) if key in config["evaluation"]},
+            }
+        ],
+    )
+    sources, validation = [], {}
+    for index, entry in enumerate(entries):
+        train, evaluations = _dataset_entry(entry, training, config["loss"], config["evaluation"])
+        sources.append(train)
+        validation.update({(f"dataset{index}_{name}" if len(entries) > 1 else name): value for name, value in evaluations.items()})
+    train = NRDatasetCollection(sources, entries) if len(entries) > 1 or entries[0].get("num_repeats", 1) != 1 else sources[0]
+    for name, dataset in validation.items():
+        if overlap := train.sequence_ids & dataset.sequence_ids:
+            raise ValueError(f"train/{name} sequence overlap: {sorted(overlap)}")
+    for dataset in (train, *validation.values()):
+        dataset.validate()
+    return train, validation
+
+
+def _dataset_entry(data, training, loss, evaluation):
     width, height = data["bucket_size"]
     buckets = {name: data[name] for name in ("enable_bucket", "bucket_no_upscale")}
-    if training["mode"] == "single_frame":
+    buckets["fixed_controls"] = data.get("fixed_controls")
+    if "image_directory" in data:
+        if training["mode"] != "single_frame":
+            raise ValueError("temporal training requires a manifest with explicit frames and motion")
+        train = load_directory_pairs(data)
+    elif training["mode"] == "single_frame":
         train = load_single_frame_manifest(data["train_manifest"], width, height, **buckets)
     else:
         train = load_temporal_manifest(
@@ -153,7 +186,7 @@ def _datasets(config):
             width,
             height,
             training["sequence_length"],
-            require_temporal_mask=bool(config["loss"]["temporal"]),
+            require_temporal_mask=bool(loss["temporal"]),
             **buckets,
         )
     validation = {}
@@ -161,18 +194,11 @@ def _datasets(config):
         validation["validation"] = load_temporal_manifest(
             data["validation_manifest"], width, height, None, require_temporal_mask=False, **buckets
         )
-    if config["evaluation"].get("sequence_manifest"):
-        sequences = load_temporal_manifest(
-            config["evaluation"]["sequence_manifest"], width, height, None, require_temporal_mask=False, **buckets
-        )
-        if any(len(row["frames"]) < config["evaluation"]["min_sequence_frames"] for row in sequences.rows):
+    if data.get("sequence_manifest"):
+        sequences = load_temporal_manifest(data["sequence_manifest"], width, height, None, require_temporal_mask=False, **buckets)
+        if any(len(row["frames"]) < evaluation["min_sequence_frames"] for row in sequences.rows):
             raise ValueError("evaluation sequence is shorter than min_sequence_frames")
         validation["sequences"] = sequences
-    for name, dataset in validation.items():
-        if overlap := train.sequence_ids & dataset.sequence_ids:
-            raise ValueError(f"train/{name} sequence overlap: {sorted(overlap)}")
-    for dataset in (train, *validation.values()):
-        dataset.validate()
     return train, validation
 
 
@@ -219,7 +245,7 @@ class NRSupervisedTrainer:
         train_data, validation = coordinated_call(accelerator, lambda: _datasets(config))
         batch_plan = NRBatchPlan(train_data, training["batch_size"])
         if accelerator.is_main_process:
-            batch_plan.manager.show_bucket_info()
+            batch_plan.show_bucket_info()
         source_dir = config["model"].get("model_dir")
         source_identity = coordinated_call(
             accelerator,
@@ -236,6 +262,9 @@ class NRSupervisedTrainer:
         source_forward_validated = "forward_validation_report" in source_identity
         model, network, optimizer, base_identity = coordinated_call(accelerator, lambda: self._initialize_model(policy))
         optimizer_cfg = config["optimizer"]
+        scheduler = coordinated_call(
+            accelerator, lambda: create_nr_lr_scheduler(optimizer, optimizer_cfg, training["max_train_steps"])
+        )
         train_module = NRTrainModule(model, config["loss"], training["burn_in"], network)
         _check_optimizer(train_module, optimizer)
         parameter_map = {
@@ -286,6 +315,7 @@ class NRSupervisedTrainer:
         }
         for name in (
             "config.py",
+            "controls.py",
             "dataset.py",
             "filenames.py",
             "training_step.py",
@@ -295,7 +325,7 @@ class NRSupervisedTrainer:
             "attention.py",
         ):
             identity["implementation"][name] = file_sha256(Path(__file__).parents[1] / "dlssnr" / name)
-        for name in ("dlssnr_trainer.py", "dlssnr_services.py", "dlssnr_state.py", "optimizer_setup.py"):
+        for name in ("dlssnr_trainer.py", "dlssnr_services.py", "dlssnr_state.py", "optimizer_setup.py", "lr_scheduler.py"):
             identity["implementation"][name] = file_sha256(Path(__file__).parent / name)
         for name in ("bucket.py", "architectures.py"):
             identity["implementation"][f"dataset/{name}"] = file_sha256(Path(__file__).parents[1] / "dataset" / name)
@@ -367,7 +397,7 @@ class NRSupervisedTrainer:
                     load_adapter(network, Path(resume) / "adapter.safetensors", base_identity)
                 else:
                     model.load_canonical(str(Path(resume) / "model.safetensors"))
-                restore_state(restored, optimizer, accelerator=accelerator)
+                restore_state(restored, optimizer, accelerator=accelerator, scheduler=scheduler)
 
             coordinated_call(accelerator, restore)
 
@@ -389,7 +419,7 @@ class NRSupervisedTrainer:
                 main_only=True,
             )
             if with_state:
-                save_state(folder, optimizer, identity, update, cursor, accelerator=accelerator)
+                save_state(folder, optimizer, identity, update, cursor, accelerator=accelerator, scheduler=scheduler)
 
         for step in range(completed, steps):
             microbatches = coordinated_call(
@@ -430,11 +460,13 @@ class NRSupervisedTrainer:
                 raise RuntimeError("FP16 gradient overflow exceeded --max_overflow_retries; no successful update saved")
             clear_lane15_state(model, optimizer)
             coordinated_call(accelerator, lambda: assert_finite_parameters(train_module))
+            scheduler.step()
             count = reduce_values(accelerator, {"samples": sum(len(seeds) for _, seeds in microbatches)})
             cursor += int(count["samples"])
             update = step + 1
             metrics = reduce_values(accelerator, metrics, max_keys=("blend_max",))
             metrics["overflow_retries"] = attempt
+            metrics["learning_rate"] = scheduler.get_last_lr()[0]
 
             def write_metrics():
                 logger.info("NR update %d/%d loss=%.6f", update, steps, metrics["loss"])
