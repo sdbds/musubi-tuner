@@ -1,6 +1,6 @@
 # Dataset-only configuration. Training and LoRA settings are CLI arguments.
 [general]
-resolution = [512, 512] # bucket area budget; exact size when enable_bucket = false
+resolution = [1024, 1024] # bucket area budget; exact size when enable_bucket = false
 batch_size = 1
 enable_bucket = true
 bucket_no_upscale = true

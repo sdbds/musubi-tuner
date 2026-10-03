@@ -230,8 +230,9 @@ def test_distributed_dropout_resume_restores_each_rank_and_rejects_world_change(
     codes, logs = _launch(tmp_path, lora=True, dropout=0.3)
     assert codes == [0, 0], logs
     folder = tmp_path / "output/ddp"
-    expected = load_file(folder / "final/adapter.safetensors")
+    expected = {name: value.clone() for name, value in load_file(folder / "final/adapter.safetensors").items()}
     state = torch.load(folder / "state-step000002/trainer_state.pt", weights_only=True)
+    assert state["scheduler"]["last_epoch"] == state["global_update"] == 2
     codes, logs = _launch(tmp_path, lora=True, dropout=0.3, resume=True)
     assert codes == [0, 0], logs
     torch.testing.assert_close(load_file(folder / "final/adapter.safetensors"), expected, rtol=0, atol=0)
@@ -269,7 +270,7 @@ def test_fp8_frozen_buffers_support_ddp_resume_without_fp8_collectives(tmp_path)
     codes, logs = _launch(tmp_path, lora=True, dropout=0.3)
     assert codes == [0, 0], logs
     folder = tmp_path / "output/ddp"
-    expected = load_file(folder / "final/adapter.safetensors")
+    expected = {name: value.clone() for name, value in load_file(folder / "final/adapter.safetensors").items()}
     codes, logs = _launch(tmp_path, lora=True, dropout=0.3, resume=True)
     assert codes == [0, 0], logs
     torch.testing.assert_close(load_file(folder / "final/adapter.safetensors"), expected, rtol=0, atol=0)

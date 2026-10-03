@@ -187,7 +187,7 @@ def test_fp8_lora_runner_updates_and_exactly_resumes(tmp_path, monkeypatch, scal
         args.numerics_profile, args.fp8_base, args.fp8_scaled = "train_experimental", True, scaled
         trainer.train_lora_from_args(args)
         folder = args.output_dir / args.output_name
-        expected = load_file(folder / "final/adapter.safetensors")
+        expected = {name: value.clone() for name, value in load_file(folder / "final/adapter.safetensors").items()}
         assert any(torch.count_nonzero(value) for name, value in expected.items() if name.endswith("lora_up"))
         metadata = json.loads((folder / "run_config.json").read_text())
         assert metadata["base_quantization"]["scaled"] is scaled

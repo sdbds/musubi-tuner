@@ -29,9 +29,17 @@ def create_nr_optimizer(parameters, config):
         raise ValueError("closure-based optimizers such as LBFGS are not supported by the NR update loop")
     if callable(getattr(optimizer, "train", None)) or callable(getattr(optimizer, "eval", None)):
         raise ValueError("schedule-free optimizer train/eval weight switching is not implemented for NR")
-    if args.learning_rate is None or args.lr_scheduler != "constant":
-        raise ValueError("NR requires an explicit learning rate and a constant scheduler")
+    if args.learning_rate is None:
+        raise ValueError("NR requires an explicit learning rate")
     return optimizer
+
+
+def create_nr_lr_scheduler(optimizer, config, max_train_steps):
+    from musubi_tuner.training.lr_scheduler import create_lr_scheduler
+
+    args = SimpleNamespace(learning_rate=config["learning_rate"], max_train_steps=max_train_steps, **config["scheduler"])
+    # NR advances once per successful global update, not once per rank or microbatch.
+    return create_lr_scheduler(args, optimizer, num_processes=1)
 
 
 def reject_unsupported_runtime(precision="no"):

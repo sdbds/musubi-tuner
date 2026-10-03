@@ -5,6 +5,10 @@ and numerical operations in this package are adapted from the MIT-licensed
 [OpenDLSS-NR](https://github.com/maanHimself/OpenDLSS-NR) project, commit
 `9d08f4184bbcb9d858e2fb7a7834ec0837a9d2f1`.
 
+Fixed condition encoding in `controls.py` follows that revision's
+[`nr_preprocess.comp`](https://github.com/maanHimself/OpenDLSS-NR/blob/9d08f4184bbcb9d858e2fb7a7834ec0837a9d2f1/demo/shaders/nr_preprocess.comp).
+These controls do not add an external segmentation model or change the loss mask.
+
 Copyright (c) 2026 maan. The original copyright and permission notice is retained
 in [LICENSE.OpenDLSS-NR](LICENSE.OpenDLSS-NR). The PyTorch training integration and
 surrogate gradients are not an upstream OpenDLSS-NR implementation.

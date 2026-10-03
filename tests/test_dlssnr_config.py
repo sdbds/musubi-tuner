@@ -42,7 +42,7 @@ def make_args(tmp_path, options=(), *, lora=False, dataset=None):
         ["--loss_pre", "-1"],
         ["--max_grad_norm", "-1"],
         ["--sample_every_n_steps", "1"],
-        ["--lr_scheduler", "linear"],
+        ["--lr_scheduler", "not_a_scheduler"],
     ],
 )
 def test_rejects_invalid_or_unsupported_cli_configuration(tmp_path, options):
@@ -75,8 +75,31 @@ def test_legacy_training_toml_is_rejected_with_migration_guidance(tmp_path):
 
 def test_multiple_dataset_entries_are_not_silently_ignored(tmp_path):
     args = make_args(tmp_path, dataset={"datasets": [{"train_manifest": "one.jsonl"}, {"train_manifest": "two.jsonl"}]})
-    with pytest.raises(ValueError, match="exactly one"):
-        load_dataset_config(args.dataset_config)
+    data = load_dataset_config(args.dataset_config)
+    assert [Path(entry["train_manifest"]).name for entry in data["datasets"]] == ["one.jsonl", "two.jsonl"]
+
+
+def test_default_dataset_resolution_and_explicit_override(tmp_path):
+    args = make_args(
+        tmp_path,
+        dataset={
+            "datasets": [
+                {"train_manifest": "default.jsonl"},
+                {"train_manifest": "explicit.jsonl", "resolution": [512, 768]},
+            ]
+        },
+    )
+    entries = load_dataset_config(args.dataset_config)["datasets"]
+    assert entries[0]["bucket_size"] == [1024, 1024]
+    assert entries[1]["bucket_size"] == [512, 768]
+
+
+@pytest.mark.parametrize("mode", ["single", "temporal"])
+def test_dataset_templates_use_1024_bucket_budget(mode):
+    path = Path(__file__).resolve().parents[1] / "configs" / f"dlssnr_dataset_{mode}.toml"
+    data = load_dataset_config(path)
+    assert data["bucket_size"] == [1024, 1024]
+    assert data["enable_bucket"] and data["bucket_no_upscale"]
 
 
 def test_pretrained_weights_are_required_unless_smoke_is_explicit(tmp_path):

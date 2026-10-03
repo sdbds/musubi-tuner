@@ -4,7 +4,7 @@ import argparse
 from pathlib import Path
 
 from musubi_tuner.dlssnr.profiles import PROFILE_ID
-from musubi_tuner.training.parser_common import add_optimizer_args
+from musubi_tuner.training.parser_common import add_lr_scheduler_args, add_optimizer_args
 
 
 def setup_parser(*, lora=False) -> argparse.ArgumentParser:
@@ -13,7 +13,10 @@ def setup_parser(*, lora=False) -> argparse.ArgumentParser:
         allow_abbrev=False,
     )
     parser.add_argument(
-        "--dataset_config", type=Path, required=True, help="Dataset-only TOML: [general] and one [[datasets]] entry."
+        "--dataset_config",
+        type=Path,
+        required=True,
+        help="Dataset-only TOML: [general] and [[datasets]] directory pairs or manifests.",
     )
     parser.add_argument(
         "--model_dir", type=Path, help="Pretrained canonical model directory; required outside development smoke runs."
@@ -56,9 +59,8 @@ def setup_parser(*, lora=False) -> argparse.ArgumentParser:
 
     add_optimizer_args(parser)
     parser.set_defaults(optimizer_type="AdamW", learning_rate=1e-4 if lora else 1e-5, max_grad_norm=0.0)
-    parser.add_argument(
-        "--lr_scheduler", default="constant", choices=["constant"], help="Only the constant schedule is implemented."
-    )
+    add_lr_scheduler_args(parser)
+    parser.set_defaults(lr_scheduler_min_lr_ratio=0.1)
     for name, default in (("pre", 1.0), ("out", 1.0), ("edge", 0.05), ("temporal", 0.0)):
         parser.add_argument(f"--loss_{name}", type=float, default=default)
     parser.add_argument("--sample_every_n_steps", type=int, default=0, help="Evaluate the validation manifests every N updates.")

@@ -123,7 +123,7 @@ def test_new_adapter_merge_rejects_missing_required_runtime_metadata(tmp_path, m
     with safe_open(path, framework="pt") as handle:
         metadata = handle.metadata()
     metadata.pop(missing)
-    save_file(load_file(path), str(path), metadata=metadata)
+    save_file({name: value.clone() for name, value in load_file(path).items()}, str(path), metadata=metadata)
     with pytest.raises(ValueError, match="runtime|quantization"):
         lora_dlssnr.merge_to_directory(base, path, tmp_path / "merged")
 
@@ -144,7 +144,7 @@ def test_legacy_v1_adapter_still_merges_with_fp32_baseline(tmp_path, monkeypatch
     metadata["schema"] = "dlssnr_lora_v1"
     for name in ("runtime_policy", "base_quantization"):
         metadata.pop(name, None)
-    save_file(load_file(path), str(path), metadata=metadata)
+    save_file({name: value.clone() for name, value in load_file(path).items()}, str(path), metadata=metadata)
     lora_dlssnr.merge_to_directory(base, path, tmp_path / "merged")
     merged = infer.load_model(tmp_path / "merged", "cpu")
     assert merged.runtime_policy == _policy()
