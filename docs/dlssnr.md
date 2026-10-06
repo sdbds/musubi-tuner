@@ -1,11 +1,12 @@
-# DLSS-NR 310.8.0 训练适配
+# DLSS-NR 310.8.0 Training Support
 
-## English Summary
+## Overview
 
 This is an experimental, standalone supervised-training path for DLSS-NR 310.8.0,
-not a diffusion trainer or an NVIDIA DLL replacement. It provides canonical
-weight conversion, default FP32 full/LoRA training, still/closed-loop inference, adapter
-merge, and checked optimizer-state resume. The two dataset examples enable the
+not a diffusion trainer. Native DLL equivalence remains unverified. It provides
+canonical weight conversion, checked DLL weight import/export, default FP32
+full/LoRA training, still/closed-loop inference, adapter merging and checked
+optimizer-state resume. The two dataset examples enable the
 project's shared resolution buckets with a 1024 x 1024 area budget and `bucket_no_upscale` enabled.
 Set `enable_bucket = false` for the original strict fixed-resolution behavior.
 Each input and its target, controls, motion and masks must share the original pixel grid.
@@ -44,11 +45,18 @@ Dataset-relative paths resolve against the TOML directory; CLI paths resolve
 against the working directory. The generated `run_config.json` is an effective
 configuration snapshot for provenance/resume, not another user configuration file.
 
-这条路径默认使用 FP32 主权重和矩阵累加，用来做配对监督。中间激活、注意力和归约包含明确的 half/E4M3 fake quant 与替代梯度，不能视作普通 FP32 SiLU/softmax 网络。实验模式可以改变矩阵计算精度和注意力核心，但不会自动取得原生一致性资格。输出仍在 proxy 颜色空间里，没有 DLL 后面的 Natural / Cinematic 调色。
+Paired supervision uses FP32 master weights and matrix accumulation by default.
+Intermediate activations, attention and reductions include explicit half/E4M3
+fake quantization and surrogate gradients. Experimental modes can change matrix
+precision and attention kernels, but require separate native-equivalence checks.
+Output remains in proxy color space, before the DLL's Natural/Cinematic grading.
 
-## 配置分工
+## Configuration
 
-和项目其他架构一样，数据集使用 `--dataset_config`，训练超参数使用命令行。单帧全量和 LoRA 共用 [单帧数据集示例](../configs/dlssnr_dataset_single.toml)，时序训练使用 [时序数据集示例](../configs/dlssnr_dataset_temporal.toml)。
+As with other architectures in this project, datasets use `--dataset_config`
+and training hyperparameters use CLI arguments. Single-frame full and LoRA
+training share the [single-frame dataset example](../configs/dlssnr_dataset_single.toml).
+Temporal training uses the [temporal dataset example](../configs/dlssnr_dataset_temporal.toml).
 
 ```toml
 [general]
@@ -71,94 +79,200 @@ nr_auto_mask = true
 # sequence_manifest = "../data/validation_sequences.jsonl"
 ```
 
-`resolution`、`batch_size`、`enable_bucket`、`bucket_no_upscale` 和 `num_repeats` 可在各个 `[[datasets]]` 中覆盖 `[general]`。多个数据集分别保持其批量大小、重复次数、尺寸和条件设置。目录模式复用项目图像编辑的数据源匹配规则，但每张目标图必须且只能匹配一张输入控制图；缺配、多配、像素网格不一致会报错，不会静默选第一张或独立缩放。
+Each `[[datasets]]` entry can override `resolution`, `batch_size`, `enable_bucket`,
+`bucket_no_upscale` and `num_repeats` from `[general]`. Datasets retain their own
+batch sizes, repeat counts, dimensions and conditions. Directory mode reuses the
+project's image-editing source-matching rules, but each target must match exactly
+one input control image. Missing or ambiguous matches and mismatched pixel grids
+raise errors; the loader never picks the first match or resizes inputs independently.
 
-未填写 `resolution` 时默认使用 `[1024, 1024]`；显式填写的旧尺寸不变。开启分桶时这是面积预算，不会将每张图强制拉伸成正方形。
+The default `resolution` is `[1024, 1024]`; existing explicit dimensions are
+unchanged. With bucketing enabled, this is an area budget, not a requirement to
+stretch every image into a square.
 
-五通道条件在加载时根据 `nr_style`、`nr_tone`、`nr_structure`、`nr_skin`、`nr_auto_mask` 生成，不落地额外 JSONL/NPY。tone/structure 范围为 `[0,1]`；skin 可为 `[0,1]` 或 `-1`（跟随 structure）。auto mask 是模型条件开关，不会生成训练监督蒙版，也不引入分割模型。style 只影响网络条件，输出仍不包含 DLL 后处理调色。
+The five condition channels are generated at load time from `nr_style`, `nr_tone`,
+`nr_structure`, `nr_skin` and `nr_auto_mask`, without additional JSONL/NPY files.
+Tone and structure range from `0` to `1`; skin accepts `[0,1]` or `-1` to follow
+structure. Auto mask is a model condition: it does not generate supervision masks
+or add a segmentation model. Style changes the network condition only; output
+still excludes the DLL's postprocessing color grading.
 
-旧数据仍可用 `train_manifest` 替代两个目录字段；默认 `nr_controls_mode = "files"`，读取原有 `controls_path`。选择 `fixed` 时 TOML 条件显式覆盖该数据集及其验证清单内的 `controls_path`，不读取被覆盖的 NPY。时序数据继续用清单明确声明帧序、motion 和有效性蒙版，不会把普通目录图片自动伪装成时序片段。`caption_extension` 和 `cache_directory` 可随公共数据集配置保留，但 NR 不读取 caption 或扩散缓存。
+Existing data can still use `train_manifest` instead of the two directory fields.
+Its default `nr_controls_mode = "files"` reads the existing `controls_path`.
+Selecting `fixed` explicitly overrides `controls_path` in that dataset and its
+validation manifests with the TOML conditions; overridden NPY files are not read.
+Temporal data still requires a manifest declaring frame order, motion and validity
+masks. Ordinary directory images are not automatically treated as clips.
+`caption_extension` and `cache_directory` may remain in shared dataset settings,
+but NR reads neither captions nor diffusion caches.
 
-TOML 中的 `[model]`、`[training]`、`[optimizer]`、`[lora]`、`[loss]`、`[output]` 等旧训练配置会明确报错，不再作为另一套超参数来源。自动生成的 `run_config.json` 保留完整展开值，仅供追溯和恢复校验。
+Legacy TOML training sections such as `[model]`, `[training]`, `[optimizer]`,
+`[lora]`, `[loss]` and `[output]` raise errors rather than providing a second source
+of hyperparameters. The generated `run_config.json` stores fully resolved values
+for provenance and resume validation only.
 
-## 分桶与配对变换
+## Bucketing and Paired Transforms
 
-分桶调用项目公共 `BucketSelector`，同桶组批调用 `BucketBatchManager` 的公共样本选择接口，不读取 diffusion 的 latent/text-encoder 缓存。NR 使用独立架构标识 `nr`，分桶步长为 16，桶的每一轴至少 48 像素；模型内部 padded field 的几何和前向没有改变。
+Bucketing uses the shared `BucketSelector`, and same-bucket batches use the public
+sample-selection interface of `BucketBatchManager`. Neither reads diffusion latent
+or text-encoder caches. NR has its own architecture ID, `nr`, with a bucket step of
+16 and a minimum of 48 pixels on each axis. Internal padded-field geometry and
+forward computation are unchanged.
 
-- `enable_bucket = true` 时，`resolution` 的宽高乘积表示桶面积预算，选桶依据原始输入的宽高比，不会把所有图强制变成正方形。比如预算为 `128 x 128` 时，`320 x 192` 的输入进入 `160 x 96` 桶，竖图进入对应的竖桶。
-- `bucket_no_upscale = true` 沿用项目语义：面积不超过预算的图像以原尺寸向下对齐到 16 的倍数，不放大。若向下对齐后的某一轴不足 48，会明确拒绝，不会偷偷放大或填充。超过预算的图像仍按宽高比选候选桶并做覆盖裁剪；极端宽高比下可能放大短轴，这个开关并非对任意输入都保证不放大。
-- 不写 `enable_bucket` 时仍默认关闭，保留原来的严格固定尺寸模式：所有配对张量必须已符合 `resolution`，尺寸不符就报错。示例 TOML 显式开启分桶和 no-upscale。
-- 所有配对张量必须先在原始像素网格上对齐。同一 clip 的所有帧必须具有相同的原始输入尺寸，并共享同一个桶、等比覆盖缩放和中心裁剪位置；不做逐帧随机裁剪，也不独立缩放 target 或 controls 来掩盖错误配对。
-- RGB、encoded controls 和连续 loss mask 使用同一 FP32 bilinear/antialias 缩放；二值 history/temporal mask 使用对齐像素中心的 nearest-exact，保持二值。motion 使用 bilinear，并将 x/y 位移分别乘以实际取整后的缩放宽高比。同位置裁剪当前帧和前一帧，裁剪偏移相互抵消；越出裁剪区域的历史仍由重投影的 inside mask 排除。
-- 一个 microbatch 内只有同尺寸、同帧数的样本。不同桶可出现在同一次梯度累积中，损失继续按有效像素总数归一化。每个桶不足 batch size 的尾批保留，不丢弃、不重复填充；`consumed_samples` 记录实际消费数。
+- With `enable_bucket = true`, the product of the `resolution` dimensions is the area budget. Bucket selection follows the original aspect ratio. For example, a `128 x 128` budget maps a `320 x 192` input to a `160 x 96` bucket; portrait inputs use the corresponding portrait bucket.
+- `bucket_no_upscale = true` follows the shared project behavior. Images within the area budget are rounded down to multiples of 16 without enlargement. If either resulting axis is below 48, the sample is rejected rather than enlarged or padded. Images over budget still select aspect-ratio candidates and use cover resizing/cropping; extreme aspect ratios can enlarge the shorter axis, so this flag does not prohibit every possible upscale.
+- Omitting `enable_bucket` keeps it disabled and retains strict fixed-resolution behavior. All paired tensors must already match `resolution`; mismatches raise errors. The example TOMLs explicitly enable bucketing and no-upscale.
+- Paired tensors must align on the original pixel grid. Every frame in a clip must share the original input dimensions, bucket, aspect-preserving cover resize and center-crop position. There are no per-frame random crops or independent target/control resizes to hide bad pairing.
+- RGB, encoded controls and continuous loss masks share FP32 bilinear/antialias resizing. Binary history/temporal masks use pixel-center-aligned nearest-exact resizing to remain binary. Motion uses bilinear resizing; x/y displacement is scaled by the actual rounded width/height ratios. Identical current/previous-frame crop offsets cancel out, and the reprojection inside mask still excludes history outside the crop.
+- A microbatch contains only samples with matching dimensions and frame counts. Different buckets can participate in one gradient-accumulation window; loss remains normalized by the total valid pixel count. Each bucket's short final batch is retained without dropping or duplicate padding. `consumed_samples` records the actual count.
 
-索引阶段只读取源图头部或 NPY 的 mmap shape 来选桶，不将像素常驻内存。训练前仍会逐项解码校验配对、数值和变换后剩余的监督区域。训练和验证使用同一变换规则，`run_config.json` 的 `bucket_plan` 记录实际桶、每桶样本数、每轮批数及确定性批次顺序指纹。NR 保留固定的桶/清单顺序和确定性中心裁剪，不新增随机 shuffle 或随机增强。
+Indexing reads image headers or NPY mmap shapes to select buckets without keeping
+pixels resident. Before training, each sample is decoded to validate pairing,
+values and the remaining supervision region after transformation. Training and
+validation share transform rules. The `bucket_plan` in `run_config.json` records
+the actual buckets, samples per bucket, batches per epoch and a fingerprint of
+the deterministic batch order. NR retains fixed bucket/manifest order and
+deterministic center crops, with no added random shuffling or augmentation.
 
-分桶不等于原生输出等价：图像增强通常不满足“先增强再缩放”等于“先缩放再增强”。要优先保留原生配对的像素尺度，使用 no-upscale，并准备面积预算内、16 对齐的源尺寸；缩放后的配对只能作为训练数据变换，不能作为 DLL 前向一致性的证据。
+Bucketing does not establish native-output equivalence: enhancing an image before
+resizing generally differs from enhancing it afterward. To preserve native paired
+pixel scale, use no-upscale and source dimensions aligned to 16 within the area
+budget. Resized pairs are a training-data transform, not evidence of DLL forward parity.
 
-## 当前范围
+## Current Scope
 
-根目录脚本保持 thin entry point。模型、数值、数据、训练损失和评估位于 `src/musubi_tuner/dlssnr/`，LoRA 位于 `networks/lora_dlssnr.py`，生命周期位于 `training/dlssnr_trainer.py`。全量和 LoRA 共用 `NRTrainModule`、Accelerate 包装及同一更新循环，不调用 diffusion trainer。
+Root scripts remain thin entry points. Model code, numerics, data, training losses
+and evaluation live in `src/musubi_tuner/dlssnr/`; LoRA lives in
+`networks/lora_dlssnr.py`, and the training lifecycle in `training/dlssnr_trainer.py`.
+Full and LoRA training share `NRTrainModule`, Accelerate wrapping and the same
+update loop. They do not call the diffusion trainer.
 
-- 默认单进程 FP32，自动选择 CUDA，缺少 CUDA 时使用 CPU；`--device` 可设为 `auto`、`cpu` 或 `cuda`。显式请求不可用的 CUDA 会报错。混合精度只支持 CUDA，DDP 支持单机多进程。
-- 单帧及一个有限时序段，支持全量/LoRA 梯度累积、定期保存与恢复。累积按有效元素总数归一化，计步单位是 optimizer update。
-- 数据配置和命令行参数均严格校验。数据清单路径以 TOML 所在目录为基准，命令行路径以当前工作目录为基准；最终配置和来源指纹写入 `run_config.json`。
-- 数据集中的 `validation_manifest` 和 `sequence_manifest` 会实际执行，使用独立学生 history。默认比较初始基座，写入 `evaluation/stepNNNNNN.json`；评估不会改变训练 RNG 或 dropout 状态。
-- manifest 按需解码，不将整个训练集常驻内存；推理和评估按帧回放。
+- The default is single-process FP32, automatically using CUDA when available and CPU otherwise. `--device` accepts `auto`, `cpu` or `cuda`; explicitly requesting unavailable CUDA raises an error. Mixed precision requires CUDA. DDP supports multiple processes on one machine.
+- Single-frame training and one finite temporal segment support full/LoRA gradient accumulation, periodic saves and resume. Accumulation is normalized by the total valid element count; steps count optimizer updates.
+- Dataset configuration and CLI arguments are strictly validated. Manifest paths resolve relative to the TOML directory; CLI paths resolve relative to the working directory. Resolved configuration and source fingerprints are saved in `run_config.json`.
+- Dataset `validation_manifest` and `sequence_manifest` entries are evaluated with independent student history. Evaluation compares the initial base by default and writes `evaluation/stepNNNNNN.json`, without changing training RNG or dropout state.
+- Manifests are decoded on demand rather than keeping the entire training set resident. Inference and evaluation replay frames in order.
 
-原生参考前向、真实片段上的兼容性和质量验收尚未完成。布局字节 round-trip、浮点训练测试和原生兼容是不同结论。
+The native reference forward pass and compatibility/quality acceptance on real
+clips remain incomplete. Layout byte round-trips, floating-point training tests
+and native compatibility establish different things.
 
-2026-09-24 已完成第一轮 Steam 截图与本地 310.8.0 显卡适配版 DLL 的对照，结论是**当前 FP32 前向不一致**。4 张截图、19 组图片/参数组合覆盖 style、intensity、tone、structure、skin 和 auto mask；默认参数的输出与 DLL 之间 MAE 为 0.0294 至 0.0420。相同 packed 权重不代表前向计算正确，也不能据此宣称训练产物兼容原生 DLL。详见 [截图前向实验记录](dlssnr_forward_experiment_2026-09-24.md)。
+The first comparison on 2026-09-24 used Steam screenshots and a local GPU-adapted
+310.8.0 DLL. It found that **the FP32 forward pass did not match**. Four screenshots
+and 19 image/parameter combinations covered style, intensity, tone, structure,
+skin and auto mask. Default-parameter MAE against the DLL ranged from 0.0294 to
+0.0420. Identical packed weights do not prove forward correctness or compatibility
+of trained artifacts with the native DLL. See the
+[screenshot forward experiment](dlssnr_forward_experiment_2026-09-24.md).
 
-同日后续已排除主要默认参数因素，并修复 cubic 激活及关键数值边界。默认参数下四图 MAE 降至 0.00262 至 0.00520，19 组中 9 组达到原有三项显示指标门槛（含一组零强度直通），**尚未完成全部前向验收**。全量测试为 172 passed，包含真实权重 CUDA 全量/LoRA 更新及合并对照。详见 [可训练前向对齐记录](dlssnr_forward_alignment_2026-09-24.md)。数值实现版本已更新，旧训练状态不能跨版本 exact resume。
+Later that day, the main default-parameter factors were ruled out and the cubic
+activation and key numerical boundaries were corrected. Default-parameter MAE
+across the four images fell to 0.00262-0.00520. Nine of 19 combinations met the
+original three display-metric thresholds, including one zero-intensity passthrough
+case. **Full forward acceptance remained incomplete.** The full suite passed 172
+tests, including real-weight CUDA full/LoRA updates and merged-output comparisons.
+See the [trainable forward alignment report](dlssnr_forward_alignment_2026-09-24.md).
+The numerical implementation version changed; older training states cannot resume
+exactly across that boundary.
 
-## 训练输入与验证证据
+## Training Inputs and Validation Evidence
 
-正常全量和 LoRA 训练必须提供 `--model_dir`、canonical 权重、匹配的 schema/profile、完整来源文件和通过 source round-trip 的转换报告；仍会检查实际数据和张量。**forward validation report 不再是训练前置条件**，不需要为此开启开发模式。缺少模型或来源文件时仍会停止，不会隐式随机初始化或绕过来源检查。
+Normal full and LoRA training require `--model_dir`, canonical weights, a matching
+schema/profile, complete source files and a conversion report with a passing
+source round-trip. Actual data and tensors are still validated. **A forward
+validation report is no longer a training prerequisite**, so development mode is
+unnecessary for that reason. Missing model or provenance files stop the run;
+there is no implicit random initialization or provenance bypass.
 
-`--development_smoke` 仅保留给明确的开发 smoke 测试：允许来源文件不完整，或省略 `--model_dir` 使用随机权重。它不等于普通训练开关，也不能绕过显式提交的无效验收报告。
+`--development_smoke` is reserved for explicit developer smoke tests. It allows
+incomplete provenance, or random weights when `--model_dir` is omitted. It is not
+a normal-training option and cannot bypass an invalid report supplied explicitly.
 
-需要绑定验收证据时，显式传入 `--forward_validation_report`；报告必须对应 `--model_dir`，路径不存在、身份不匹配或检查未通过都会报错，开发模式也不例外。普通训练不会自动读取目录内的 `forward_validation_report.json`，避免未请求的旧报告改变训练或恢复行为。工具调用可使用 `inspect_canonical(..., require_forward_validation=True)` 强制要求证据；未提供 `validation_report` 路径时，该调用才读取 canonical 目录内的默认报告。
+To bind validation evidence, pass `--forward_validation_report` explicitly. The
+report must match `--model_dir`; missing paths, identity mismatches and failed checks
+raise errors even in development mode. Normal training does not automatically read
+`forward_validation_report.json` from the model directory, so an unrequested stale
+report cannot change training or resume behavior. Tool callers can require evidence
+with `inspect_canonical(..., require_forward_validation=True)`; only that call uses
+the canonical directory's default report when no `validation_report` path is given.
 
-报告契约仍为 `dlssnr_forward_validation_v1`，包含 `profile`、`numerics_profile`、当前 `model_sha256`、`implementation_sha256`、固定的 `reference_identity`、`float_validated` 和 `checks`。检查项为 `raw_head`、`neural_preclamp`、`rendered_proxy`；全部必须来自实际参考验证。实现指纹由 `json_sha256(implementation_identity())` 计算。普通训练 evaluation 不能代替这份报告，也不要手工填入通过标记。
+The report contract remains `dlssnr_forward_validation_v1`, containing `profile`,
+`numerics_profile`, the current `model_sha256`, `implementation_sha256`, a fixed
+`reference_identity`, `float_validated` and `checks`. The checks are `raw_head`,
+`neural_preclamp` and `rendered_proxy`, all backed by actual reference validation.
+The implementation fingerprint is `json_sha256(implementation_identity())`.
+Ordinary training evaluation cannot replace this report. Do not fill in passing
+flags manually.
 
-运行元数据以 `source_forward_validated` 单独记录是否检查过有效的基座报告。无报告时该字段为 `false`，并保留 `experimental_surrogate=true`，但不会把 `development_smoke` 自动设为 `true`。开发 smoke 产物也始终保留实验标记。无论基座是否有报告，新训练产物的 `float_validated`、`temporal_validated`、`native_export_validated` 均为 `false`；基座证据不能证明更新后权重的兼容性。
+Run metadata records whether a valid base report was checked in
+`source_forward_validated`. Without a report, it is `false` and
+`experimental_surrogate=true` remains set, but `development_smoke` is not enabled
+automatically. Developer smoke artifacts also retain the experimental flag.
+Regardless of base evidence, newly trained artifacts set `float_validated`,
+`temporal_validated` and `native_export_validated` to `false`: evidence for the base
+does not prove compatibility of updated weights.
 
-## 显存与运行模式
+## Memory and Runtime Modes
 
-显存不足时先加 `--gradient_checkpointing`。它在梯度开启的训练段重算 FFN/attention，覆盖首尾块、编码器、ViT 和解码器；burn-in 与评估不重算。全量和 LoRA 均支持，冻结输入不会截断 LoRA 梯度，dropout 的随机状态会在重算时恢复。此开关默认关闭，不要求切换数值 profile。
+When GPU memory is limited, try `--gradient_checkpointing` first. It recomputes
+FFN/attention during gradient-enabled training segments, covering boundary blocks,
+the encoder, ViT and decoder. Burn-in and evaluation are not recomputed. Full and
+LoRA training both support it; frozen inputs do not cut off LoRA gradients, and
+dropout RNG state is restored during recomputation. It is disabled by default and
+does not require a different numerical profile.
 
-需要其他选项时显式选择实验模式：
+For other options, select experimental mode explicitly:
 
 ```text
 --numerics_profile train_experimental --mixed_precision bf16 --gradient_checkpointing
 ```
 
-FP16/BF16 只用于选定的投影和矩阵乘法，训练参数、LoRA delta、明确的 half/E4 publications、归约、loss 和 history 保留 FP32 边界。FP16 使用 GradScaler，先 unscale 再检查/裁剪梯度；溢出时缩小 scale，重放同一有效批次和 RNG，不提前推进 update 或样本计数。`--max_overflow_retries` 默认 16；非有限前向或重试耗尽会停止，不写成功检查点。BF16 不使用 scaler。Accelerate 的 mixed-precision 环境设置须与显式 CLI 参数一致。
+FP16/BF16 apply only to selected projections and matrix multiplications. Training
+parameters, LoRA deltas, explicit half/E4 publications, reductions, loss and history
+retain their FP32 boundaries. FP16 uses GradScaler, unscaling before checking or
+clipping gradients. On overflow it reduces the scale and replays the same effective
+batch and RNG state without advancing update/sample counts. `--max_overflow_retries`
+defaults to 16. Nonfinite forward values or exhausted retries stop the run without
+publishing a successful checkpoint. BF16 does not use a scaler. Accelerate's
+mixed-precision environment settings must match the explicit CLI arguments.
 
-FP8 初期只压缩 LoRA 的冻结投影基座：
+FP8 currently compresses only the frozen projection base for LoRA:
 
 ```text
 --numerics_profile train_experimental --gradient_checkpointing --fp8_base --fp8_scaled
 ```
 
-`--fp8_scaled` 使用项目公共的 block-64 量化，输入宽度不整除 64 时按输出通道缩放；不写该参数则使用 E4M3FN 直接存储，超出 `[-448,448]` 的权重明确拒绝。输入适配器、RGB/logit heads、priors 和标量保持原表示。计算时还原 FP32 基座再加 LoRA delta，**不代表执行 FP8 GEMM**。检查点有助于避免反向一直保留临时还原矩阵。产物绑定原始基座、实际量化基座及 scale 身份，不能把量化适配器直接加到未经相同量化的原始基座上。
+`--fp8_scaled` uses the shared block-64 quantizer, with per-output-channel scaling
+when the input width is not divisible by 64. Without it, weights use direct E4M3FN
+storage and values outside `[-448,448]` are rejected. The input adapter, RGB/logit
+heads, priors and scalars retain their original representation. Computation
+materializes an FP32 base before adding the LoRA delta; **this does not execute
+FP8 GEMM**. Checkpointing reduces the need to retain temporary materialized matrices
+through backward. Artifacts bind the original base, effective quantized base and
+scale identities. A quantized-base adapter cannot be added to an original base
+that has not undergone the same quantization.
 
-注意力选项互斥，默认仍是 NR 自定义算子：
+Attention options are mutually exclusive. The default remains the custom NR operator:
 
-| 参数 | 范围与限制 |
+| Option | Scope and Restrictions |
 | --- | --- |
-| `--sdpa` | 实验窗口和全局注意力，保留窗口 prior；PyTorch 自行选择其内部 kernel，不等于保证使用 Flash kernel。 |
-| `--xformers` | 实际执行所需 dtype、bias 和反向能力探测；不支持的组合报错，可显式限制 `--attention_scope global`。 |
-| `--flash_attn` | 需 FP16/BF16 和显式 `--attention_scope global`；窗口仍使用 NR 算子，不能丢弃 learned prior。 |
-| `--sage_attn` | 初期仅支持 FP16/BF16 的全局推理；训练会拒绝，未伪造一个替代 backward。 |
-| `--attention_backend native` | 显式选择 NR 算子，也可在推理时覆盖已保存的实验后端。 |
+| `--sdpa` | Experimental window/global attention, retaining window priors. PyTorch chooses its internal kernel; a Flash kernel is not guaranteed. |
+| `--xformers` | Probes the required dtype, bias and backward capabilities. Unsupported combinations raise errors; scope can be limited explicitly with `--attention_scope global`. |
+| `--flash_attn` | Requires FP16/BF16 and explicit `--attention_scope global`. Windows retain the NR operator and their learned priors. |
+| `--sage_attn` | Currently supports only FP16/BF16 global inference. Training is rejected; no substitute backward is supplied. |
+| `--attention_backend native` | Explicitly selects the NR operator and can override a saved experimental backend during inference. |
 
-实验注意力对预处理后的 Q/K/V 使用 `scale=1.0` 的标准 softmax，不额外乘 `1/sqrt(32)`。窗口外零 token 继续参与带 prior 的归一化；全局层的人工对齐 padding 不作为真实 key。这与 NR 的 half/E4 指数及归约不同，需要单独做输出质量验收。可选扩展按需加载，未安装或 ABI 不匹配时不会悄悄换后端。
+Experimental attention uses standard softmax with `scale=1.0` on preprocessed
+Q/K/V, without another `1/sqrt(32)` factor. Zero tokens outside windows still
+participate in normalization with priors; artificial alignment padding in global
+layers is excluded as real keys. This differs from NR's half/E4 exponentials and
+reductions and requires separate output-quality checks. Optional extensions load
+on demand. Missing installations or ABI mismatches do not silently select another backend.
 
-### 多卡
+### Multi-GPU
 
-例如，单机双进程训练可使用以下启动方式；其他训练参数与单卡相同：
+For example, launch two processes on one machine as follows. Other training
+arguments are the same as for a single GPU:
 
 ```bash
 torchrun --standalone --nproc_per_node=2 dlssnr_train.py \
@@ -167,29 +281,47 @@ torchrun --standalone --nproc_per_node=2 dlssnr_train.py \
   --output_dir output/dlssnr_ddp --output_name full_ddp --save_state
 ```
 
-也支持正确配置的 `accelerate launch`。Linux CUDA 使用 NCCL，Windows/CPU 沿用 Gloo 初始化方式。每卡仍保存完整模型；DDP 不是模型分片，不会让单张卡自动装下更大的模型。
+A correctly configured `accelerate launch` is also supported. Linux CUDA uses
+NCCL; Windows/CPU use Gloo initialization. Each GPU still holds a complete model.
+DDP does not shard the model or make a larger model fit on an individual GPU.
 
-分配位置为 `(update * accumulation + micro) * world_size + rank`，尾批不填充，按确定性批次计划继续下一轮。损失分母在整个跨卡累积批次上求有效像素总数，不平均各卡自己的 mean loss。主进程负责共享权重、日志和评估，每卡 RNG/scaler 都纳入状态。恢复必须保持相同 world size、数据计划和运行策略；不支持跨 world size 自动重分片、FSDP、ZeRO、DeepSpeed 或多机。
+Batch positions use `(update * accumulation + micro) * world_size + rank`.
+Short final batches are not padded, and the deterministic batch plan continues
+into the next epoch. The loss denominator is the total valid pixel count across
+the accumulated global batch, rather than an average of per-rank means. The main
+process handles shared weights, logs and evaluation; each rank's RNG/scaler is
+saved. Resume requires the same world size, data plan and runtime policy. Automatic
+resharding across world sizes, FSDP, ZeRO, DeepSpeed and multi-node execution are unsupported.
 
-### 本机实测
+### Local Measurements
 
-2026-10-01，RTX 4090 / PyTorch `2.13.0+cu130`，同一份真实 canonical 权重，单帧有效图 `512 x 512`（内部 field 为 `576 x 512`）、batch 1、seed 42、AdamW；LoRA 为 ViT rank 16。每种模式独立进程，先更新 1 次，再测量 2 次。表中是 PyTorch **峰值 allocated** 显存，不含其他进程占用；时间样本很少，仅供本机对照。
+Measurements on 2026-10-01 used an RTX 4090, PyTorch `2.13.0+cu130`, the same real
+canonical weights, one `512 x 512` effective frame (internal field `576 x 512`),
+batch size 1, seed 42 and AdamW. LoRA used ViT rank 16. Each mode ran in its own
+process with one warm-up update followed by two measured updates. Memory values
+are PyTorch **peak allocated** GPU memory, excluding other processes. The small
+timing sample is only a local comparison.
 
-| 模式 | 峰值 GiB | 更新耗时中位数，秒 |
+| Mode | Peak GiB | Median Update Time, Seconds |
 | --- | ---: | ---: |
-| 全量 FP32 | 15.92 | 1.96 |
-| 全量 FP32 + checkpoint | 4.52 | 2.90 |
-| 全量 BF16 + checkpoint | 4.46 | 3.17 |
-| 全量 FP16 + checkpoint | 4.46 | 4.65 |
-| 全量 BF16 + checkpoint + SDPA | 3.95 | 3.12 |
+| Full FP32 | 15.92 | 1.96 |
+| Full FP32 + checkpoint | 4.52 | 2.90 |
+| Full BF16 + checkpoint | 4.46 | 3.17 |
+| Full FP16 + checkpoint | 4.46 | 4.65 |
+| Full BF16 + checkpoint + SDPA | 3.95 | 3.12 |
 | LoRA FP32 | 8.17 | 1.39 |
 | LoRA FP32 + checkpoint | 2.96 | 1.94 |
 | LoRA BF16 + checkpoint | 2.91 | 2.14 |
 | LoRA BF16 + checkpoint + scaled FP8 | 2.52 | 2.35 |
 
-全量 checkpoint 的显存下降约 72%，LoRA 约 64%；两组 FP32 开关对照的计时步骤 loss 相同。FP16 有 1 次计时内溢出重试，耗时包含该重试。这里最有效的省显存选项是 checkpoint，不是 AMP；混合精度的额外收益较小，也没有在本机提速。实验模式的 loss 数值有所不同，这些合成输入测试不能证明学习质量或原生一致性。
+Checkpointing reduced memory by about 72% for full training and 64% for LoRA.
+Both FP32 on/off comparisons had identical losses at the measured steps. FP16 had
+one overflow retry within the measured interval, included in its timing.
+Checkpointing provided the largest memory saving here; mixed precision added a
+smaller saving and did not improve speed on this machine. Experimental-mode losses
+differed. These synthetic-input tests do not establish learning quality or native parity.
 
-可用相同工具复测，逐种模式另开进程并选择不同输出文件：
+To repeat the measurements, run each mode in a separate process with a distinct output file:
 
 ```bash
 python tools/benchmark_dlssnr_runtime.py --model_dir models/canonical_dlssnr \
@@ -197,17 +329,113 @@ python tools/benchmark_dlssnr_runtime.py --model_dir models/canonical_dlssnr \
   --gradient_checkpointing --warmup 1 --steps 2
 ```
 
-本机已执行真实权重 CUDA 的 AMP、SDPA 更新，以及 FP8 LoRA 的更新与合并检查；双进程 CPU/Gloo 已覆盖不等有效像素、尾批和恢复。本机只有一张 GPU，未验证真实双 GPU；隔离测试环境没有 FlashAttention、SageAttention 或 xFormers 扩展，其实际 CUDA kernels 尚未验证。安装扩展不等于通过能力与质量验收。
+Local checks covered real-weight CUDA AMP/SDPA updates and FP8 LoRA updates/merges.
+Two-process CPU/Gloo tests covered unequal valid pixel counts, short final batches
+and resume. This machine has one GPU, so real two-GPU execution was not verified.
+The isolated test environment lacked FlashAttention, SageAttention and xFormers;
+their actual CUDA kernels remain unverified. Installing an extension does not
+establish capability or quality acceptance.
 
-## 命令
+## DLL Unpacking and Repacking
 
-把自行准备的 OpenDLSS-NR `models/nr` 目录转成 canonical 权重：
+Unpack a user-supplied original DLL directly into the existing canonical training
+format, without depending on MLX or changing the training network:
+
+```bash
+python dlssnr_unpack_model.py --source_dll /path/to/original/nvngx_dlssnr.dll --output_dir models/canonical_dlssnr
+```
+
+The entry point also accepts the conversion scripts' usual `--input` / `--output`
+aliases. It currently supports only the audited DLSS-NR 310.8.0 `WEIGHTS_HT`
+resource, with SHA256
+`836f445d06ecd2e59bb9f17b84b91c143396fd76ccda1c9dc7fe81d5edd548f4`.
+Other resources are rejected; filenames are not used to infer versions. The source
+DLL is neither executed nor modified, and the output model directory must be new.
+Unpacking always verifies the canonical byte round-trip and saves the provenance
+files required for training. Existing model directories converted from the same
+source by `dlssnr_convert_model.py` remain supported.
+
+After full training, or after merging LoRA separately, repack the complete model directory:
+
+```bash
+python dlssnr_pack_model.py --template_dll /path/to/original/nvngx_dlssnr.dll --model_dir output/full/run/final --output_dll output/export/nvngx_dlssnr.dll --mix 1.0 --strength 1.0
+```
+
+LoRA can also be merged during repacking, without manually creating an intermediate
+model directory. In this case, `--model_dir` must identify that adapter's matching
+base, not a different fine-tuned model:
+
+```bash
+python dlssnr_pack_model.py --template_dll /path/to/original/nvngx_dlssnr.dll --model_dir models/canonical_dlssnr --merge_lora output/lora/run/final/adapter.safetensors --lora_multiplier 0.8 --mix 1.0 --strength 1.0 --output_dll output/export-lora/nvngx_dlssnr.dll
+```
+
+`--merge_lora` takes an adapter file path; `--lora_weight` is an alias. Only this
+project's DLSS-NR LoRA format is accepted, one adapter per invocation. Existing base
+identity and FP8 quantized-base checks remain in place; arbitrary safetensors files
+are not treated as compatible adapters. The temporary merge directory is removed
+automatically, and neither the original base nor the adapter is modified.
+
+The three controls are independent. They apply in this order: LoRA merge, mix,
+strength, then native quantization.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--lora_multiplier` | `1.0` | Scales only the LoRA delta. A nondefault value requires `--merge_lora`. |
+| `--mix` | `1.0` | Interpolates between the original DLL weights and the full trained/merged result, within `[0,1]`. |
+| `--strength` | `1.0` | Multiplies all decoded numeric weights after mixing. Alias: `--multiplier`. |
+
+```text
+W_effective = W_trained                              # full checkpoint
+W_effective = W_lora_base + lora_multiplier * delta   # adapter merge
+W_export = quantize_native(strength * (W_original + mix * (W_effective - W_original)))
+```
+
+For FP8 LoRA, `W_lora_base` is the effective quantized base bound to the adapter.
+`--mix 0 --strength 1` restores the template DLL's original weights.
+`--strength 0` zeros decoded numeric weights; it does not restore the original
+model. Strength scales matrices, priors, scales and other decoded floating-point
+values, rather than controlling a visual effect in an inference UI. All three
+controls must be finite. Strength and the LoRA multiplier may be negative or exceed
+1, but final values must fit the finite range of their native storage types.
+Opaque bytes and padding are not scaled.
+
+Repacking rounds FP32 directly to the E4M3FN, FP16 or FP32 storage required by each
+original resource region, using nearest/ties-to-even. It adds no scale and never
+silently clips overflow. NaN/Inf, out-of-range values, missing/extra tensors,
+shape/dtype mismatches, nonzero input lane 15, modified opaque data and source
+mismatches are rejected. Quantization never overwrites the original FP32 training artifact.
+
+Both the output DLL and `<output_dll>.report.json` must be new paths. Only same-sized
+weight payloads are replaced; PE structure, resource metadata and all other content
+are preserved. The tool verifies decoded quantized values per tensor, then extracts
+the final DLL again to check its payloads. The report records input/output hashes,
+all three controls, and per-tensor counts of trained changes, changes after
+mix/strength, changes actually written, updates lost to rounding and quantization
+errors. The CLI warns if every requested update rounds back to the original weights.
+
+These checks do not certify native deployment. The tool does not repair the PE
+checksum, re-sign the DLL or bypass load checks; a loader may reject a modified
+DLL. Reports always retain `native_export_validated=false`. In-game loading and
+image quality require separate acceptance checks. Do not use an exported DLL as
+the next repacking template. Keep the original DLL, and continue training from
+canonical model directories.
+
+The standalone merge script supports the same LoRA multiplier:
+
+```bash
+python dlssnr_merge_lora.py --base_model_dir models/canonical_dlssnr --adapter output/lora/run/final/adapter.safetensors --lora_multiplier 0.8 --output_dir output/merged
+```
+
+## Commands
+
+Convert a user-supplied OpenDLSS-NR `models/nr` directory into canonical weights:
 
 ```bash
 python dlssnr_convert_model.py --source_dir ../OpenDLSS-NR/models/nr --output_dir models/canonical_dlssnr --verify_roundtrip
 ```
 
-单帧全量训练。以下多行命令使用 Bash 续行；PowerShell 可合并为一行，或将行末反斜线换成反引号：
+Single-frame full training. Multiline commands below use Bash continuation;
+in PowerShell, use one line or replace trailing backslashes with backticks:
 
 ```bash
 python dlssnr_train.py \
@@ -220,7 +448,7 @@ python dlssnr_train.py \
   --max_train_steps 1000 --save_every_n_steps 100 --save_state
 ```
 
-时序全量训练：
+Temporal full training:
 
 ```bash
 python dlssnr_train.py \
@@ -233,7 +461,8 @@ python dlssnr_train.py \
   --max_train_steps 1000 --save_every_n_steps 100 --save_state
 ```
 
-ViT LoRA。rank、alpha 和优化器都直接从参数选择，使用同一份单帧数据集 TOML：
+ViT LoRA, selecting rank, alpha and optimizer through CLI arguments and using the
+same single-frame dataset TOML:
 
 ```bash
 python dlssnr_train_network.py \
@@ -247,39 +476,54 @@ python dlssnr_train_network.py \
   --max_train_steps 1000 --save_every_n_steps 100 --save_state
 ```
 
-常用参数：
+Common arguments:
 
-| 参数 | 用途 |
+| Option | Purpose |
 | --- | --- |
-| `--optimizer_type` / `--optimizer_args` | 复用项目公共优化器构造逻辑，例如 `AdamW`、`SGD`、`AdamW8bit` 或完整类路径。额外依赖须自行安装。 |
-| `--learning_rate` | 全量默认 `1e-5`，LoRA 默认 `1e-4`；AdamW 默认 weight decay 为 `0.0`。 |
-| `--network_dim` / `--network_alpha` | ViT LoRA rank 默认 `16`；未给 alpha 时跟随 rank。 |
-| `--network_dropout` / `--network_args` | dropout 默认 `0`。多尺度 LoRA 用 `--network_args profile=multiscale`，可通过 `rank_by_width` / `alpha_by_width` 字典细化，不能同时给单一 dim/alpha。 |
-| `--max_train_steps` / `--gradient_accumulation_steps` / `--seed` | 更新次数、梯度累积和随机种子。 |
-| `--max_grad_norm` | 在累积后的更新边界裁剪梯度，默认 `0`，即不裁剪。 |
-| `--gradient_checkpointing` | 重算激活以降低显存，默认关闭，保持默认数值 profile。 |
-| `--numerics_profile train_experimental` / `--mixed_precision` | 显式实验模式；CUDA precision 可选 `no`、`fp16`、`bf16`，主权重仍为 FP32。 |
-| `--fp8_base` / `--fp8_scaled` | 仅 LoRA 的冻结基座存储量化；scaled 需配合 base，均需实验模式。 |
-| `--sdpa` / `--xformers` / `--flash_attn` / `--attention_scope` | 显式实验注意力与作用范围；限制见上表。 |
-| `--loss_pre` / `--loss_out` / `--loss_edge` / `--loss_temporal` | 损失权重，默认分别为 `1`、`1`、`0.05`、`0`。 |
-| `--prior_lr_multiplier` / `--scale_lr_multiplier` / `--temporal_blend_lr_multiplier` | 全量训练参数组倍率，默认 `0.1`；LoRA 入口不接受这些参数。 |
-| `--sample_every_n_steps` / `--min_sequence_frames` | 验证间隔和时序评估的最小帧数。非零验证间隔要求数据 TOML 配置验证清单。 |
-| `--no-compare_baseline` | 关闭初始基座对照，默认开启。 |
-| `--save_state` / `--save_every_n_steps` / `--resume` | 保存训练状态、周期和恢复点；未给 `--save_state` 时仅保存权重。 |
-| `--forward_validation_report` | 可选基座验收证据；仅显式指定时检查，不是训练前置条件。 |
-| `--development_smoke` | 仅限开发测试，显式允许不完整来源或随机初始化；普通训练不需要。 |
+| `--optimizer_type` / `--optimizer_args` | Uses the shared optimizer factory, for example `AdamW`, `SGD`, `AdamW8bit` or a fully qualified class path. Install any extra dependencies separately. |
+| `--learning_rate` | Defaults to `1e-5` for full training and `1e-4` for LoRA. AdamW weight decay defaults to `0.0`. |
+| `--network_dim` / `--network_alpha` | ViT LoRA rank defaults to `16`; omitted alpha follows rank. |
+| `--network_dropout` / `--network_args` | Dropout defaults to `0`. Use `--network_args profile=multiscale` for multiscale LoRA, optionally with `rank_by_width` / `alpha_by_width` dictionaries. Do not combine this with a single dim/alpha. |
+| `--max_train_steps` / `--gradient_accumulation_steps` / `--seed` | Update count, gradient accumulation and random seed. |
+| `--max_grad_norm` | Clips gradients at the accumulated update boundary. Default `0` disables clipping. |
+| `--gradient_checkpointing` | Recomputes activations to reduce memory, preserving the default numerical profile. Disabled by default. |
+| `--numerics_profile train_experimental` / `--mixed_precision` | Explicit experimental mode. CUDA precision accepts `no`, `fp16` or `bf16`; master weights remain FP32. |
+| `--fp8_base` / `--fp8_scaled` | LoRA-only frozen-base storage quantization. Scaled requires base, and both require experimental mode. |
+| `--sdpa` / `--xformers` / `--flash_attn` / `--attention_scope` | Explicit experimental attention and its scope; restrictions are listed above. |
+| `--loss_pre` / `--loss_out` / `--loss_edge` / `--loss_temporal` | Loss weights, defaulting to `1`, `1`, `0.05` and `0`, respectively. |
+| `--prior_lr_multiplier` / `--scale_lr_multiplier` / `--temporal_blend_lr_multiplier` | Full-training parameter-group multipliers, default `0.1`. The LoRA entry point rejects these arguments. |
+| `--sample_every_n_steps` / `--min_sequence_frames` | Validation interval and minimum temporal evaluation frame count. A nonzero interval requires validation manifests in the dataset TOML. |
+| `--no-compare_baseline` | Disables the initial-base comparison, which is enabled by default. |
+| `--save_state` / `--save_every_n_steps` / `--resume` | Training-state saves, save interval and resume checkpoint. Without `--save_state`, only weights are saved. |
+| `--forward_validation_report` | Optional base-validation evidence, checked only when explicitly supplied. It is not a training prerequisite. |
+| `--development_smoke` | Developer tests only: explicitly permits incomplete provenance or random initialization. Normal training does not need it. |
 
-例如，将优化器选项换成 `--optimizer_type SGD --optimizer_args momentum=0.9 weight_decay=0.0`，会实际构造 SGD，而不是只改变配置标签。Adafactor 必须显式给 `--optimizer_args relative_step=False warmup_init=False`。学习率调度复用项目公共工厂，支持 constant、constant_with_warmup、linear、cosine、cosine_with_restarts、cosine_with_min_lr、polynomial、inverse_sqrt、warmup_stable_decay。相关 warmup/decay、cycles、power、timescale、min_lr_ratio 参数沿用公共 CLI。每次成功的全局 optimizer update 推进一次调度器；梯度累积、DDP rank 和溢出重试不额外推进。调度器状态随训练状态保存并参与恢复；改变调度配置不能 exact resume。schedule-free 的权重切换和需要 closure 的优化器仍不支持。
+For example, `--optimizer_type SGD --optimizer_args momentum=0.9 weight_decay=0.0`
+constructs an actual SGD optimizer rather than changing only a configuration label.
+Adafactor requires explicit `--optimizer_args relative_step=False warmup_init=False`.
+Learning-rate schedules use the shared factory, supporting constant,
+constant_with_warmup, linear, cosine, cosine_with_restarts, cosine_with_min_lr,
+polynomial, inverse_sqrt and warmup_stable_decay. Warmup/decay, cycles, power,
+timescale and min_lr_ratio follow the shared CLI. The scheduler advances once per
+successful global optimizer update, not per accumulation microstep, DDP rank or
+overflow retry. Scheduler state is saved and restored with training state;
+changing its configuration prevents exact resume. Schedule-free weight switching
+and optimizers requiring a closure remain unsupported.
 
-从 optimizer 更新边界继续时，在**原来的完整训练命令**后追加恢复参数，保留原有有效参数和数据配置。例如：
+To resume at an optimizer-update boundary, append the resume argument to the
+**original complete training command**, retaining its effective parameters and
+dataset configuration. For example:
 
 ```text
 --resume output/dlssnr_full_single/dlssnr_310_8_0_full/state-step000100
 ```
 
-LoRA 的恢复目录对应 `output/dlssnr_lora/dlssnr_310_8_0_lora_vit/state-stepNNNNNN`。只加载权重、不带 optimizer 状态属于重新开跑，不是 resume。
+The corresponding LoRA resume directory is
+`output/dlssnr_lora/dlssnr_310_8_0_lora_vit/state-stepNNNNNN`.
+Loading weights without optimizer state starts a new run rather than resuming one.
 
-静止图和闭环片段。推理清单可以不写 target。片段里非 reset 帧必须有 motion 和 history mask：
+Still-image and closed-loop clip inference. Inference manifests may omit targets;
+non-reset clip frames must provide motion and a history mask:
 
 ```bash
 python dlssnr_generate_image.py --model_dir models/canonical_dlssnr --sample_manifest data/inference_single.jsonl --bucket_width 512 --bucket_height 512 --output_dir output/preview
@@ -287,49 +531,119 @@ python dlssnr_generate_video.py --model_dir models/canonical_dlssnr --sequence_m
 python dlssnr_merge_lora.py --base_model_dir models/canonical_dlssnr --adapter output/dlssnr_lora/dlssnr_310_8_0_lora_vit/final/adapter.safetensors --output_dir output/dlssnr_merged
 ```
 
-推理不指定 runtime 参数时继承产物中的策略；没有策略的旧模型使用 FP32/native 默认值。显式覆盖会记录在输出目录的 `inference_metadata.json`，片段则记录在片段子目录。切回 baseline 须同时选择兼容参数，例如 `--numerics_profile train_surrogate --mixed_precision no --attention_backend native`。FP8 开关可通过 `--no-fp8_base` / `--no-fp8_scaled` 关闭。Sage 全局推理需显式 `--numerics_profile train_experimental --mixed_precision bf16 --sage_attn --attention_scope global`，且本机扩展必须可用。
+Inference inherits the artifact's runtime policy unless overridden. Legacy models
+without a policy use FP32/native defaults. Explicit overrides are recorded in
+`inference_metadata.json` in the output directory, or the clip subdirectory for
+videos. Returning to baseline requires compatible options together, for example
+`--numerics_profile train_surrogate --mixed_precision no --attention_backend native`.
+Disable FP8 with `--no-fp8_base` / `--no-fp8_scaled`. Sage global inference requires
+explicit `--numerics_profile train_experimental --mixed_precision bf16 --sage_attn --attention_scope global`
+and an available local extension.
 
-## 现在明确不做的事
+## Unsupported Features
 
-不支持全量 FP8 优化器训练、SageAttention 训练、CPU activation offload、block swapping、FSDP/ZeRO/DeepSpeed、多机或 TF32。未知 CLI 参数仍报错；实验模式仅面向 `float_runtime`，不能选择 `native_roundtrip`。
+Full FP8 optimizer training, SageAttention training, CPU activation offload, block
+swapping, FSDP/ZeRO/DeepSpeed, multi-node execution and TF32 are unsupported. Unknown
+CLI arguments still raise errors. Experimental modes target `float_runtime` only;
+`native_roundtrip` cannot be selected as that runtime mode.
 
-历史重投影用的是双线性，不是原版五点 Catmull-Rom。历史按 FP32 保存，不是向零截断到 float16。
+History reprojection uses bilinear sampling rather than the original five-tap
+Catmull-Rom. History is stored as FP32 rather than truncated toward zero to float16.
 
-像素缓存和多 worker 预取尚未实现，数据 TOML 不接受缓存占位字段。FP32 入口会暂时关闭 TF32，结束后恢复原来的全局设置。
+Pixel caching and multi-worker prefetching are not implemented, and dataset TOML
+does not accept placeholder cache fields. FP32 entry points temporarily disable
+TF32 and restore its previous global settings afterward.
 
-## 数据约定
+## Data Contract
 
-每条 JSONL 记录必须包含唯一且可用于文件名的 `sample_id`、`sequence_id`、`schema = dlssnr_pairs_v1`、`source_encoding = srgb_proxy`、`controls_encoding = dlssnr_lanes_10_14_v1`。训练及配对评估还需 `target_encoding = srgb_proxy` 和 target。首帧必须 reset，`frame_index` 非负且严格递增；训练与验证不能共享 sequence ID。
+Each JSONL record requires a unique, filename-safe `sample_id`, a `sequence_id`,
+`schema = dlssnr_pairs_v1`, `source_encoding = srgb_proxy` and
+`controls_encoding = dlssnr_lanes_10_14_v1`. Training and paired evaluation also
+require a target and `target_encoding = srgb_proxy`. The first frame must reset;
+`frame_index` must be nonnegative and strictly increasing. Training and validation
+cannot share sequence IDs.
 
-`sample_id` 在所有平台上按不区分大小写的规则检查重复，例如 `Frame` 和 `frame` 不能出现在同一清单中。名称不能包含路径分隔符、Windows 非法字符、控制字符、末尾句点或空格，也不能是 `NUL`、`CON` 等 Windows 保留名称。清单索引阶段即报错，不会写出部分推理结果后才发现冲突；原始 ID 不会被自动改写。
+`sample_id` uniqueness is checked case-insensitively on every platform: `Frame`
+and `frame` cannot occur in the same manifest. Names cannot contain path separators,
+Windows-invalid characters, control characters, trailing periods/spaces or Windows
+reserved names such as `NUL` and `CON`. Errors are raised during manifest indexing,
+before partial inference outputs are written. Original IDs are never rewritten automatically.
 
-- RGB 支持 8-bit 图像，或 `[3,H,W]` 的数值 NPY，proxy 值域为 `[0,1]`。不将高位深图片静默压成 8-bit。
-- controls 为有限值 `[5,H,W]` NPY。motion 的布局由记录级 `motion_layout = chw|hwc` 明确指定，单位是 current-to-previous 像素位移。
-- mask 支持单通道 PNG 或 `[1,H,W]` NPY。history/temporal mask 必须为二值；可选 `loss_mask_path` 支持 `[0,1]` 权重。
-- temporal loss 非零时，非 reset 帧必须提供 temporal mask，且 `tbptt_length >= 2`。损失只计算可反传段内部的相邻帧，不跨越 burn-in 边界。
-- `--loss_temporal 0` 允许不提供 temporal mask，但非 reset 帧仍必须有 motion 和 history mask。
+- RGB accepts 8-bit images or numeric `[3,H,W]` NPY arrays, with proxy values in `[0,1]`. High-bit-depth images are not silently reduced to 8-bit.
+- Controls are finite-valued `[5,H,W]` NPY arrays. Each record explicitly declares motion layout with `motion_layout = chw|hwc`; values are current-to-previous pixel displacements.
+- Masks accept single-channel PNGs or `[1,H,W]` NPY arrays. History/temporal masks must be binary; optional `loss_mask_path` supports weights in `[0,1]`.
+- With nonzero temporal loss, non-reset frames require a temporal mask and `tbptt_length >= 2`. Loss uses adjacent frames within the differentiable segment only, never across the burn-in boundary.
+- `--loss_temporal 0` allows temporal masks to be omitted, but non-reset frames still require motion and history masks.
 
-## 保存与恢复
+## Saving and Resuming
 
-每次训练使用 `output_dir/output_name/` 作为独立运行目录，`final/`、周期权重、训练状态、日志和评估报告均位于该目录下。`--output_name` 必须满足上述可跨平台使用的名称规则，不能包含路径。新训练拒绝使用已存在的同名运行目录；继续训练须显式传入 `--resume`，重新训练须选择其他名称或输出目录。
+Each run uses its own `output_dir/output_name/` directory for `final/`, periodic
+weights, training state, logs and evaluation reports. `--output_name` must follow
+the portable-name rules above and cannot contain a path. A new run refuses an
+existing directory with the same name. Continue with explicit `--resume`, or
+choose another name/output directory to start over.
 
-旧产物不会自动搬迁。展开配置仍使用 schema version 2，训练状态现为 `dlssnr_train_state_v3`，包含 scaler、各 rank 状态与 runtime 身份。旧版 v1/v2 状态及旧实现指纹不能跨版本 exact resume。全量旧权重可作为新运行的基座；旧 LoRA 可先合并成 canonical 基座再开新运行，但这不恢复原优化器或原 adapter 参数化。不要手改检查点身份标记。
+Existing artifacts are not moved automatically. Resolved configuration still uses
+schema version 2. Training state now uses `dlssnr_train_state_v3`, including scaler,
+per-rank state and runtime identity. Old v1/v2 states and implementation fingerprints
+cannot resume exactly across versions. Older full weights can serve as a new run's
+base; older LoRA can be merged into a canonical base first, but this does not restore
+the original optimizer or adapter parameterization. Do not edit checkpoint identity
+markers manually.
 
-全量 `final/` 保存 FP32 权重、canonical 配置、来源 manifest、原始 opaque records、数值与预处理信息及训练元数据。runtime 同时写入必需的 model config 和 safetensors header，二者不一致或缺失会被拒绝，不依赖可选训练 sidecar 才能重现策略。LoRA v2 保存 adapter、rank/alpha/targets、完整基座身份和必需的 runtime/量化信息，仍可读取符合旧契约的 v1 FP32 adapter。FP8 adapter 合并会重建并核验量化基座，再输出普通 FP32 的基座加 delta，标记已 materialize，默认加载不会二次量化。合并保留 canonical 来源与 opaque 数据。
+Full-training `final/` contains FP32 weights, canonical configuration, the source
+manifest, original opaque records, numerics/preprocessing information and training
+metadata. Runtime policy is bound to both required model config and safetensors
+headers. Missing or inconsistent bindings are rejected; reproducing the policy does
+not depend on an optional training sidecar. LoRA v2 stores the adapter,
+rank/alpha/targets, complete base identity and required runtime/quantization metadata.
+Conforming v1 FP32 adapters remain readable. FP8 adapter merging reconstructs and
+verifies the quantized base, then exports ordinary FP32 base-plus-delta weights marked
+as materialized. Default loading does not quantize them again. Merging preserves
+canonical provenance and opaque data.
 
-LoRA 前向使用权重侧的 `W + alpha/r * B@A`，与合并权重走相同的投影计算。真实权重测试发现，拆成两条 GEMM 再相加的 FP32 误差会在 ViT 中明显放大，不能依靠小线性层测试证明全网合并一致。dropout 作为 rank 空间的修正项加入，评估时关闭。这个选择会增加临时矩阵和反向计算开销，优先保证一致性；产物记录 `canonical_weight_plus_delta_v1`。
+LoRA forward computation uses `W + alpha/r * B@A` on the weight side, following
+the same projection computation as merged weights. Real-weight tests found that
+FP32 error from two separate GEMMs followed by addition is amplified in ViT; small
+linear-layer tests alone cannot establish whole-network merge equivalence. Dropout
+is added as a rank-space correction and disabled for evaluation. This choice favors
+consistency at the cost of temporary matrices and backward work. Artifacts record
+`canonical_weight_plus_delta_v1`.
 
-`--save_state` 在定期及最终更新边界生成 `state-stepNNNNNN/`。状态包含 optimizer、实际全局消费样本数、各 rank 的 CPU/当前 CUDA 设备/Python/NumPy RNG、FP16 scaler、展开配置与数据/组批计划/基座/实现指纹。全部状态完成后才发布校验清单。恢复位置由成功 update、梯度累积和 world size 定位到全局批次，支持尾批和跨轮恢复。不传此参数时仍输出 `stepNNNNNN/` 权重，但这些目录不能 exact resume。
+`--save_state` creates `state-stepNNNNNN/` at periodic and final update boundaries.
+State includes the optimizer, actual global consumed-sample count, each rank's
+CPU/current-CUDA-device/Python/NumPy RNG, FP16 scaler, resolved configuration and
+data/batch-plan/base/implementation fingerprints. The checksum manifest is published
+only after all state is complete. Successful update count, gradient accumulation
+and world size locate the global resume batch, including short final batches and
+epoch transitions. Without this option, `stepNNNNNN/` weights are still saved, but
+those directories cannot provide exact resume.
 
-仅修改数据 TOML 注释或 CLI 参数排列顺序不会阻止恢复；修改学习率、优化器、rank、分桶、precision、attention、FP8 策略、world size、引用的数据、基座或训练实现会拒绝 exact resume。显式报告的路径和内容也属于恢复身份，未显式请求的目录内报告不参与该身份。CUDA 反向部分算子的非确定性仍需按数值容差验收，不承诺所有硬件间逐位一致。
+Changing only dataset TOML comments or CLI argument order does not prevent resume.
+Changing learning rate, optimizer, rank, bucketing, precision, attention, FP8 policy,
+world size, referenced data, base or training implementation rejects exact resume.
+Explicit report paths and contents are also part of resume identity; unrequested
+reports in the model directory are not. Nondeterministic CUDA backward operators
+still require tolerance-based acceptance. Bitwise equivalence across all hardware
+is not promised.
 
-旧 adapter 若缺少完整基座身份、rank/alpha 或 forward mode 元数据，也不会被静默接受。保留旧文件，重新生成受校验的产物。
+Legacy adapters missing complete base identity, rank/alpha or forward-mode metadata
+are also rejected. Keep the old files and regenerate validated artifacts.
 
-## 历史验证与回归
+## Validation History and Regression Tests
 
-2026-09-23，本机全库测试 159 项通过，无跳过，Ruff 检查通过。测试包含原始 310.8.0 权重在 RTX 4090 上的 FP32 全量/LoRA 单步更新、全部 ViT LoRA targets 的梯度和合并后的 raw-head 对照。CUDA smoke 使用 48×48 合成配对输入，不代表正式分辨率的性能、真实数据训练质量或 native parity。
+On 2026-09-23, the local full suite passed 159 tests with no skips, and Ruff passed.
+Tests covered original 310.8.0 weights on an RTX 4090: single FP32 full/LoRA updates,
+gradients for every ViT LoRA target, and raw-head comparisons after merging. The CUDA
+smoke tests used synthetic paired `48 x 48` inputs; they do not establish production-
+resolution performance, real-data training quality or native parity.
 
-开发环境未安装项目包时，可在仓库根目录设置 `PYTHONPATH` 后测试；正常运行仍应使用项目依赖环境。真实权重 CUDA 测试需本机源权重，默认查找仓库相邻的 `../OpenDLSS-NR/models/nr`，也可通过 `DLSSNR_SOURCE_DIR` 显式指定目录。缺少权重时，这些外部权重测试会跳过；不代表已通过真实权重验收。
+If the project package is not installed in a development environment, set
+`PYTHONPATH` at the repository root before testing. Normal use should still run in
+the project's dependency environment. Real-weight CUDA tests require local source
+weights, defaulting to the sibling `../OpenDLSS-NR/models/nr` directory, or a path
+set through `DLSSNR_SOURCE_DIR`. These external-weight tests skip when weights are
+unavailable; a skip is not real-weight acceptance.
 
 ```powershell
 $env:PYTHONPATH = "src"
@@ -338,3 +652,15 @@ $env:MKL_NUM_THREADS = "4"
 $env:DLSSNR_RUN_CUDA_SMOKE = "1"
 python -m pytest -q --tb=short
 ```
+
+DLL import/export integration tests are separately opt-in. Set `DLSSNR_DLL_PATH`
+to a user-supplied original DLL containing the audited resource:
+
+```powershell
+$env:DLSSNR_DLL_PATH = "D:/path/to/original/nvngx_dlssnr.dll"
+python -m pytest tests/test_dlssnr_dll_io.py -q
+```
+
+These tests cover original-byte reconstruction, changed-weight re-extraction,
+resetting to the original weights with `--mix 0`, and LoRA merging with its own
+multiplier. They write only temporary artifacts and never execute the DLL.

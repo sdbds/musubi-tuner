@@ -12,8 +12,9 @@ def main() -> None:
     parser.add_argument("--base_model_dir", required=True)
     parser.add_argument("--adapter", required=True)
     parser.add_argument("--output_dir", required=True)
+    parser.add_argument("--lora_multiplier", type=float, default=1.0, help="Scale only the LoRA delta (default 1)")
     args = parser.parse_args()
-    merge_to_directory(args.base_model_dir, args.adapter, args.output_dir)
+    merge_to_directory(args.base_model_dir, args.adapter, args.output_dir, multiplier=args.lora_multiplier)
     print(f"wrote merged checkpoint to {args.output_dir}")
 
 
