@@ -194,9 +194,11 @@ def _is_excluded(weight_name: str) -> bool:
     return weight_name.startswith("blocks.39.")
 
 
-def merge_adapter(base: dict[str, torch.Tensor], network: DLSSNRLoRA) -> dict[str, torch.Tensor]:
+def merge_adapter(base: dict[str, torch.Tensor], network: DLSSNRLoRA, *, multiplier: float = 1.0) -> dict[str, torch.Tensor]:
     from musubi_tuner.dlssnr.fp8 import canonical_tensor_sha256
 
+    if not math.isfinite(multiplier):
+        raise ValueError("LoRA multiplier must be finite")
     quantization = getattr(network, "base_quantization", None)
     if quantization is not None:
         if any(value.dtype == torch.float8_e4m3fn for value in base.values()):
@@ -208,11 +210,17 @@ def merge_adapter(base: dict[str, torch.Tensor], network: DLSSNRLoRA) -> dict[st
     for adapter in network.adapters:
         if adapter.target not in merged:
             raise KeyError(f"base is missing LoRA target {adapter.target}")
-        merged[adapter.target] = merged[adapter.target] + adapter.delta_weight().detach().to(merged[adapter.target])
+        if multiplier != 0:
+            delta = adapter.delta_weight().detach().to(merged[adapter.target])
+            merged[adapter.target] = merged[adapter.target] + delta * multiplier
+            if not torch.isfinite(merged[adapter.target]).all():
+                raise ValueError(f"{adapter.target}: merged LoRA weights must be finite")
     return merged
 
 
-def merge_to_directory(base_dir: str | Path, adapter_path: str | Path, output_dir: str | Path) -> None:
+def merge_to_directory(
+    base_dir: str | Path, adapter_path: str | Path, output_dir: str | Path, *, multiplier: float = 1.0
+) -> None:
     """Write a canonical directory whose weights are base + adapter. The base file is not modified."""
     from safetensors import safe_open
     from musubi_tuner.dlssnr.artifacts import inspect_canonical, save_canonical
@@ -220,6 +228,8 @@ def merge_to_directory(base_dir: str | Path, adapter_path: str | Path, output_di
 
     base = Path(base_dir)
     output = Path(output_dir)
+    if not math.isfinite(multiplier):
+        raise ValueError("LoRA multiplier must be finite")
     if output.resolve() == base.resolve():
         raise ValueError("refusing to overwrite the source canonical directory")
     inspect_canonical(base, development_smoke=True)
@@ -236,7 +246,7 @@ def merge_to_directory(base_dir: str | Path, adapter_path: str | Path, output_di
         model.requires_grad_(False)
         network.base_quantization = quantize_frozen_base(model, scaled=quantization["scaled"])
     load_adapter(network, adapter_path, identity)
-    merged = merge_adapter(materialize_state_dict(model), network)
+    merged = merge_adapter(materialize_state_dict(model), network, multiplier=multiplier)
     materialized = NRModel().to(dtype=torch.float32)
     materialized.load_state_dict(merged, strict=True)
     output_policy = {**policy, "fp8_base": False, "fp8_scaled": False} if policy is not None else None
@@ -248,6 +258,7 @@ def merge_to_directory(base_dir: str | Path, adapter_path: str | Path, output_di
             "experimental_surrogate": True,
             "base_weight_sha256": identity,
             "adapter": str(adapter_path),
+            "lora_multiplier": multiplier,
             "runtime_policy": output_policy,
             "training_runtime_policy": policy,
             "base_quantization": quantization,
@@ -260,6 +271,7 @@ def merge_to_directory(base_dir: str | Path, adapter_path: str | Path, output_di
                 "base_profile": PROFILE_ID,
                 "base_weight_sha256": identity,
                 "adapter": str(adapter_path),
+                "lora_multiplier": multiplier,
                 "targets": network.target_names,
                 "runtime_policy": output_policy,
                 "base_quantization": quantization,
