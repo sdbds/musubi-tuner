@@ -91,6 +91,24 @@ def single_frame_loss(
     }
 
 
+def joint_temporal_support(current_mask, previous_mask, motion, temporal_valid, reset) -> tuple[torch.Tensor, torch.Tensor]:
+    warped_mask, inside = warp_bilinear(previous_mask.float(), motion)
+    active = (~reset).view(-1, 1, 1, 1)
+    valid = temporal_valid.float() * inside * active * current_mask * warped_mask
+    return valid, warped_mask
+
+
+def masked_temporal_residual(
+    current, previous, target, previous_target, current_mask, previous_mask, motion, temporal_valid, reset
+) -> tuple[torch.Tensor, torch.Tensor]:
+    valid, warped_mask = joint_temporal_support(current_mask, previous_mask, motion, temporal_valid, reset)
+    # Normalize before differencing: excluded bilinear neighbors are not observations.
+    previous_error = torch.where(previous_mask > 0, previous - previous_target, 0) * previous_mask
+    warped_error, _ = warp_bilinear(previous_error, motion)
+    warped_error = warped_error / torch.where(warped_mask > 0, warped_mask, 1)
+    return current - target - warped_error, valid
+
+
 def temporal_rho(
     current: torch.Tensor,
     previous: torch.Tensor,

@@ -4,15 +4,33 @@ from __future__ import annotations
 
 import torch
 
-from musubi_tuner.dlssnr.losses import _rho, masked_gaussian_lowpass
+from musubi_tuner.dlssnr.losses import _rho, joint_temporal_support, masked_gaussian_lowpass, masked_temporal_residual
 from musubi_tuner.dlssnr.pipeline import forward_frame
 from musubi_tuner.dlssnr.temporal import warp_bilinear
+
+
+def supervised_values(value: torch.Tensor, burn_in: int) -> torch.Tensor:
+    if value.ndim == 4:
+        return value
+    if value.ndim != 5 or not 0 <= burn_in < value.shape[1]:
+        raise ValueError("supervised values require BCHW or BTCHW with valid burn_in")
+    return torch.cat(list(value[:, burn_in:].unbind(1)), dim=0)
 
 
 def _supervised_mask(batch, burn_in):
     source = batch["source"]
     mask = batch.get("loss_mask", torch.ones_like(source[..., :1, :, :]))
-    return mask if source.ndim == 4 else torch.cat(list(mask[:, burn_in:].unbind(1)), dim=0)
+    return supervised_values(mask, burn_in)
+
+
+def _joint_policy(batch, loss_profile):
+    policy = batch.get("temporal_support")
+    if policy not in (None, "joint_loss_mask"):
+        raise ValueError("unsupported temporal_support policy")
+    for name in ("preclamp_target", "edge_target"):
+        if name in batch and batch[name].shape != batch["target"].shape:
+            raise ValueError(f"{name} shape must match target exactly")
+    return loss_profile is not None or policy == "joint_loss_mask"
 
 
 def _temporal_mask(batch, index):
@@ -25,24 +43,26 @@ def _temporal_mask(batch, index):
     return batch["temporal_valid"][:, index].float() * inside * active
 
 
-def _frequency_temporal_masks(batch, index):
-    masks = batch.get("loss_mask")
-    if masks is None:
-        masks = torch.ones_like(batch["source"][:, :, :1])
-    previous = masks[:, index - 1]
-    warped, _ = warp_bilinear(previous, batch["motion"][:, index])
-    valid = _temporal_mask(batch, index) * masks[:, index] * warped
-    return valid, previous, warped
-
-
 def loss_denominators(batch, burn_in, *, loss_profile=None, include_dino=False, include_base_anchor=False):
+    joint = _joint_policy(batch, loss_profile)
     mask = _supervised_mask(batch, burn_in)
     count = 3 * mask.sum()
     edge = 3 * ((mask[..., 1:] * mask[..., :-1]).sum() + (mask[..., 1:, :] * mask[..., :-1, :]).sum())
     temporal = mask.new_zeros(())
     if batch["source"].ndim == 5:
+        masks = batch.get("loss_mask", torch.ones_like(batch["source"][:, :, :1]))
         for index in range(burn_in + 1, batch["source"].shape[1]):
-            valid = _temporal_mask(batch, index) if loss_profile is None else _frequency_temporal_masks(batch, index)[0]
+            valid = (
+                joint_temporal_support(
+                    masks[:, index],
+                    masks[:, index - 1],
+                    batch["motion"][:, index],
+                    batch["temporal_valid"][:, index],
+                    batch["reset"][:, index],
+                )[0]
+                if joint
+                else _temporal_mask(batch, index)
+            )
             temporal = temporal + 3 * valid.sum()
     result = {"pre": float(count), "out": float(count), "edge": float(edge), "temporal": float(temporal)}
     if include_dino:
@@ -87,6 +107,7 @@ def training_loss(
 ):
     if loss_profile is not None and loss_profile.get("name") != "frequency_split":
         raise ValueError("unsupported loss_profile")
+    joint = _joint_policy(batch, loss_profile)
     use_dino = weights.get("dino", 0) > 0
     if use_dino and dino_loss is None:
         raise ValueError("positive DINO loss weight requires a frozen feature backend")
@@ -97,17 +118,21 @@ def training_loss(
     outputs = supervised_outputs(model, batch, seeds, burn_in)
     preclamp = torch.cat([frame["neural_preclamp"] for frame in outputs], dim=0)
     rendered = torch.cat([frame["rendered_proxy"] for frame in outputs], dim=0)
-    target = torch.cat(list(batch["target"][:, burn_in:].unbind(1)), dim=0) if is_clip else batch["target"]
+    target = supervised_values(batch["target"], burn_in)
+    preclamp_target = supervised_values(batch.get("preclamp_target", batch["target"]), burn_in)
     mask = _supervised_mask(batch, burn_in)
-    pre_error, out_error = preclamp - target, rendered - target
+    pre_error, out_error = preclamp - preclamp_target, rendered - target
     edge_target = target
     metric_names = {}
     if loss_profile is not None:
         sigma = loss_profile["lowpass_sigma"]
         pre_error = masked_gaussian_lowpass(pre_error, mask, sigma)
         out_error = masked_gaussian_lowpass(out_error, mask, sigma)
-        edge_target = torch.cat(list(batch["source"][:, burn_in:].unbind(1)), dim=0) if is_clip else batch["source"]
+        edge_target = supervised_values(batch["source"], burn_in)
         metric_names = {"pre": "lowpass_pre", "out": "lowpass_out", "edge": "input_edge", "temporal": "lowpass_temporal"}
+    if "edge_target" in batch:
+        edge_target = supervised_values(batch["edge_target"], burn_in)
+        metric_names["edge"] = "control_edge"
     terms = {"pre": (_rho(pre_error) * mask).sum(), "out": (_rho(out_error) * mask).sum()}
     edge = rendered.new_zeros(())
     for dimension in (-1, -2):
@@ -116,22 +141,28 @@ def training_loss(
     terms["edge"] = edge
     terms["temporal"] = rendered.new_zeros(())
     if is_clip and weights.get("temporal", 0):
+        masks = batch.get("loss_mask", torch.ones_like(batch["source"][:, :, :1]))
         for offset in range(1, len(outputs)):
             index = burn_in + offset
-            if loss_profile is None:
+            if not joint:
                 valid = _temporal_mask(batch, index)
                 previous, _ = warp_bilinear(outputs[offset - 1]["rendered_proxy"], batch["motion"][:, index])
                 previous_target, _ = warp_bilinear(batch["target"][:, index - 1], batch["motion"][:, index])
                 error = (outputs[offset]["rendered_proxy"] - previous) - (batch["target"][:, index] - previous_target)
             else:
-                valid, previous_mask, warped_mask = _frequency_temporal_masks(batch, index)
-                previous_error = outputs[offset - 1]["rendered_proxy"] - batch["target"][:, index - 1]
-                # Normalize the masked warp before blurring; invalid bilinear neighbors must not leak into valid pixels.
-                previous_error = torch.where(previous_mask > 0, previous_error, 0) * previous_mask
-                previous, _ = warp_bilinear(previous_error, batch["motion"][:, index])
-                previous = previous / torch.where(warped_mask > 0, warped_mask, 1)
-                error = outputs[offset]["rendered_proxy"] - batch["target"][:, index] - previous
-                error = masked_gaussian_lowpass(error, valid, sigma)
+                error, valid = masked_temporal_residual(
+                    outputs[offset]["rendered_proxy"],
+                    outputs[offset - 1]["rendered_proxy"],
+                    batch["target"][:, index],
+                    batch["target"][:, index - 1],
+                    masks[:, index],
+                    masks[:, index - 1],
+                    batch["motion"][:, index],
+                    batch["temporal_valid"][:, index],
+                    batch["reset"][:, index],
+                )
+                if loss_profile is not None:
+                    error = masked_gaussian_lowpass(error, valid, sigma)
             terms["temporal"] = terms["temporal"] + (_rho(error) * valid).sum()
     if use_dino:
         # Each image's statistic is weighted by its original valid RGB mass, not

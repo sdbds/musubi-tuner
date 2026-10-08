@@ -8,6 +8,9 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from musubi_tuner.dlssnr import losses, training_step
+from test_dlssnr_frequency_loss import PROFILE, analytical_forward, clip_batch, still_batch  # noqa: F401
+
 
 SETTINGS = {"anchor_probability": 0.25, "corner_probability": 0.25, "residual_sigma": 6.0}
 
@@ -243,3 +246,162 @@ def test_target_kernel_rejects_broadcastable_shapes(field):
         args[field] = args[field][..., :1]
     with pytest.raises(ValueError, match="shape"):
         targets(**args)
+
+
+@pytest.mark.parametrize("profile", [None, PROFILE])
+def test_zero_point_has_zero_loss_in_both_profiles(monkeypatch, profile):
+    source, target, mask, _ = target_inputs()
+    render = torch.linspace(0.1, 0.8, source.numel()).reshape_as(source).requires_grad_()
+    preclamp = torch.full_like(source, 1.3, requires_grad=True)
+    teacher = {"neural_preclamp": preclamp.detach(), "rendered_proxy": render.detach()}
+    generated = targets(source, target, mask, teacher, teacher, torch.zeros(1, 2), input_edge=profile is not None)
+    batch = {
+        **still_batch(source, generated["target"], mask),
+        "preclamp_target": generated["preclamp_target"],
+        "edge_target": generated["edge_target"],
+    }
+
+    def forward(*args, **kwargs):
+        return {"neural_preclamp": preclamp.clone(), "rendered_proxy": render.clone(), "blend_weight": render.new_zeros(1)}
+
+    monkeypatch.setattr(training_step, "forward_frame", forward)
+    total, metrics = training_step.training_loss(None, batch, [3], {"pre": 1, "out": 1, "edge": 1}, loss_profile=profile)
+    assert total == 0
+    assert metrics["loss/control_edge"] == 0 and "loss/input_edge" not in metrics
+    total.backward()
+    assert preclamp.grad.eq(0).all() and render.grad.eq(0).all()
+
+
+@pytest.mark.parametrize("clip", [False, True])
+@pytest.mark.parametrize("field", ["preclamp_target", "edge_target", "temporal_support"])
+def test_loss_rejects_unknown_support_and_broadcastable_target_overrides(clip, field):
+    source = torch.ones((1, 3, 3, 5, 7) if clip else (1, 3, 5, 7))
+    batch = clip_batch(source, source) if clip else still_batch(source, source)
+    batch[field] = "unknown" if field == "temporal_support" else source[..., :1, :, :]
+    with pytest.raises(ValueError, match="shape|temporal_support"):
+        training_step.loss_denominators(batch, int(clip))
+    with pytest.raises(ValueError, match="shape|temporal_support"):
+        training_step.training_loss(None, batch, [[1, 2, 3]] if clip else [1], {"out": 1}, int(clip))
+
+
+def test_supervised_values_are_time_major_and_exclude_burn_in():
+    value = torch.arange(2 * 4 * 3 * 2 * 2).reshape(2, 4, 3, 2, 2)
+    actual = training_step.supervised_values(value, 1)
+    expected = torch.stack([value[0, 1], value[1, 1], value[0, 2], value[1, 2], value[0, 3], value[1, 3]])
+    assert torch.equal(actual, expected)
+    assert training_step.supervised_values(value[:, 0], 0) is not None
+    assert torch.equal(training_step.supervised_values(value[:, 0], 0), value[:, 0])
+
+
+def soft_temporal_batch():
+    generator = torch.Generator().manual_seed(25)
+    source = torch.rand(3, 3, 3, 5, 7, generator=generator)
+    target = torch.rand(source.shape, generator=generator)
+    mask = torch.ones(3, 3, 1, 5, 7)
+    mask[0, 1, :, 1:3, 2:4] = 0
+    mask[1, 1] *= 0.25
+    mask[1, 2] *= 0.4
+    mask[2] = 0
+    batch = clip_batch(source, target, mask)
+    batch["motion"][:, 2, 0] = 0.5
+    batch["temporal_valid"][0, 2, :, 3:, :2] = False
+    batch["temporal_support"] = "joint_loss_mask"
+    return batch
+
+
+def half_shift_oracle(value):
+    return F.pad((value[..., :-1] + value[..., 1:]) * 0.5, (0, 1))
+
+
+@pytest.mark.parametrize("profile", [None, PROFILE])
+@pytest.mark.usefixtures("analytical_forward")
+def test_joint_temporal_denominator_matches_residual_with_soft_masks(profile):
+    batch = soft_temporal_batch()
+    mask, motion, target = batch["loss_mask"], batch["motion"], batch["target"]
+    prediction = (batch["source"] * 0.8).requires_grad_()
+    previous_coverage = half_shift_oracle(mask[:, 1])
+    valid = mask[:, 2] * previous_coverage * batch["temporal_valid"][:, 2]
+    previous_error = (prediction[:, 1] - target[:, 1]) * mask[:, 1]
+    previous_error = half_shift_oracle(previous_error) / torch.where(previous_coverage > 0, previous_coverage, 1)
+    expected_error = prediction[:, 2] - target[:, 2] - previous_error
+    actual_error, actual_valid = losses.masked_temporal_residual(
+        prediction[:, 2],
+        prediction[:, 1],
+        target[:, 2],
+        target[:, 1],
+        mask[:, 2],
+        mask[:, 1],
+        motion[:, 2],
+        batch["temporal_valid"][:, 2],
+        batch["reset"][:, 2],
+    )
+    torch.testing.assert_close(actual_error, expected_error, rtol=1e-5, atol=5e-7)
+    torch.testing.assert_close(actual_valid, valid, rtol=1e-5, atol=2e-7)
+    counts = training_step.loss_denominators(batch, 1, loss_profile=profile)
+    assert counts["temporal"] == pytest.approx(float(3 * valid.sum()))
+    if profile is not None:
+        expected_error = direct_gaussian(expected_error, valid, profile["lowpass_sigma"]).float()
+    expected = (losses._rho(expected_error) * valid).sum() / counts["temporal"]
+    weights = {"temporal": 1}
+    seeds = [[1, 2, 3], [4, 5, 6], [7, 8, 9]]
+    full, _ = training_step.training_loss(prediction, batch, seeds, weights, 1, loss_profile=profile)
+    torch.testing.assert_close(full, expected, rtol=1e-5, atol=5e-7)
+    gradient = torch.autograd.grad(full, prediction)[0]
+    partial = []
+    for index in range(3):
+        part = {name: value[index : index + 1] if isinstance(value, torch.Tensor) else value for name, value in batch.items()}
+        loss, _ = training_step.training_loss(
+            prediction[index : index + 1], part, seeds[index : index + 1], weights, 1, counts, loss_profile=profile
+        )
+        partial.append(loss)
+    accumulated = sum(partial)
+    torch.testing.assert_close(accumulated, full, rtol=1e-6, atol=1e-7)
+    torch.testing.assert_close(torch.autograd.grad(accumulated, prediction)[0], gradient, rtol=1e-5, atol=1e-8)
+    altered = {**batch, "target": target.masked_fill(mask.expand_as(target) == 0, 500)}
+    other, _ = training_step.training_loss(prediction, altered, seeds, weights, 1, loss_profile=profile)
+    torch.testing.assert_close(other, full, rtol=0, atol=0)
+    torch.testing.assert_close(torch.autograd.grad(other, prediction)[0], gradient, rtol=0, atol=0)
+
+
+@pytest.mark.usefixtures("analytical_forward")
+def test_joint_policy_does_not_square_frequency_support():
+    batch = soft_temporal_batch()
+    counts = training_step.loss_denominators(batch, 1, loss_profile=PROFILE)
+    with_policy, _ = training_step.training_loss(batch["source"], batch, [[1, 2, 3]] * 3, {"temporal": 1}, 1, loss_profile=PROFILE)
+    ordinary = {key: value for key, value in batch.items() if key != "temporal_support"}
+    old_counts = training_step.loss_denominators(ordinary, 1, loss_profile=PROFILE)
+    original, _ = training_step.training_loss(batch["source"], ordinary, [[1, 2, 3]] * 3, {"temporal": 1}, 1, loss_profile=PROFILE)
+    assert counts == old_counts
+    torch.testing.assert_close(with_policy, original, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("inactive", ["reset", "outside", "previous_mask", "current_mask"])
+@pytest.mark.usefixtures("analytical_forward")
+def test_joint_support_reset_outside_or_missing_labels_has_zero_gradient(inactive):
+    batch = soft_temporal_batch()
+    if inactive == "reset":
+        batch["reset"][:, 2] = True
+    elif inactive == "outside":
+        batch["motion"][:, 2] = 100
+    else:
+        batch["loss_mask"][:, 1 if inactive == "previous_mask" else 2] = 0
+    prediction = batch["source"].clone().requires_grad_()
+    total, _ = training_step.training_loss(prediction, batch, [[1, 2, 3]] * 3, {"temporal": 1}, 1)
+    assert training_step.loss_denominators(batch, 1)["temporal"] == 0
+    assert total == 0
+    total.backward()
+    assert prediction.grad.eq(0).all()
+
+
+@pytest.mark.usefixtures("analytical_forward")
+def test_legacy_pixel_temporal_support_remains_geometric_not_label_masked():
+    batch = soft_temporal_batch()
+    del batch["temporal_support"]
+    previous = half_shift_oracle(batch["source"][:, 1])
+    previous_target = half_shift_oracle(batch["target"][:, 1])
+    error = batch["source"][:, 2] - previous - (batch["target"][:, 2] - previous_target)
+    valid = batch["temporal_valid"][:, 2].clone()
+    valid[..., -1] = False
+    expected = (losses._rho(error) * valid).sum() / (3 * valid.sum())
+    actual, _ = training_step.training_loss(batch["source"], batch, [[1, 2, 3]] * 3, {"temporal": 1}, 1)
+    torch.testing.assert_close(actual, expected, rtol=1e-6, atol=1e-7)
