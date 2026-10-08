@@ -14,8 +14,16 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
+from musubi_tuner.dlssnr.identity import json_sha256
+
 HISTORY_SAMPLER = "bilinear"
 SEED_POLICY = "dlssnr_seed_v1"
+AUGMENTATION_SEED_POLICY = "dlssnr_augmentation_seed_v1"
+
+
+def augmentation_seed(seed: int, epoch: int, sample_id: str, crop_id: int, *, domain: str) -> int:
+    digest = json_sha256([AUGMENTATION_SEED_POLICY, domain, seed, epoch, sample_id, crop_id])
+    return int(digest[:16], 16)
 
 
 def stable_frame_seed(global_seed: int, epoch: int, sample_id: str, frame_index: int, crop_id: int = 0) -> int:
