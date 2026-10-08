@@ -6,6 +6,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset
 
+from musubi_tuner.dlssnr.controls import fixed_control_tensor
 from musubi_tuner.dlssnr.identity import json_sha256
 from musubi_tuner.dlssnr.temporal import AUGMENTATION_SEED_POLICY, augmentation_seed
 
@@ -76,6 +77,10 @@ def synthesize_clip(sample: dict, offsets: torch.Tensor) -> dict:
         raise ValueError("the first synthetic offset must be zero")
     source, target, controls, mask = (sample[name] for name in ("source", "target", "controls", "loss_mask"))
     height, width = source.shape[-2:]
+    if "fixed_controls" in sample:
+        # Bucket antialiasing can perturb constant lanes by a few FP32 ulps.
+        with torch.device(source.device):
+            controls = fixed_control_tensor(sample["fixed_controls"], width, height)
     offsets = offsets.to(device=source.device, dtype=torch.float32)
     frames, previous_support = [], None
     with torch.autocast(source.device.type, enabled=False):

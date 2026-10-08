@@ -1,7 +1,8 @@
 # DLSS-NR Random Controls and Synthetic Temporal Training
 
-**Status:** Approved on 2026-10-08. Approach A and the detailed design were
-confirmed; implementation plans are the next review gate.
+**Status:** Approved on 2026-10-08. Approach A, the detailed design and both
+implementation plans were confirmed. Implementation and validation are recorded
+in the corresponding plans.
 **Baseline:** `DLSSNR` at `cf50676`.
 
 ## 1. Scope

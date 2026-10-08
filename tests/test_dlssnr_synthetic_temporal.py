@@ -283,3 +283,17 @@ def test_wrapper_rejects_real_clips_and_loss_masks_without_safe_support(tmp_path
     with pytest.raises(ValueError, match="support"):
         wrapper.validate()
     synthetic_api().NRSyntheticTemporalDataset(base, 3, seed=4, max_shift_px=0).validate()
+
+
+def test_bucket_resized_fixed_controls_remain_exact_in_synthetic_clips(tmp_path):
+    path = write_pairs(tmp_path, [(513, 377)])
+    base = load_single_frame_manifest(
+        path, 128, 128, enable_bucket=True, fixed_controls={"nr_style": 15, "nr_tone": 0.7, "nr_structure": 0.3}
+    )
+    original_controls = base[0]["controls"].clone()
+    wrapper = synthetic_api().NRSyntheticTemporalDataset(base, 3, seed=4, max_shift_px=0.5)
+    clip = wrapper[0]
+    expected = torch.tensor([15 / 128, 0.7001953125, 1, 0.300048828125, 0.300048828125])[:, None, None].expand_as(original_controls)
+    for frame in clip["frames"]:
+        torch.testing.assert_close(frame["controls"], expected, rtol=0, atol=0)
+    torch.testing.assert_close(base[0]["controls"], original_controls, rtol=0, atol=0)

@@ -1,6 +1,6 @@
 # DLSS-NR Synthetic Temporal Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Lazily turn paired still images into reproducible subpixel clips for the existing temporal trainer and labeled evaluation.
 
@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-08-dlssnr-control-randomization-synthetic-temporal-design.md`, especially sections 4-8.
 
-**Execution:** Native/inline in this chat, without subagents or delegated reviews. Implement after `2026-10-08-dlssnr-control-randomization.md`; only its seed and temporal-mask helpers are runtime prerequisites. Implementation awaits plan review.
+**Execution:** Native/inline in this chat, without subagents or delegated reviews. Implement after `2026-10-08-dlssnr-control-randomization.md`; only its seed and temporal-mask helpers are runtime prerequisites. Approved and implemented inline on 2026-10-08. See the final verification record below.
 
 ## Global Constraints
 
@@ -61,8 +61,8 @@ at the end. Preserve and report optional dependency/environment limitations.
 - `validate_synthetic_support(sample: dict, max_shift_px: float) -> None`: require a positive loss-mask pixel in the interior with margin `ceil(max_shift_px)`; handle margin zero without slicing away the image.
 - `synthesize_clip(sample: dict, offsets: Tensor) -> dict`: return existing clip metadata plus `frames` and `temporal_support='joint_loss_mask'`. Frames expose the existing tensor/reset/frame-index fields. Reject nonzero initial offsets. Source and target shapes remain the bucket size.
 
-- [ ] **Step 1: Write failing translation/oracle tests.** Use 48x64 ramp and impulse images and a source frame index of 10. Assert frame indices `[10,11,12]`, first-frame exact values, reset/history rules, motion signs, and that each frame matches independently sampling the original image rather than the previously warped frame.
-- [ ] **Step 2: Add the border-footprint and zero-shift regressions.** For offsets `[(0,0),(0.5,0),(0,0)]`, the last frame's right-edge previous center is in bounds but its history mask must be false. For zero shifts and an edge-only mask:
+- [x] **Step 1: Write failing translation/oracle tests.** Use 48x64 ramp and impulse images and a source frame index of 10. Assert frame indices `[10,11,12]`, first-frame exact values, reset/history rules, motion signs, and that each frame matches independently sampling the original image rather than the previously warped frame.
+- [x] **Step 2: Add the border-footprint and zero-shift regressions.** For offsets `[(0,0),(0.5,0),(0,0)]`, the last frame's right-edge previous center is in bounds but its history mask must be false. For zero shifts and an edge-only mask:
   ```python
   validate_synthetic_support(sample, 0)
   clip = synthesize_clip(sample, torch.zeros(3, 2))
@@ -71,10 +71,10 @@ at the end. Preserve and report optional dependency/environment limitations.
       torch.testing.assert_close(frame['loss_mask'], sample['loss_mask'], rtol=0, atol=0)
   ```
   Name these `test_history_rejects_invalid_previous_footprint` and `test_zero_shift_keeps_edge_mask_support`.
-- [ ] **Step 3: Add soft-mask/label-hole tests and run RED.** Assert `warp(target*mask)/warp(mask)` against an independent oracle, excluded-label invariance, finite neutral fill, constant fixed controls, translated spatial control maps, and rejection of absent safe support. Run `python -m pytest -q tests/test_dlssnr_synthetic_temporal.py`.
-- [ ] **Step 4: Implement the generator.** Use PyTorch bilinear sampling with explicit pixel-center conventions. Preserve exact zero-offset values. Build geometric support and test the contributing previous-frame pixel footprint, not merely its center. Generate binary history/temporal geometry masks; continuous label masks are combined by the shared loss helper.
-- [ ] **Step 5: Run GREEN and temporal regressions.** `python -m pytest -q tests/test_dlssnr_synthetic_temporal.py tests/test_dlssnr_temporal.py tests/test_dlssnr_frequency_loss.py`.
-- [ ] **Step 6: Review and commit.** Commit message: `feat(dlssnr): generate masked subpixel clips from paired stills`.
+- [x] **Step 3: Add soft-mask/label-hole tests and run RED.** Assert `warp(target*mask)/warp(mask)` against an independent oracle, excluded-label invariance, finite neutral fill, constant fixed controls, translated spatial control maps, and rejection of absent safe support. Run `python -m pytest -q tests/test_dlssnr_synthetic_temporal.py`.
+- [x] **Step 4: Implement the generator.** Use PyTorch bilinear sampling with explicit pixel-center conventions. Preserve exact zero-offset values. Build geometric support and test the contributing previous-frame pixel footprint, not merely its center. Generate binary history/temporal geometry masks; continuous label masks are combined by the shared loss helper.
+- [x] **Step 5: Run GREEN and temporal regressions.** `python -m pytest -q tests/test_dlssnr_synthetic_temporal.py tests/test_dlssnr_temporal.py tests/test_dlssnr_frequency_loss.py`.
+- [x] **Step 6: Review and commit.** Commit message: `feat(dlssnr): generate masked subpixel clips from paired stills`.
 
 ## Task 2: Epoch-Aware Datasets and Configuration
 
@@ -86,15 +86,15 @@ at the end. Preserve and report optional dependency/environment limitations.
 - Virtual rows report generated frame indices/reset flags and actual clip length. `synthetic_protocol` uses schema `dlssnr_synthetic_temporal_v1` and records seed policy/seed, length, shift, interpolation, footprint validity and temporal metric policy.
 - Resolve enabled TOML fields to `data_entry['synthetic_temporal'] = {'schema': 'dlssnr_synthetic_temporal_v1', 'max_shift_px': value}`; omit the entry when disabled. Wrapper construction supplies length/seed from the existing training config.
 
-- [ ] **Step 1: Write config RED tests.** Cover general/dataset inheritance, bool/numeric validation, explicit shift with disabled synthesis, non-temporal rejection, directory acceptance only when marked, single-frame manifest enforcement and unchanged real-clip validation.
+- [x] **Step 1: Write config RED tests.** Cover general/dataset inheritance, bool/numeric validation, explicit shift with disabled synthesis, non-temporal rejection, directory acceptance only when marked, single-frame manifest enforcement and unchanged real-clip validation.
   Inheritance clarification: an explicitly disabled dataset may discard an inherited shift default, but declaring a local shift while disabled is an error. A general shift default with no enabled consumer is also an error. Pin this in `test_synthetic_inheritance_respects_dataset_disable`.
-- [ ] **Step 2: Write epoch/collection tests.** Two repeats of the same source get different logical seeds and trajectories at positive shift. Fetching the same logical sample/epoch after other accesses returns exactly the same clip; changing epoch changes its trajectory without consuming global RNG. `dataset[index]` must match `get_sample(index, epoch=0)`.
-- [ ] **Step 3: Add batch-plan/collation tests and run RED.** Assert generated `frames` counts, consumed-sample counts and fingerprints with multiple entries, repeats, bucket tails and mixed real/synthetic sources. `collate_clips` preserves homogeneous support policy and rejects a manually mixed-policy microbatch. Run `python -m pytest -q tests/test_dlssnr_synthetic_temporal.py tests/test_dlssnr_synthetic_temporal_training.py`.
-- [ ] **Step 4: Implement loaders and the wrapper.** Move existing ordinary sample loading behind `get_sample` without changing its tensors. Delegate source validation/fingerprints, perform safe-support checks, and generate clips only on access. In `_microbatch`, calculate epoch before loading and use `get_sample`; the final sample metadata remains available to the control sampler.
-- [ ] **Step 5: Implement the data/config factory changes.** Wrap marked still sources in temporal mode; preserve existing real-clip factories. Keep dataset-specific grouping, IDs and overlap checks. Resolve fixed controls as before. Bind the new transform module/protocol to metadata and exact resume; do not allocate an NR reference merely because synthetic clips are enabled.
-- [ ] **Step 6: Add a two-update synthetic-only trainer test and the example TOML.** Reuse `small_math`; keep `control_randomization` off. Assert temporal head/blend gradients are finite/nonzero, no frozen reference is constructed, and the saved batch plan reports the configured clip length. Document `4/2/2` and explicit `--loss_temporal 0.1` as an example, not defaults.
-- [ ] **Step 7: Run GREEN and loader/runner regressions.** `python -m pytest -q tests/test_dlssnr_synthetic_temporal.py tests/test_dlssnr_synthetic_temporal_training.py tests/test_dlssnr_dataset.py tests/test_dlssnr_directory_dataset.py tests/test_dlssnr_buckets.py tests/test_dlssnr_shuffle.py tests/test_dlssnr_native_crop.py tests/test_dlssnr_training.py`.
-- [ ] **Step 8: Review and commit.** Commit message: `feat(dlssnr): integrate reproducible synthetic temporal datasets`.
+- [x] **Step 2: Write epoch/collection tests.** Two repeats of the same source get different logical seeds and trajectories at positive shift. Fetching the same logical sample/epoch after other accesses returns exactly the same clip; changing epoch changes its trajectory without consuming global RNG. `dataset[index]` must match `get_sample(index, epoch=0)`.
+- [x] **Step 3: Add batch-plan/collation tests and run RED.** Assert generated `frames` counts, consumed-sample counts and fingerprints with multiple entries, repeats, bucket tails and mixed real/synthetic sources. `collate_clips` preserves homogeneous support policy and rejects a manually mixed-policy microbatch. Run `python -m pytest -q tests/test_dlssnr_synthetic_temporal.py tests/test_dlssnr_synthetic_temporal_training.py`.
+- [x] **Step 4: Implement loaders and the wrapper.** Move existing ordinary sample loading behind `get_sample` without changing its tensors. Delegate source validation/fingerprints, perform safe-support checks, and generate clips only on access. In `_microbatch`, calculate epoch before loading and use `get_sample`; the final sample metadata remains available to the control sampler.
+- [x] **Step 5: Implement the data/config factory changes.** Wrap marked still sources in temporal mode; preserve existing real-clip factories. Keep dataset-specific grouping, IDs and overlap checks. Resolve fixed controls as before. Bind the new transform module/protocol to metadata and exact resume; do not allocate an NR reference merely because synthetic clips are enabled.
+- [x] **Step 6: Add a two-update synthetic-only trainer test and the example TOML.** Reuse `small_math`; keep `control_randomization` off. Assert temporal head/blend gradients are finite/nonzero, no frozen reference is constructed, and the saved batch plan reports the configured clip length. Document `4/2/2` and explicit `--loss_temporal 0.1` as an example, not defaults.
+- [x] **Step 7: Run GREEN and loader/runner regressions.** `python -m pytest -q tests/test_dlssnr_synthetic_temporal.py tests/test_dlssnr_synthetic_temporal_training.py tests/test_dlssnr_dataset.py tests/test_dlssnr_directory_dataset.py tests/test_dlssnr_buckets.py tests/test_dlssnr_shuffle.py tests/test_dlssnr_native_crop.py tests/test_dlssnr_training.py`.
+- [x] **Step 8: Review and commit.** Commit message: `feat(dlssnr): integrate reproducible synthetic temporal datasets`.
 
 ## Task 3: Labeled Synthetic Validation
 
@@ -105,13 +105,13 @@ at the end. Preserve and report optional dependency/environment limitations.
 - `evaluate` records `synthetic_temporal=dataset.synthetic_protocol` for synthetic configured/native cases, tracks previous label masks and resets them with histories/targets.
 - Extend `_accumulate(..., *, previous_mask=None, temporal_support=None)` without changing default behavior. The joint policy uses `masked_temporal_residual` for both absolute sums and valid-RGB counts; ordinary cases keep the original path.
 
-- [ ] **Step 1: Write fixed-validation tests.** Two evaluations after arbitrary training-epoch accesses return equal metrics and trajectories. Assert synthetic protocol tags exist for configured/native outputs and real sequence manifests retain their original frames and masks.
-- [ ] **Step 2: Write `test_synthetic_temporal_metric_ignores_neutral_fill_and_resets`.** Perturb target values outside masks and compare temporal MAE; assert equality. Insert a reset and verify no previous target/mask survives it. Compare the metric with a direct joint-support oracle. Add a real-case regression asserting the report is unchanged.
-- [ ] **Step 3: Add `test_native_comparison_uses_previous_frame_mask_for_both_modes`.** Compare native temporal MAE in a combined report with a standalone native-policy evaluation using varying masks. Update the remembered mask only after both runtime modes finish the frame.
-- [ ] **Step 4: Run RED.** `python -m pytest -q tests/test_dlssnr_synthetic_temporal_evaluation.py`.
-- [ ] **Step 5: Implement factory/evaluator changes and document the separate evidence types.** Maintain independent histories for configured/native and alternate-noise probes. Reuse existing content/detail metrics on valid pixels. Do not introduce randomized validation targets or controls.
-- [ ] **Step 6: Run GREEN and evaluation regressions.** `python -m pytest -q tests/test_dlssnr_synthetic_temporal_evaluation.py tests/test_dlssnr_content_evaluation.py tests/test_dlssnr_detail_evaluation.py tests/test_dlssnr_deployment_evaluation.py`.
-- [ ] **Step 7: Review and commit.** Commit message: `feat(dlssnr): evaluate synthetic clips with valid temporal support`.
+- [x] **Step 1: Write fixed-validation tests.** Two evaluations after arbitrary training-epoch accesses return equal metrics and trajectories. Assert synthetic protocol tags exist for configured/native outputs and real sequence manifests retain their original frames and masks.
+- [x] **Step 2: Write `test_synthetic_temporal_metric_ignores_neutral_fill_and_resets`.** Perturb target values outside masks and compare temporal MAE; assert equality. Insert a reset and verify no previous target/mask survives it. Compare the metric with a direct joint-support oracle. Add a real-case regression asserting the report is unchanged.
+- [x] **Step 3: Add `test_native_comparison_uses_previous_frame_mask_for_both_modes`.** Compare native temporal MAE in a combined report with a standalone native-policy evaluation using varying masks. Update the remembered mask only after both runtime modes finish the frame.
+- [x] **Step 4: Run RED.** `python -m pytest -q tests/test_dlssnr_synthetic_temporal_evaluation.py`.
+- [x] **Step 5: Implement factory/evaluator changes and document the separate evidence types.** Maintain independent histories for configured/native and alternate-noise probes. Reuse existing content/detail metrics on valid pixels. Do not introduce randomized validation targets or controls.
+- [x] **Step 6: Run GREEN and evaluation regressions.** `python -m pytest -q tests/test_dlssnr_synthetic_temporal_evaluation.py tests/test_dlssnr_content_evaluation.py tests/test_dlssnr_detail_evaluation.py tests/test_dlssnr_deployment_evaluation.py`.
+- [x] **Step 7: Review and commit.** Commit message: `feat(dlssnr): evaluate synthetic clips with valid temporal support`.
 
 ## Task 4: Combined Training and Final Acceptance
 
@@ -119,13 +119,22 @@ at the end. Preserve and report optional dependency/environment limitations.
 
 **Interfaces:** Reuse the existing two-process harness and the preceding plan's control marker. A `synthetic_temporal` marker selects still inputs with temporal mode `3/1/2`, while the loader reports actual generated clips. Failure markers must be specific to this path.
 
-- [ ] **Step 1: Add combined integration tests.** Cover synthesis alone and synthesis plus randomized controls, full/LoRA, QAT, FP8 LoRA, EMA, anchoring, both loss profiles and tiny DINO. Assert each sampled control point stays constant over all frames, targets use the correctly ordered reference snapshots, and exports contain no teachers.
-- [ ] **Step 2: Add exact-resume and retry tests.** Compare raw/EMA/optimizer state, logical sample IDs, sampled controls, trajectories and RNG for uninterrupted/resumed runs across an epoch boundary and partial bucket tails. Changed shift, seed, sampler, clip length or source files must invalidate resume. Overflow retries must not resample controls or motion.
-- [ ] **Step 3: Add DDP equivalence and error tests.** Compare equivalent global accumulation with fractional masks, mixed source groups and short tails. Assert all control metrics are globally weighted once. Inject a rank-local synthetic sample failure and a reference failure, and verify both workers stop without complete checkpoint output.
-- [ ] **Step 4: Run the new synthetic and control acceptance files.** `python -m pytest -q tests/test_dlssnr_control_randomization.py tests/test_dlssnr_control_randomization_training.py tests/test_dlssnr_control_randomization_distributed.py tests/test_dlssnr_synthetic_temporal.py tests/test_dlssnr_synthetic_temporal_training.py tests/test_dlssnr_synthetic_temporal_evaluation.py tests/test_dlssnr_synthetic_temporal_distributed.py`. Expected: all new tests pass, all processes exit, and legacy opt-out paths remain unchanged. Fix failures before broad verification.
-- [ ] **Step 5: Run the full DLSS-NR test selection once, then Ruff/format/diff checks on all touched files.** Enumerate `test_dlssnr*.py` using `rg --files`; do not select the whole repository with `-k` and accidentally collect unrelated missing-dependency modules. Record passes, skips and any reproduced pre-existing environment failures separately. No pretrained download or real CUDA/DLL workload is enabled implicitly.
-- [ ] **Step 6: Review both features against the approved spec and commit the acceptance tests/docs.** Commit message: `test(dlssnr): verify synthetic and randomized temporal training`.
+- [x] **Step 1: Add combined integration tests.** Cover synthesis alone and synthesis plus randomized controls, full/LoRA, QAT, FP8 LoRA, EMA, anchoring, both loss profiles and tiny DINO. Assert each sampled control point stays constant over all frames, targets use the correctly ordered reference snapshots, and exports contain no teachers.
+- [x] **Step 2: Add exact-resume and retry tests.** Compare raw/EMA/optimizer state, logical sample IDs, sampled controls, trajectories and RNG for uninterrupted/resumed runs across an epoch boundary and partial bucket tails. Changed shift, seed, sampler, clip length or source files must invalidate resume. Overflow retries must not resample controls or motion.
+- [x] **Step 3: Add DDP equivalence and error tests.** Compare equivalent global accumulation with fractional masks, mixed source groups and short tails. Assert all control metrics are globally weighted once. Inject a rank-local synthetic sample failure and a reference failure, and verify both workers stop without complete checkpoint output.
+- [x] **Step 4: Run the new synthetic and control acceptance files.** `python -m pytest -q tests/test_dlssnr_control_randomization.py tests/test_dlssnr_control_randomization_training.py tests/test_dlssnr_control_randomization_distributed.py tests/test_dlssnr_synthetic_temporal.py tests/test_dlssnr_synthetic_temporal_training.py tests/test_dlssnr_synthetic_temporal_evaluation.py tests/test_dlssnr_synthetic_temporal_distributed.py`. Expected: all new tests pass, all processes exit, and legacy opt-out paths remain unchanged. Fix failures before broad verification.
+- [x] **Step 5: Run the full DLSS-NR test selection once, then Ruff/format/diff checks on all touched files.** Enumerate `test_dlssnr*.py` using `rg --files`; do not select the whole repository with `-k` and accidentally collect unrelated missing-dependency modules. Record passes, skips and any reproduced pre-existing environment failures separately. No pretrained download or real CUDA/DLL workload is enabled implicitly.
+- [x] **Step 6: Review both features against the approved spec and commit the acceptance tests/docs.** Commit message: `test(dlssnr): verify synthetic and randomized temporal training`.
 
 The final handoff must state which code paths were verified and which real-data
 experiments remain. Do not equate deterministic synthetic motion or target
 construction with measured quality, monotonic controls, or native DLL acceptance.
+
+## Final Verification
+
+- New control and synthetic-temporal tests: 157 passed, no skips or failures.
+- Full DLSS-NR selection: 897 passed, 25 skipped, 1 pre-existing optional FlashAttention extension failure (`flash_attn_2_cuda` DLL import).
+- Bare repository pytest: collection blocked by missing `easydict` in four existing MiniMax H3 modules (generation modes, generation request, sampling and temporal stretch).
+- Ruff, formatting and whitespace checks passed on touched files. No pretrained download or real-weight quality experiment was run.
+- Review is by the implementer, not an independent agent, as requested. Commits remain local; no push or merge.
+- Two narrow implementation corrections were verified: explicit CPU/FP32 private sampling, and exact fixed-control re-encoding after bucket interpolation on the enabled synthetic path.

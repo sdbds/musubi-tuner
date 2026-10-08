@@ -101,8 +101,10 @@ Existing data can still use `train_manifest` instead of the two directory fields
 Its default `nr_controls_mode = "files"` reads the existing `controls_path`.
 Selecting `fixed` explicitly overrides `controls_path` in that dataset and its
 validation manifests with the TOML conditions; overridden NPY files are not read.
-Temporal data still requires a manifest declaring frame order, motion and validity
-masks. Ordinary directory images are not automatically treated as clips.
+Real temporal data requires a manifest declaring frame order, motion and validity
+masks. Directory pairs or single-frame manifests can instead opt into
+`synthetic_temporal = true`, as described under Synthetic Temporal Clips below;
+ordinary still images are not automatically treated as clips.
 `caption_extension` and `cache_directory` may remain in shared dataset settings,
 but NR reads neither captions nor diffusion caches.
 
@@ -1045,6 +1047,8 @@ Common arguments:
 | `--sdpa` / `--xformers` / `--flash_attn` / `--attention_scope` | Explicit experimental attention and its scope; restrictions are listed above. |
 | `--loss_pre` / `--loss_out` / `--loss_edge` / `--loss_temporal` | Loss weights, defaulting to `1`, `1`, `0.05` and `0`, respectively. |
 | `--loss_profile` / `--loss_lowpass_sigma` | `pixel` is the unchanged default. Optional `frequency_split` uses low-frequency target matching and input edges; sigma defaults to `6` in transformed pixels. |
+| `--control_randomization` | Opt-in tone/structure sampling with detached base-relative targets; requires positive fixed reference controls in every training dataset. |
+| `--control_residual_sigma` / `--control_anchor_probability` / `--control_corner_probability` | Target-band sigma and sampling probabilities; enabled defaults are `6`, `0.25`, `0.25`. These options require control randomization. |
 | `--prior_lr_multiplier` / `--scale_lr_multiplier` / `--temporal_blend_lr_multiplier` | Full-training parameter-group multipliers, default `0.1`. The LoRA entry point rejects these arguments. |
 | `--sample_every_n_steps` / `--min_sequence_frames` | Validation interval and minimum temporal evaluation frame count. A nonzero interval requires validation manifests in the dataset TOML. |
 | `--no-compare_baseline` | Disables the initial-base comparison, which is enabled by default. |

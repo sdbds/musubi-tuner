@@ -111,7 +111,7 @@ def _args(root, name, *, lora=False, distributed=False, dropout=0.0, resume=Fals
         args.network_dropout = dropout
     if (root / "fp8").exists():
         args.numerics_profile, args.fp8_base, args.fp8_scaled = "train_experimental", True, True
-    if (root / "temporal").exists():
+    if (root / "temporal").exists() or (root / "synthetic_temporal").exists():
         args.training_mode = "temporal"
         args.sequence_length, args.burn_in, args.tbptt_length = 3, 1, 2
         args.loss_temporal = 0.1
@@ -156,6 +156,7 @@ def _data(root, *, temporal=False):
                     {
                         "train_manifest": "pairs.jsonl",
                         **({"nr_controls_mode": "fixed"} if (root / "control_randomization").exists() else {}),
+                        **({"synthetic_temporal": True} if (root / "synthetic_temporal").exists() else {}),
                     }
                 ],
             }
@@ -322,6 +323,17 @@ def _worker(root, rank, lora, dropout, resume, failure):
 
     trainer.NRModel = SmallNR
     lora_dlssnr.inject = small_inject
+    if (root / "fail_synthetic_sample").exists():
+        from musubi_tuner.dlssnr.synthetic_temporal import NRSyntheticTemporalDataset
+
+        original_sample = NRSyntheticTemporalDataset.get_sample
+
+        def fail_synthetic_sample(self, *args, **kwargs):
+            if rank == 1:
+                raise RuntimeError("synthetic sample failed")
+            return original_sample(self, *args, **kwargs)
+
+        NRSyntheticTemporalDataset.get_sample = fail_synthetic_sample
     if (root / "fp8").exists():
         from test_dlssnr_fp8 import TinyFP8NR, tiny_fp8_inject
 
@@ -395,13 +407,15 @@ def _worker(root, rank, lora, dropout, resume, failure):
     def observed(dataset, index, config, plan):
         indices.append(plan.indices(index))
         batch, seeds = original(dataset, index, config, plan)
-        if "control_ratios" in batch:
+        if "control_ratios" in batch or (root / "synthetic_temporal").exists():
             augmentation.append(
                 {
                     "sample_ids": [dataset.rows[item]["sample_id"] for item in plan.indices(index)],
                     "epoch": index // len(plan),
-                    "ratios": batch["control_ratios"].tolist(),
+                    "ratios": batch["control_ratios"].tolist() if "control_ratios" in batch else None,
                     "seeds": seeds,
+                    "motion_sha256": hashlib.sha256(batch["motion"].numpy().tobytes()).hexdigest() if "motion" in batch else None,
+                    "temporal_support": batch.get("temporal_support"),
                 }
             )
         return batch, seeds

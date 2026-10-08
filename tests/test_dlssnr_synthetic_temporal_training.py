@@ -5,6 +5,9 @@ import json
 import pytest
 import toml
 import torch
+import numpy as np
+from PIL import Image
+from safetensors.torch import load_file
 
 from musubi_tuner.dlssnr.config import build_train_config, config_sha256, load_dataset_config
 from musubi_tuner.dlssnr.dataset import NRBatchPlan
@@ -12,6 +15,7 @@ from musubi_tuner.training import dlssnr_trainer as trainer
 from test_dlssnr_config import make_args as config_args
 from test_dlssnr_control_randomization_training import assert_nested_equal, fixed_args
 from test_dlssnr_directory_dataset import paired_directories
+from test_dlssnr_ema import assert_ema_state
 from test_dlssnr_training import SmallNR, small_math  # noqa: F401
 
 
@@ -164,3 +168,153 @@ def test_synthetic_only_training_updates_temporal_head_without_allocating_refere
     rows = [json.loads(line) for line in (folder / "metrics.jsonl").read_text().splitlines()]
     assert [row["update"] for row in rows] == [1, 2]
     assert all(row["loss/temporal"] >= 0 for row in rows)
+
+
+def textured_pairs(root):
+    y, x = np.indices((48, 48))
+    source = np.stack((30 + 4 * x, 20 + 4 * y, 50 + ((x + 2 * y) % 16) * 10), axis=-1).astype(np.uint8)
+    target = (np.roll(source, 1, axis=1).astype(np.float32) * 0.8 + 20).astype(np.uint8)
+    Image.fromarray(source).save(root / "source.png")
+    Image.fromarray(target).save(root / "target.png")
+
+
+@pytest.mark.usefixtures("small_math")
+@pytest.mark.parametrize(
+    "lora,randomize,frequency", [(False, False, False), (False, True, True), (True, False, True), (True, True, False)]
+)
+def test_synthetic_runtime_matrix_and_exact_resume_preserve_trajectories(tmp_path, monkeypatch, lora, randomize, frequency):
+    from test_dlssnr_dino import tiny_dino_loss
+
+    monkeypatch.setattr(trainer, "create_dino_loss", tiny_dino_loss)
+    if lora:
+        from musubi_tuner.networks import lora_dlssnr
+        from test_dlssnr_fp8 import TinyFP8NR, tiny_fp8_inject
+
+        monkeypatch.setattr(trainer, "NRModel", TinyFP8NR)
+        monkeypatch.setattr(lora_dlssnr, "inject", tiny_fp8_inject)
+    args = synthetic_args(tmp_path, lora=lora, randomize=randomize, evaluate=True)
+    textured_pairs(tmp_path)
+    args.ema_decay, args.dino_loss_weight = 0.5, 0.1
+    args.native_weight_qat = args.eval_native = True
+    args.base_anchor_weight = 0.2 if randomize or lora else 0
+    args.loss_edge = 0.2
+    if frequency:
+        args.loss_profile, args.loss_lowpass_sigma = "frequency_split", 4
+    if lora:
+        args.network_dropout, args.fp8_base, args.fp8_scaled, args.numerics_profile = 0, True, True, "train_experimental"
+    original = trainer.NRTrainModule.forward
+    seen = []
+
+    def observed(self, batch, seeds, *args, **kwargs):
+        assert batch["temporal_support"] == "joint_loss_mask"
+        if randomize:
+            assert torch.equal(batch["controls"], batch["controls"][:, :1].expand_as(batch["controls"]))
+        seen.append(
+            {
+                "sample_id": list(batch["sample_id"]),
+                "seeds": seeds,
+                **{name: batch[name].clone() for name in ("controls", "motion", "target", "loss_mask")},
+            }
+        )
+        return original(self, batch, seeds, *args, **kwargs)
+
+    monkeypatch.setattr(trainer.NRTrainModule, "forward", observed)
+    train = trainer.train_lora_from_args if lora else trainer.train_from_args
+    train(args)
+    folder = args.output_dir / args.output_name
+    filename = "adapter.safetensors" if lora else "model.safetensors"
+    raw, averaged = load_file(folder / "final" / filename), load_file(folder / "final/ema" / filename)
+    state = torch.load(folder / "state-step000002/trainer_state.pt", weights_only=True)
+    report = json.loads((folder / "evaluation/step000002.json").read_text())
+    assert state["identity"]["synthetic_temporal"][0]["protocol"]["sequence_length"] == 3
+    assert not any("reference" in key or "base_anchor" in key for key in (*raw.keys(), *state["ema"]["shadow"].keys()))
+    assert len(seen) == 4
+    expected = seen[2:]
+    assert not torch.equal(seen[0]["motion"], seen[2]["motion"])
+    seen.clear()
+    args.resume = folder / "state-step000001"
+    train(args)
+    assert_nested_equal(seen, expected)
+    torch.testing.assert_close(load_file(folder / "final" / filename), raw, rtol=0, atol=0)
+    torch.testing.assert_close(load_file(folder / "final/ema" / filename), averaged, rtol=0, atol=0)
+    resumed = torch.load(folder / "state-step000002/trainer_state.pt", weights_only=True)
+    assert_ema_state(resumed["ema"], state["ema"])
+    assert_nested_equal(resumed["optimizer"], state["optimizer"])
+    assert_nested_equal(resumed["rank_states"], state["rank_states"])
+    assert json.loads((folder / "evaluation/step000002.json").read_text()) == report
+    for candidate in (report["candidate"], report["ema_candidate"]):
+        case = candidate["validation"][0]
+        assert case["synthetic_temporal"]["schema"] == "dlssnr_synthetic_temporal_v1"
+        assert case["native"]["synthetic_temporal"] == case["synthetic_temporal"]
+
+
+@pytest.mark.usefixtures("small_math")
+def test_synthetic_resume_rejects_changed_shift_seed_clip_sampler_and_files(tmp_path, monkeypatch):
+    args = synthetic_args(tmp_path, randomize=True)
+    trainer.train_from_args(args)
+    args.resume = args.output_dir / args.output_name / "state-step000001"
+    data = toml.load(args.dataset_config)
+    data["datasets"][0]["synthetic_max_shift_px"] = 0.75
+    args.dataset_config.write_text(toml.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError, match="identity"):
+        trainer.train_from_args(args)
+    del data["datasets"][0]["synthetic_max_shift_px"]
+    args.dataset_config.write_text(toml.dumps(data), encoding="utf-8")
+    args.seed = 5
+    with pytest.raises(ValueError, match="identity"):
+        trainer.train_from_args(args)
+    args.seed, args.sequence_length, args.tbptt_length = 4, 4, 3
+    with pytest.raises(ValueError, match="identity"):
+        trainer.train_from_args(args)
+    args.sequence_length, args.tbptt_length = 3, 2
+    original = trainer.NRSyntheticTemporalDataset
+
+    def changed_sampler(*args, **kwargs):
+        dataset = original(*args, **kwargs)
+        dataset.synthetic_protocol["seed_policy"] = "changed"
+        return dataset
+
+    with monkeypatch.context() as patch:
+        patch.setattr(trainer, "NRSyntheticTemporalDataset", changed_sampler)
+        with pytest.raises(ValueError, match="identity"):
+            trainer.train_from_args(args)
+    textured_pairs(tmp_path)
+    with pytest.raises(ValueError, match="identity"):
+        trainer.train_from_args(args)
+
+
+@pytest.mark.usefixtures("small_math")
+def test_synthetic_control_retry_reuses_motion_points_and_dropout_rng(tmp_path, monkeypatch):
+    args = synthetic_args(tmp_path, lora=True, randomize=True)
+    textured_pairs(tmp_path)
+    args.ema_decay = 0.5
+    trainer.train_lora_from_args(args)
+    folder = args.output_dir / args.output_name
+    raw = load_file(folder / "final/adapter.safetensors")
+    state = torch.load(folder / "state-step000002/trainer_state.pt", weights_only=True)
+    update, forward = trainer.optimizer_update, trainer.NRTrainModule.forward
+    calls, batches = [], []
+
+    def retry_once(*args, **kwargs):
+        calls.append(1)
+        return False if len(calls) == 1 else update(*args, **kwargs)
+
+    def capture(self, batch, seeds, *args, **kwargs):
+        batches.append(
+            {"seeds": seeds, **{name: batch[name].clone() for name in ("source", "motion", "controls", "control_ratios")}}
+        )
+        return forward(self, batch, seeds, *args, **kwargs)
+
+    monkeypatch.setattr(trainer, "optimizer_update", retry_once)
+    monkeypatch.setattr(trainer.NRTrainModule, "forward", capture)
+    args.output_name = "retry"
+    trainer.train_lora_from_args(args)
+    actual_folder = args.output_dir / args.output_name
+    actual = torch.load(actual_folder / "state-step000002/trainer_state.pt", weights_only=True)
+    assert len(calls) == 3 and len(batches) == 6
+    assert_nested_equal(batches[:2], batches[2:4])
+    torch.testing.assert_close(load_file(actual_folder / "final/adapter.safetensors"), raw, rtol=0, atol=0)
+    assert_nested_equal(actual["optimizer"], state["optimizer"])
+    assert_nested_equal(actual["rank_states"], state["rank_states"])
+    assert_ema_state(actual["ema"], state["ema"])
+    assert actual["global_update"] == actual["ema"]["num_updates"] == 2
