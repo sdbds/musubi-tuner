@@ -18,6 +18,7 @@ from musubi_tuner.dlssnr.geometry import Geometry
 from musubi_tuner.dlssnr.arithmetic import cubic_half, e4m3_ste, half_ste
 from musubi_tuner.dlssnr.numerics import apply_linear, global_attention, nearest_upsample, pool2x2, window_attention
 from musubi_tuner.dlssnr.profiles import build_records
+from musubi_tuner.dlssnr.weight_quantization import native_weight_ste
 
 
 def _phases() -> dict[int, int | None]:
@@ -32,9 +33,13 @@ class ChannelLinear(nn.Module):
         super().__init__()
         self.weight = nn.Parameter(torch.empty(out_features, in_features))
         self.compute_dtype = None
+        self.native_weight_kind = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.project(self.materialized_weight(), x)
+        return self.project(self.published_weight(self.materialized_weight()), x)
+
+    def published_weight(self, weight: torch.Tensor) -> torch.Tensor:
+        return native_weight_ste(weight, self.native_weight_kind) if self.native_weight_kind is not None else weight
 
     def materialized_weight(self) -> torch.Tensor:
         weight = self.weight.float() if self.weight.dtype == torch.float8_e4m3fn else self.weight

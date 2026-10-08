@@ -100,6 +100,8 @@ def benchmark_config(args):
         "parameter_groups": {"prior_lr_multiplier": 0.1, "scale_lr_multiplier": 0.1, "temporal_blend_lr_multiplier": 0.1},
         "loss": {"pre": 1.0, "out": 1.0, "edge": 0.05, "temporal": 0.0},
     }
+    if args.native_weight_qat:
+        config["model"]["native_weight_qat"] = True
     if args.lora:
         config["lora"] = {"profile": "vit_only", "rank": args.network_dim, "alpha": args.network_dim, "dropout": 0.0}
         validate_lora(config["lora"])

@@ -71,3 +71,11 @@ def test_benchmark_rejects_invalid_or_unacknowledged_workloads(options):
     args = module.setup_parser().parse_args(["--model_dir", "canonical", "--output", "measurement.json", *options])
     with pytest.raises(ValueError):
         module.benchmark_config(args)
+
+
+def test_benchmark_does_not_silently_ignore_native_weight_qat():
+    from musubi_tuner.dlssnr.runtime import runtime_policy
+
+    module = _module()
+    args = module.setup_parser().parse_args(["--model_dir", "canonical", "--output", "measurement.json", "--native_weight_qat"])
+    assert runtime_policy(module.benchmark_config(args)).get("native_weight_qat") is True

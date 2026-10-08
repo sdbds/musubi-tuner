@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 import torch
 
 from musubi_tuner.dlssnr.model import ChannelLinear, GlobalAttn, WindowAttn
-from musubi_tuner.dlssnr.numerics import SURROGATE_FLAGS
+from musubi_tuner.dlssnr.numerics import SURROGATE_FLAGS, fp32_execution
+from musubi_tuner.dlssnr.weight_quantization import native_storage_kinds
 
 RUNTIME_SCHEMA = "dlssnr_runtime_v1"
 COMPUTE_DTYPES = {"no": None, "fp16": torch.float16, "bf16": torch.bfloat16}
@@ -25,7 +28,7 @@ def default_runtime_policy() -> dict:
 
 
 def runtime_policy(config: dict) -> dict:
-    return {
+    policy = {
         "schema": RUNTIME_SCHEMA,
         "numerics_profile": config["model"]["numerics_profile"],
         "mixed_precision": config["precision"]["mixed_precision"],
@@ -35,15 +38,32 @@ def runtime_policy(config: dict) -> dict:
         "fp8_base": config["precision"].get("fp8_base", False),
         "fp8_scaled": config["precision"].get("fp8_scaled", False),
     }
+    return with_native_weight_qat(policy, config["model"].get("native_weight_qat", False))
+
+
+def with_native_weight_qat(policy: dict, enabled: bool) -> dict:
+    policy = dict(policy)
+    if type(enabled) is not bool:
+        raise ValueError("native_weight_qat must be a boolean")
+    policy["schema"] = "dlssnr_runtime_v2" if enabled else RUNTIME_SCHEMA
+    if enabled:
+        policy["native_weight_qat"] = True
+    else:
+        policy.pop("native_weight_qat", None)
+    return policy
 
 
 def validate_runtime_policy(policy: dict, *, training=False) -> None:
-    if not isinstance(policy, dict) or set(policy) != set(default_runtime_policy()):
+    if not isinstance(policy, dict):
+        raise ValueError("NR runtime policy must be an object")
+    qat_schema = policy.get("schema") == "dlssnr_runtime_v2"
+    expected = set(default_runtime_policy()) | ({"native_weight_qat"} if qat_schema else set())
+    if set(policy) != expected:
         raise ValueError("NR runtime policy has missing or unsupported fields")
-    for field in ("gradient_checkpointing", "fp8_base", "fp8_scaled"):
+    for field in ("gradient_checkpointing", "fp8_base", "fp8_scaled", *(("native_weight_qat",) if qat_schema else ())):
         if type(policy[field]) is not bool:
             raise ValueError(f"runtime policy {field} must be a boolean")
-    if policy.get("schema") != RUNTIME_SCHEMA:
+    if policy.get("schema") not in (RUNTIME_SCHEMA, "dlssnr_runtime_v2"):
         raise ValueError("unsupported NR runtime policy schema")
     if policy.get("numerics_profile") not in ("train_surrogate", "train_experimental"):
         raise ValueError("unsupported NR runtime numerics_profile")
@@ -93,9 +113,14 @@ def configure_model_runtime(model, policy: dict, *, training=False) -> None:
     if not training:
         validate_runtime_device(policy, device)
     dtype = COMPUTE_DTYPES[policy["mixed_precision"]]
-    for module in model.modules():
+    kinds = native_storage_kinds() if policy.get("native_weight_qat", False) else {}
+    for name, module in model.named_modules():
         if isinstance(module, (ChannelLinear, WindowAttn, GlobalAttn)):
             module.compute_dtype = dtype
+        if isinstance(module, ChannelLinear):
+            if kinds and f"{name}.weight" not in kinds:
+                raise ValueError(f"unknown native projection {name}.weight")
+            module.native_weight_kind = kinds.get(f"{name}.weight")
         if isinstance(module, GlobalAttn):
             module.attention_backend = policy["attention_backend"]
         elif isinstance(module, WindowAttn):
@@ -105,25 +130,57 @@ def configure_model_runtime(model, policy: dict, *, training=False) -> None:
     elif hasattr(model, "gradient_checkpointing"):
         model.gradient_checkpointing = False
     model.runtime_policy = dict(policy)
+    model.native_weight_qat = policy.get("native_weight_qat", False)
 
 
 def numerics_metadata(policy: dict) -> dict:
-    if policy["numerics_profile"] == "train_surrogate":
-        return dict(SURROGATE_FLAGS)
-    return {
-        **SURROGATE_FLAGS,
-        "profile": "train_experimental",
-        "compute_dtype": {"no": "float32", "fp16": "mixed_float16_products", "bf16": "mixed_bfloat16_products"}[
-            policy["mixed_precision"]
-        ],
-        "matmul_accumulator": "autocast_products" if policy["mixed_precision"] != "no" else SURROGATE_FLAGS["matmul_accumulator"],
-        "publication_dtype": "float32",
-        "native_equivalent": False,
-        "weight_publication": "fp8_storage_materialized_fp32_plus_lora"
-        if policy["fp8_base"]
-        else SURROGATE_FLAGS["weight_publication"],
-        "attention_backend": policy["attention_backend"],
-        "attention_scope": policy["attention_scope"],
-        "softmax": "standard_softmax_scale_1.0" if policy["attention_backend"] != "native" else SURROGATE_FLAGS["softmax"],
-        "vit_padding": "excluded_from_softmax" if policy["attention_backend"] != "native" else SURROGATE_FLAGS["vit_padding"],
-    }
+    flags = (
+        dict(SURROGATE_FLAGS)
+        if policy["numerics_profile"] == "train_surrogate"
+        else {
+            **SURROGATE_FLAGS,
+            "profile": "train_experimental",
+            "compute_dtype": {"no": "float32", "fp16": "mixed_float16_products", "bf16": "mixed_bfloat16_products"}[
+                policy["mixed_precision"]
+            ],
+            "matmul_accumulator": "autocast_products"
+            if policy["mixed_precision"] != "no"
+            else SURROGATE_FLAGS["matmul_accumulator"],
+            "publication_dtype": "float32",
+            "native_equivalent": False,
+            "weight_publication": "fp8_storage_materialized_fp32_plus_lora"
+            if policy["fp8_base"]
+            else SURROGATE_FLAGS["weight_publication"],
+            "attention_backend": policy["attention_backend"],
+            "attention_scope": policy["attention_scope"],
+            "softmax": "standard_softmax_scale_1.0" if policy["attention_backend"] != "native" else SURROGATE_FLAGS["softmax"],
+            "vit_padding": "excluded_from_softmax" if policy["attention_backend"] != "native" else SURROGATE_FLAGS["vit_padding"],
+        }
+    )
+    if policy.get("native_weight_qat", False):
+        flags.update(weight_publication="native_storage_direct_fp32_rne_ste", native_equivalent=False)
+    return flags
+
+
+@contextmanager
+def native_weight_runtime(model):
+    """Evaluate exportable weights with native attention, without changing masters or optimizer state."""
+    missing = object()
+    saved = [
+        (model, name, getattr(model, name, missing)) for name in ("runtime_policy", "gradient_checkpointing", "native_weight_qat")
+    ]
+    for module in model.modules():
+        for name in ("compute_dtype", "attention_backend", "native_weight_kind"):
+            if hasattr(module, name):
+                saved.append((module, name, getattr(module, name)))
+    try:
+        configure_model_runtime(model, with_native_weight_qat(default_runtime_policy(), True), training=True)
+        with fp32_execution():
+            yield
+    finally:
+        for module, name, value in saved:
+            if value is missing:
+                if hasattr(module, name):
+                    delattr(module, name)
+            else:
+                setattr(module, name, value)

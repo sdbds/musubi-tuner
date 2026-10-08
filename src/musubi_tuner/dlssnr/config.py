@@ -26,6 +26,28 @@ def _number(value, name: str, *, positive: bool = False) -> None:
         raise ValueError(f"{name} must be finite and {'positive' if positive else 'nonnegative'}")
 
 
+def _dino_settings(args):
+    _number(args.dino_loss_weight, "--dino_loss_weight")
+    defaults = {"model_type": "small", "layer": -4, "resize": 224, "use_gram": True, "use_norm": True}
+    supplied = {name: getattr(args, f"dino_loss_{name}") for name in defaults}
+    if not args.dino_loss_weight:
+        if any(value is not None for value in supplied.values()):
+            raise ValueError("DINO options require positive --dino_loss_weight")
+        return None
+    settings = {name: defaults[name] if value is None else value for name, value in supplied.items()}
+    if settings["model_type"] not in ("small", "small_plus", "base", "large"):
+        raise ValueError("unknown --dino_loss_model_type")
+    if type(settings["layer"]) is not int:
+        raise ValueError("--dino_loss_layer must be an integer")
+    resize = settings["resize"]
+    if type(resize) is not int or not 16 <= resize <= 1024 or resize % 16:
+        raise ValueError("--dino_loss_resize must be a multiple of 16 between 16 and 1024")
+    for name in ("use_gram", "use_norm"):
+        if type(settings[name]) is not bool:
+            raise ValueError(f"--dino_loss_{name} must be a boolean")
+    return settings
+
+
 def validate_lora(table: dict) -> None:
     if table.get("qkv_mode", "fused_head_major") != "fused_head_major":
         raise ValueError("only qkv_mode = fused_head_major is implemented")
@@ -158,6 +180,7 @@ def build_train_config(args, *, lora=False) -> dict:
     training = {
         "mode": mode,
         "seed": args.seed,
+        "shuffle_dataset": args.shuffle_dataset,
         "device": args.device,
         "development_smoke": args.development_smoke,
         "batch_size": data.pop("batch_size"),
@@ -169,6 +192,11 @@ def build_train_config(args, *, lora=False) -> dict:
         "gradient_checkpointing": args.gradient_checkpointing,
         "max_overflow_retries": args.max_overflow_retries,
     }
+    if args.ema_decay is not None:
+        _number(args.ema_decay, "--ema_decay", positive=True)
+        if args.ema_decay >= 1:
+            raise ValueError("--ema_decay must be strictly between 0 and 1")
+        training["ema_decay"] = args.ema_decay
     for field in ("batch_size", "sequence_length", "tbptt_length", "gradient_accumulation_steps", "max_train_steps"):
         _integer(training[field], f"--{field}")
     _integer(training["burn_in"], "--burn_in", 0)
@@ -215,6 +243,8 @@ def build_train_config(args, *, lora=False) -> dict:
         "attention_backend": args.attention_backend,
         "attention_scope": args.attention_scope,
     }
+    if args.native_weight_qat:
+        model["native_weight_qat"] = True
     for name in ("model_dir", "forward_validation_report"):
         value = getattr(args, name)
         if value is not None:
@@ -250,16 +280,39 @@ def build_train_config(args, *, lora=False) -> dict:
         _number(value, f"--loss_{name}")
     if not any(loss.values()):
         raise ValueError("at least one loss weight must be positive")
+    _number(args.base_anchor_weight, "--base_anchor_weight")
+    if args.base_anchor_weight:
+        loss["base_anchor"] = args.base_anchor_weight
+    dino_settings = _dino_settings(args)
+    if dino_settings is not None:
+        loss["dino"] = args.dino_loss_weight
+    loss_profile = None
+    if args.loss_profile == "frequency_split":
+        sigma = 6.0 if args.loss_lowpass_sigma is None else args.loss_lowpass_sigma
+        _number(sigma, "--loss_lowpass_sigma", positive=True)
+        if sigma > 32:
+            raise ValueError("--loss_lowpass_sigma must be <= 32")
+        loss_profile = {"name": "frequency_split", "lowpass_sigma": sigma}
+    elif args.loss_profile != "pixel":
+        raise ValueError("unknown --loss_profile")
+    elif args.loss_lowpass_sigma is not None:
+        raise ValueError("--loss_lowpass_sigma requires --loss_profile frequency_split")
     evaluation = {
         "sample_every_n_steps": args.sample_every_n_steps,
         "min_sequence_frames": args.min_sequence_frames,
         "compare_baseline": args.compare_baseline,
     }
+    if args.eval_native:
+        evaluation["native"] = True
+    if args.eval_detail_diagnostics:
+        evaluation["detail_diagnostics"] = True
+    if args.eval_content_preservation:
+        evaluation["content_preservation"] = True
     if "sequence_manifest" in data:
         evaluation["sequence_manifest"] = data.pop("sequence_manifest")
     _integer(args.sample_every_n_steps, "--sample_every_n_steps", 0)
     _integer(args.min_sequence_frames, "--min_sequence_frames")
-    if args.sample_every_n_steps and not (
+    if (args.sample_every_n_steps or args.eval_native or args.eval_detail_diagnostics or args.eval_content_preservation) and not (
         any(entry.get("validation_manifest") or entry.get("sequence_manifest") for entry in data.get("datasets", [data]))
         or evaluation.get("sequence_manifest")
     ):
@@ -288,6 +341,10 @@ def build_train_config(args, *, lora=False) -> dict:
         "evaluation": evaluation,
         "output": output,
     }
+    if loss_profile is not None:
+        config["loss_profile"] = loss_profile
+    if dino_settings is not None:
+        config["dino_loss"] = dino_settings
     if lora:
         network = _key_value_args(args.network_args, "--network_args", allow_strings=True)
         if unknown := set(network) - {"profile", "qkv_mode", "rank_by_width", "alpha_by_width"}:
@@ -300,6 +357,8 @@ def build_train_config(args, *, lora=False) -> dict:
             raise ValueError("multiscale uses rank_by_width/alpha_by_width, not --network_dim/--network_alpha")
         network["dropout"] = args.network_dropout
         validate_lora(network)
+        if args.native_weight_qat and network["dropout"]:
+            raise ValueError("native weight QAT requires --network_dropout 0; split dropout is not a fused export weight")
         config["lora"] = network
     else:
         groups = {

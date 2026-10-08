@@ -30,6 +30,7 @@ def implementation_identity() -> dict:
         "runtime.py",
         "attention.py",
         "fp8.py",
+        "weight_quantization.py",
         "model.py",
         "pipeline.py",
         "temporal.py",
