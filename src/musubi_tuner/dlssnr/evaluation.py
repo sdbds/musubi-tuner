@@ -9,6 +9,7 @@ import torch
 
 from musubi_tuner.dlssnr.content_metrics import ContentMetrics
 from musubi_tuner.dlssnr.detail_metrics import DetailDiagnostics, NOISE_SEED_XOR
+from musubi_tuner.dlssnr.losses import masked_temporal_residual
 from musubi_tuner.dlssnr.pipeline import forward_frame
 from musubi_tuner.dlssnr.runtime import native_weight_runtime
 from musubi_tuner.dlssnr.temporal import stable_frame_seed, warp_bilinear
@@ -18,9 +19,11 @@ from musubi_tuner.dlssnr.temporal import stable_frame_seed, warp_bilinear
 def evaluate(model, datasets, seed, device, *, compare_native=False, detail_diagnostics=False, content_metric=None):
     reports = {}
     for kind, dataset in datasets.items():
+        synthetic_protocol = getattr(dataset, "synthetic_protocol", None)
+        temporal_support = "joint_loss_mask" if synthetic_protocol is not None else None
         cases = []
         for sample_index, row in enumerate(dataset.rows):
-            previous_target = None
+            previous_target = previous_mask = None
             modes = (False, True) if compare_native else (False,)
             histories = [None for _ in modes]
             totals = [_empty_sums() for _ in modes]
@@ -32,7 +35,7 @@ def evaluate(model, datasets, seed, device, *, compare_native=False, detail_diag
                 reset = frame["reset"]
                 if reset:
                     histories = [None for _ in modes]
-                    previous_target = None
+                    previous_target = previous_mask = None
                 frame_seed = stable_frame_seed(seed, 0, row["sample_id"], frame["frame_index"], row.get("crop_id", 0))
                 outputs = []
                 for index, native in enumerate(modes):
@@ -55,7 +58,15 @@ def evaluate(model, datasets, seed, device, *, compare_native=False, detail_diag
                             _validate_output(alternate, row, frame, alternate=True)
                             details[index].add(output, alternate, tensors)
                             del alternate
-                    _accumulate(totals[index], output, tensors, history, previous_target)
+                    _accumulate(
+                        totals[index],
+                        output,
+                        tensors,
+                        history,
+                        previous_target,
+                        previous_mask=previous_mask,
+                        temporal_support=temporal_support,
+                    )
                     if content is not None:
                         scores = content_metric(output["rendered_proxy"], tensors["source"], tensors["loss_mask"])
                         content[index].add(scores, tensors["loss_mask"])
@@ -69,13 +80,18 @@ def evaluate(model, datasets, seed, device, *, compare_native=False, detail_diag
                     gap["count"] += float(mask.sum()) * 3
                     gap["max"] = max(gap["max"], float(torch.where(mask > 0, error, 0).max()))
                 previous_target = tensors["target"]
+                previous_mask = tensors["loss_mask"]
             case = _metrics(totals[0], row)
+            if synthetic_protocol is not None:
+                case["synthetic_temporal"] = dict(synthetic_protocol)
             if details is not None:
                 case["detail_diagnostics"] = details[0].metrics()
             if content is not None:
                 case["content_preservation"] = {**content[0].metrics(), "protocol": content_metric.identity}
             if compare_native:
                 case["native"] = _metrics(totals[1], row)
+                if synthetic_protocol is not None:
+                    case["native"]["synthetic_temporal"] = dict(synthetic_protocol)
                 if details is not None:
                     case["native"]["detail_diagnostics"] = details[1].metrics()
                 if content is not None:
@@ -102,7 +118,9 @@ def _empty_sums():
     }
 
 
-def _accumulate(sums, output, tensors, history, previous_target):
+def _accumulate(sums, output, tensors, history, previous_target, *, previous_mask=None, temporal_support=None):
+    if temporal_support not in (None, "joint_loss_mask"):
+        raise ValueError("unsupported evaluation temporal_support policy")
     rendered, target, mask = output["rendered_proxy"], tensors["target"], tensors["loss_mask"]
     error = rendered - target
     sums["absolute"] += float((error.abs() * mask).sum())
@@ -114,10 +132,25 @@ def _accumulate(sums, output, tensors, history, previous_target):
     saturated = (output["neural_preclamp"] < 0) | (output["neural_preclamp"] > 1)
     sums["saturation"] += float((saturated * mask).sum())
     if history is not None:
-        previous, inside = warp_bilinear(history, tensors["motion"])
-        target_previous, _ = warp_bilinear(previous_target, tensors["motion"])
-        temporal_mask = tensors["temporal_valid"] * inside
-        delta = (rendered - previous) - (target - target_previous)
+        if temporal_support == "joint_loss_mask":
+            if previous_mask is None:
+                raise ValueError("joint temporal evaluation requires the previous loss mask")
+            delta, temporal_mask = masked_temporal_residual(
+                rendered,
+                history,
+                target,
+                previous_target,
+                mask,
+                previous_mask,
+                tensors["motion"],
+                tensors["temporal_valid"],
+                torch.zeros(rendered.shape[0], dtype=torch.bool, device=rendered.device),
+            )
+        else:
+            previous, inside = warp_bilinear(history, tensors["motion"])
+            target_previous, _ = warp_bilinear(previous_target, tensors["motion"])
+            temporal_mask = tensors["temporal_valid"] * inside
+            delta = (rendered - previous) - (target - target_previous)
         sums["temporal"] += float((delta.abs() * temporal_mask).sum())
         sums["temporal_count"] += float(temporal_mask.sum()) * 3
 

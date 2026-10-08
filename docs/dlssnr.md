@@ -429,8 +429,8 @@ existing command:
 
 The example weight is not tuned. At least one ordinary NR loss must remain
 enabled. The reference sees the same transformed source frames, control maps
-and per-frame noise seeds as the student. No randomized-control branch or extra
-retention dataset is added. Temporal reference clips build their own history
+and per-frame noise seeds as the student. Anchoring alone adds no randomized
+controls or extra retention dataset. Temporal reference clips build their own history
 from the first frame, using the same motion, resets and validity masks. They do
 not reuse the student's changing history. Burn-in runs on both models but is
 excluded from the loss.
@@ -1208,6 +1208,62 @@ before partial inference outputs are written. Original IDs are never rewritten a
 - Masks accept single-channel PNGs or `[1,H,W]` NPY arrays. History/temporal masks must be binary; optional `loss_mask_path` supports weights in `[0,1]`.
 - With nonzero temporal loss, non-reset frames require a temporal mask and `tbptt_length >= 2`. Loss uses adjacent frames within the differentiable segment only, never across the burn-in boundary.
 - `--loss_temporal 0` allows temporal masks to be omitted, but non-reset frames still require motion and history masks.
+
+### Synthetic Temporal Clips
+
+Set `synthetic_temporal = true` on a dataset entry to turn paired stills into
+clips online, after the shared bucket resize or native crop. The entry accepts
+directory pairs or a **single-frame** training manifest. Unmarked temporal
+entries still require explicit real frames, motion and validity. Both kinds can
+coexist; each retains its own batch-size, repeat and bucket grouping.
+
+See [the synthetic dataset example](../configs/dlssnr_dataset_synthetic_temporal.toml).
+Append explicit temporal settings to an existing training command, for example:
+
+```text
+--training_mode temporal --sequence_length 4 --burn_in 2 --tbptt_length 2
+--loss_temporal 0.1
+```
+
+These are example settings, not changed defaults. Synthesis does not enable
+temporal loss, control randomization, a reference model or any perceptual loss.
+The usual clip-length and burn-in checks still apply.
+
+`synthetic_max_shift_px` defaults to `0.5` and accepts finite values in `[0,1]`.
+Both fields can be inherited from `[general]`. An explicitly disabled entry may
+discard an inherited shift, but cannot declare a local shift; a general shift
+with no enabled consumer is rejected. The source loss mask must retain positive
+support inside the maximum-shift margin. Zero shift permits edge-only support
+and provides a static-sequence control experiment.
+
+Frame zero preserves the original pair. Later frames independently sample the
+original transformed images at `p + d_t`, avoiding repeated-resampling blur.
+Sampling is bilinear with `align_corners=False`; dense current-to-previous motion
+is `d_t - d_(t-1)`. RGB and spatial controls use border extension as model context.
+Fixed controls stay constant. Labels use `warp(target * mask) / warp(mask)`;
+zero coverage has neutral fill, and label masks exclude geometric extension.
+History validity also requires every contributing bilinear neighbor in the
+previous frame to be supported. Joint current/previous label masks are applied
+once in both temporal loss and its global denominator.
+
+Trajectories use private CPU RNG keyed by seed, epoch, final logical sample/repeat
+ID and crop ID, in a separate domain from controls and frame noise. No expanded
+image or flow dataset is written. Batch reports count generated frames; resume
+identity binds original files, seed, transform settings and implementation.
+
+For a marked entry, `validation_manifest` must also contain paired stills and
+uses fixed epoch-zero synthetic clips. `sequence_manifest` **always** remains a
+real explicit-motion sequence. Original sequence IDs are retained, so generated
+frames cannot bypass train/validation overlap checks. Both configured and native
+case reports include `synthetic_temporal` with the generation protocol. Synthetic
+`temporal_mae` measures the normalized masked residual over joint label support,
+excluding neutral fill, invalid history and reset transitions; ordinary real-case
+metric semantics are unchanged. Random control targets are not used in validation.
+
+These clips test subpixel consistency for static scenes. They do not establish
+behavior under moving objects, occlusion, long histories or actual DLL sampling,
+and cannot repair misaligned source/target pairs. Keep synthetic validation,
+held-out photo quality and real temporal evidence separate.
 
 ## Saving and Resuming
 

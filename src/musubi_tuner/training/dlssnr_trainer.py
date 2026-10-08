@@ -272,9 +272,15 @@ def _dataset_entry(data, training, loss, evaluation):
         )
     validation = {}
     if data.get("validation_manifest"):
-        validation["validation"] = load_temporal_manifest(
-            data["validation_manifest"], width, height, None, require_temporal_mask=False, **buckets
-        )
+        if data.get("synthetic_temporal"):
+            base = load_single_frame_manifest(data["validation_manifest"], width, height, **buckets)
+            validation["validation"] = NRSyntheticTemporalDataset(
+                base, training["sequence_length"], seed=training["seed"], max_shift_px=data["synthetic_temporal"]["max_shift_px"]
+            )
+        else:
+            validation["validation"] = load_temporal_manifest(
+                data["validation_manifest"], width, height, None, require_temporal_mask=False, **buckets
+            )
     if data.get("sequence_manifest"):
         sequences = load_temporal_manifest(data["sequence_manifest"], width, height, None, require_temporal_mask=False, **buckets)
         if any(len(row["frames"]) < evaluation["min_sequence_frames"] for row in sequences.rows):
