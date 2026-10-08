@@ -12,6 +12,13 @@ from accelerate.utils import set_seed
 from musubi_tuner.dlssnr.artifacts import inspect_canonical, save_canonical, write_json
 from musubi_tuner.dlssnr.base_anchor import NRBaseAnchor
 from musubi_tuner.dlssnr.config import build_train_config, config_sha256
+from musubi_tuner.dlssnr.control_randomization import (
+    apply_control_targets,
+    attach_control_batch,
+    encode_control_point,
+    finalize_control_metrics,
+    sample_control_point,
+)
 from musubi_tuner.dlssnr.content_metrics import create_content_metric
 from musubi_tuner.dlssnr.dataset import (
     NRBatchPlan,
@@ -116,7 +123,18 @@ def clear_lane15_state(model, optimizer):
 class NRTrainModule(torch.nn.Module):
     """The only prepared model; adapters have exactly one registered owner."""
 
-    def __init__(self, model, loss_weights, burn_in=0, network=None, *, loss_profile=None, dino_loss=None, base_anchor=None):
+    def __init__(
+        self,
+        model,
+        loss_weights,
+        burn_in=0,
+        network=None,
+        *,
+        loss_profile=None,
+        dino_loss=None,
+        base_anchor=None,
+        control_randomization=None,
+    ):
         super().__init__()
         self.model = model
         self.network = network
@@ -125,18 +143,42 @@ class NRTrainModule(torch.nn.Module):
         self.loss_profile = loss_profile
         self.dino_loss = dino_loss
         self.base_anchor = base_anchor
+        self.control_randomization = control_randomization
+        if control_randomization is not None and base_anchor is None:
+            raise ValueError("control randomization requires a frozen reference provider")
 
     def forward(self, batch, seeds, normalizers=None):
         # Accelerator owns scaling; NR owns exactly which products use autocast.
         with torch.autocast(batch["source"].device.type, enabled=False):
             # Finish the reference pass before building the student graph. Its
             # checkpoint replay must always see the adapters enabled.
-            reference = (
-                self.base_anchor(self.model, self.network, batch, seeds, self.burn_in)
-                if self.base_anchor is not None and self.loss_weights.get("base_anchor", 0) > 0
-                else None
-            )
-            return training_loss(
+            reference, control_metrics = None, {}
+            if self.control_randomization is not None:
+                sampled = self.base_anchor.predict(self.model, self.network, batch, seeds, self.burn_in)
+                if (batch["control_ratios"] == 1).all():
+                    reference_point = sampled
+                else:
+                    shape = (
+                        (batch["source"].shape[0], 5, 1, 1) if batch["source"].ndim == 4 else (batch["source"].shape[0], 1, 5, 1, 1)
+                    )
+                    reference_batch = {
+                        **batch,
+                        "controls": batch["control_reference_lanes"].view(shape).expand_as(batch["controls"]),
+                    }
+                    reference_point = self.base_anchor.predict(self.model, self.network, reference_batch, seeds, self.burn_in)
+                batch, control_metrics = apply_control_targets(
+                    batch,
+                    reference_point,
+                    sampled,
+                    burn_in=self.burn_in,
+                    settings=self.control_randomization,
+                    loss_profile=self.loss_profile,
+                )
+                if self.loss_weights.get("base_anchor", 0) > 0:
+                    reference = sampled["rendered_proxy"]
+            elif self.base_anchor is not None and self.loss_weights.get("base_anchor", 0) > 0:
+                reference = self.base_anchor(self.model, self.network, batch, seeds, self.burn_in)
+            loss, metrics = training_loss(
                 self.model,
                 batch,
                 seeds,
@@ -147,6 +189,7 @@ class NRTrainModule(torch.nn.Module):
                 dino_loss=self.dino_loss,
                 base_reference=reference,
             )
+            return loss, {**metrics, **control_metrics}
 
 
 def _one_update(model, optimizer, batch, seeds, weights, burn_in):
@@ -242,8 +285,23 @@ def _microbatch(dataset, microbatch_index, config, plan):
             ]
         )
     if training["mode"] == "single_frame":
-        return collate_single_frames(samples), [item[0] for item in seeds]
-    return collate_clips(samples), seeds
+        batch, seeds = collate_single_frames(samples), [item[0] for item in seeds]
+    else:
+        batch = collate_clips(samples)
+    if "control_randomization" in config:
+        draws = [
+            sample_control_point(
+                sample["fixed_controls"],
+                config["control_randomization"],
+                seed=training["seed"],
+                epoch=epoch,
+                sample_id=sample["sample_id"],
+                crop_id=sample["crop_id"],
+            )
+            for sample in samples
+        ]
+        batch = attach_control_batch(batch, draws)
+    return batch, seeds
 
 
 class NRSupervisedTrainer:
@@ -289,10 +347,11 @@ class NRSupervisedTrainer:
         )
         source_forward_validated = "forward_validation_report" in source_identity
         model, network, optimizer, base_identity = coordinated_call(accelerator, lambda: self._initialize_model(policy))
-        # Always anchor to initialization, not to the student restored below.
+        # Always reference initialization, not the student restored below.
+        use_base_anchor = config["loss"].get("base_anchor", 0) > 0
         base_anchor = (
             coordinated_call(accelerator, lambda: NRBaseAnchor(model, network))
-            if config["loss"].get("base_anchor", 0) > 0
+            if use_base_anchor or "control_randomization" in config
             else None
         )
         native_reference = None
@@ -323,6 +382,7 @@ class NRSupervisedTrainer:
             loss_profile=config.get("loss_profile"),
             dino_loss=dino_loss,
             base_anchor=base_anchor,
+            control_randomization=config.get("control_randomization"),
         )
         _check_optimizer(train_module, optimizer)
         parameter_map = {
@@ -397,8 +457,22 @@ class NRSupervisedTrainer:
             for name in ("content_metrics.py", "dino_loss.py"):
                 identity["implementation"][name] = file_sha256(Path(__file__).parents[1] / "dlssnr" / name)
         if base_anchor is not None:
-            identity["base_anchor"] = base_anchor.identity
             identity["implementation"]["base_anchor.py"] = file_sha256(Path(__file__).parents[1] / "dlssnr/base_anchor.py")
+        if use_base_anchor:
+            identity["base_anchor"] = base_anchor.identity
+        if "control_randomization" in config:
+            reference_controls = []
+            for entry in config["data"].get("datasets", [config["data"]]):
+                point = encode_control_point(entry["fixed_controls"], (1, 1))
+                reference_controls.append({name: point[name].tolist() for name in ("reference_lanes", "values")})
+            identity["control_randomization"] = {
+                **config["control_randomization"],
+                "reference": base_anchor.reference_identity,
+                "reference_controls": reference_controls,
+            }
+            identity["implementation"]["control_randomization.py"] = file_sha256(
+                Path(__file__).parents[1] / "dlssnr/control_randomization.py"
+            )
         if config["evaluation"].get("detail_diagnostics"):
             identity["detail_diagnostics"] = diagnostic_protocol()
             identity["implementation"]["detail_metrics.py"] = file_sha256(Path(__file__).parents[1] / "dlssnr/detail_metrics.py")
@@ -473,8 +547,10 @@ class NRSupervisedTrainer:
             }
         if dino_loss is not None:
             metadata["dino_loss"] = dino_loss.identity
-        if base_anchor is not None:
+        if use_base_anchor:
             metadata["base_anchor"] = base_anchor.identity
+        if "control_randomization" in config:
+            metadata["control_randomization"] = identity["control_randomization"]
         if content_identity is not None:
             metadata["content_preservation"] = content_identity
         baseline = None
@@ -573,7 +649,7 @@ class NRSupervisedTrainer:
                     training["burn_in"],
                     loss_profile=config.get("loss_profile"),
                     include_dino=dino_loss is not None,
-                    include_base_anchor=base_anchor is not None,
+                    include_base_anchor=use_base_anchor,
                 ).items():
                     denominators[name] += count
             denominators = reduce_values(accelerator, denominators)
@@ -611,6 +687,7 @@ class NRSupervisedTrainer:
             cursor += int(count["samples"])
             update = step + 1
             metrics = reduce_values(accelerator, metrics, max_keys=("blend_max",))
+            metrics = finalize_control_metrics(metrics)
             metrics["overflow_retries"] = attempt
             metrics["learning_rate"] = scheduler.get_last_lr()[0]
 

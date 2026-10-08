@@ -243,6 +243,8 @@ class NRDataset(Dataset):
         row = self.rows[index]
         frames = [self._load_frame(frame, row.get("motion_layout"), index) for frame in row["frames"]]
         metadata = {"sample_id": row["sample_id"], "sequence_id": row["sequence_id"], "crop_id": row.get("crop_id", 0)}
+        if self.fixed_controls is not None:
+            metadata["fixed_controls"] = dict(self.fixed_controls)
         return {**frames[0], **metadata} if self.single_frame else {"frames": frames, **metadata}
 
     def _load_frame(self, frame, motion_layout, sample_index):

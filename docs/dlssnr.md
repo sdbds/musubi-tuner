@@ -269,6 +269,79 @@ are unchanged; training loss values from different profiles are not directly
 comparable. This is a conservative objective for imperfect pairs, not evidence
 that new photorealistic texture or noise sensitivity has been learned.
 
+### Optional Control Randomization
+
+`--control_randomization` teaches the new enhancement to vary with tone and
+structure. Every training dataset must use `nr_controls_mode = "fixed"`, with
+positive `nr_tone` and `nr_structure` after FP16 control encoding. These fixed
+values define the reference point where the paired photo is the full enhancement
+target. File-based control maps are rejected rather than silently replaced.
+
+```text
+--control_randomization --control_residual_sigma 6
+```
+
+One point is sampled per logical sample and epoch, constant over every clip frame
+including burn-in. Tone and structure range from zero to their dataset reference
+values; inference still uses actual native knob values. Style and auto-mask stay
+fixed. Explicit skin stays fixed, while `nr_skin = -1` follows structure. Ratios
+use effective FP16-encoded values, so controls that encode identically receive
+the same endpoint target.
+
+| Option | Enabled default | Constraint |
+| --- | --- | --- |
+| `--control_residual_sigma` | `6` | Finite, `0 < sigma <= 32`, in transformed pixels |
+| `--control_anchor_probability` | `0.25` | Reference-point probability in `[0,1]` |
+| `--control_corner_probability` | `0.25` | Uniform four-corner probability in `[0,1]` |
+
+The probabilities must sum to at most one. The remainder samples independent
+uniform tone/structure ratios. Because the four corners include the reference
+point, its default total probability is 31.25%, before FP16 aliases. All three
+numeric options require the enable flag. These defaults are experiment settings,
+not measured optimal proportions.
+
+For each loss role, let `B` be the initial frozen NR output, `A` its ordinary
+target, and `G_M` a mask-normalized Gaussian filter. The generated target is:
+
+```text
+R = A - B(reference_controls)
+target = B(sampled_controls) + structure_ratio * R
+         + (tone_ratio - structure_ratio) * G_M(R)
+```
+
+Rendered RGB, DINO and temporal terms use the paired target and rendered teacher
+field, clamped to `[0,1]`. The preclamp term uses the teacher's preclamp field and
+is not RGB-clamped. The frequency-split edge term uses the input as `A`; its
+generated guide is logged as `loss/control_edge`. Pixel-profile edges use the
+generated rendered target. At zero, all roles reproduce their base fields; at
+the reference point they reproduce their original targets exactly on supervised
+pixels. Zero enhancement is the base response at zero controls, not an identity
+image transform. Excluded labels never enter the residual Gaussian.
+
+The residual sigma defines target construction independently of
+`--loss_lowpass_sigma`. Existing loss weights and the selected profile still
+apply; no full-band or perceptual term is enabled implicitly. For augmented
+clips, both loss profiles use the normalized masked temporal residual with joint
+current/previous label support. Only frequency-split additionally low-pass filters
+that residual. Ordinary unaugmented pixel training is unchanged.
+
+Distinct points normally add two no-gradient reference rollouts before the
+student forward, each with independent history and matched frame-noise seeds.
+Full training keeps one frozen initial model; LoRA bypasses adapters on its
+frozen effective base. A wholly reference-point microbatch needs one rollout.
+Optional base anchoring shares this provider and its sampled-point prediction;
+provider allocation alone never enables the anchor loss. References stay outside
+the optimizer, EMA and exports, and are initialized before restoring student state.
+
+Sampling uses private, domain-separated RNG keyed by seed, epoch, final logical
+sample/repeat ID and crop ID. Overflow retries reuse prepared points. Metadata
+binds settings, encoded references, frozen weights, numerical policy and
+implementation hashes to exact resume. Logs report effective tone/structure
+means, reference/zero fractions and RGB/edge clipping fractions, weighted by
+global valid RGB mass rather than rank-local means. Validation retains fixed
+reference controls and ordinary photo targets. Synthetic supervision does not
+prove real-weight control monotonicity or improved image quality.
+
 ### Optional DINOv3 Loss
 
 Both NR trainers accept `--dino_loss_weight`; its default `0` leaves the objective
@@ -346,8 +419,9 @@ preserves training RNG; each DDP rank must load the same frozen teacher.
 ### Optional Base-Model Anchoring
 
 `--base_anchor_weight` adds an output-retention loss to both full and LoRA
-training. The default `0` leaves the objective unchanged and creates no reference
-model or extra forward pass. For an ablation, add this to an existing command:
+training. The default `0` disables this loss; a reference is only allocated if
+control randomization independently needs it. For an ablation, add this to an
+existing command:
 
 ```text
 --base_anchor_weight 0.1

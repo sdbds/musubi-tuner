@@ -11,9 +11,11 @@ from pathlib import Path
 import toml
 
 from musubi_tuner.dlssnr.controls import CONTROL_DEFAULTS, resolve_fixed_controls
+from musubi_tuner.dlssnr.control_randomization import encode_control_point, validate_control_settings
 from musubi_tuner.dlssnr.filenames import validate_filename
 from musubi_tuner.dlssnr.geometry import resolve_geometry
 from musubi_tuner.dlssnr.profiles import PROFILE_ID
+from musubi_tuner.dlssnr.temporal import AUGMENTATION_SEED_POLICY
 
 
 def _integer(value, name: str, minimum: int = 1) -> None:
@@ -46,6 +48,25 @@ def _dino_settings(args):
         if type(settings[name]) is not bool:
             raise ValueError(f"--dino_loss_{name} must be a boolean")
     return settings
+
+
+def _control_settings(args, data):
+    defaults = {"residual_sigma": 6.0, "anchor_probability": 0.25, "corner_probability": 0.25}
+    supplied = {name: getattr(args, f"control_{name}", None) for name in defaults}
+    enabled = getattr(args, "control_randomization", False)
+    if type(enabled) is not bool:
+        raise ValueError("control_randomization must be a boolean")
+    if not enabled:
+        if any(value is not None for value in supplied.values()):
+            raise ValueError("control-specific options require --control_randomization")
+        return None
+    settings = {name: default if supplied[name] is None else supplied[name] for name, default in defaults.items()}
+    validate_control_settings(settings)
+    for entry in data.get("datasets", [data]):
+        if "fixed_controls" not in entry:
+            raise ValueError("control_randomization requires nr_controls_mode=fixed for every training dataset")
+        encode_control_point(entry["fixed_controls"], (1, 1))
+    return {"schema": "dlssnr_control_randomization_v1", "seed_policy": AUGMENTATION_SEED_POLICY, **settings}
 
 
 def validate_lora(table: dict) -> None:
@@ -172,6 +193,7 @@ def _key_value_args(values, name, *, allow_strings=False):
 
 def build_train_config(args, *, lora=False) -> dict:
     data = load_dataset_config(args.dataset_config)
+    control_settings = _control_settings(args, data)
     mode = args.training_mode
     lengths = (args.sequence_length, args.burn_in, args.tbptt_length)
     if mode == "temporal" and any(value is None for value in lengths):
@@ -345,6 +367,8 @@ def build_train_config(args, *, lora=False) -> dict:
         config["loss_profile"] = loss_profile
     if dino_settings is not None:
         config["dino_loss"] = dino_settings
+    if control_settings is not None:
+        config["control_randomization"] = control_settings
     if lora:
         network = _key_value_args(args.network_args, "--network_args", allow_strings=True)
         if unknown := set(network) - {"profile", "qkv_mode", "rank_by_width", "alpha_by_width"}:

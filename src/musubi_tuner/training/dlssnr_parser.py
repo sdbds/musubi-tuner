@@ -99,6 +99,23 @@ def setup_parser(*, lora=False) -> argparse.ArgumentParser:
         help="Optional rendered-output loss against the initial base with identical inputs, controls and seeds; zero disables it.",
     )
     parser.add_argument(
+        "--control_randomization",
+        action="store_true",
+        help="Sample fixed tone/structure controls with frozen-base-relative targets.",
+    )
+    parser.add_argument(
+        "--control_residual_sigma",
+        type=float,
+        default=None,
+        help="Gaussian sigma for enhancement target bands, independent of loss filtering (default: 6; 0 < sigma <= 32).",
+    )
+    parser.add_argument(
+        "--control_anchor_probability", type=float, default=None, help="Reference-point sampling probability (default: 0.25)."
+    )
+    parser.add_argument(
+        "--control_corner_probability", type=float, default=None, help="Four-corner sampling probability (default: 0.25)."
+    )
+    parser.add_argument(
         "--dino_loss_weight", type=float, default=0.0, help="Optional frozen DINOv3 patch loss; zero disables loading and compute."
     )
     parser.add_argument("--dino_loss_model_type", choices=["small", "small_plus", "base", "large"], default=None)

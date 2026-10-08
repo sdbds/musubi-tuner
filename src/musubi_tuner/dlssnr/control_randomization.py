@@ -106,3 +106,76 @@ def control_targets(source, target, mask, reference, sampled, ratios, *, sigma: 
             "rgb_clipped": (rendered < 0) | (rendered > 1),
             "edge_clipped": (edge < 0) | (edge > 1),
         }
+
+
+def attach_control_batch(batch: dict, draws: list[dict]) -> dict:
+    source = batch["source"]
+    if source.ndim not in (4, 5) or len(draws) != source.shape[0]:
+        raise ValueError("control draws must match the image/clip batch shape")
+    stacked = {
+        name: torch.stack([draw[name] for draw in draws]).to(source.device)
+        for name in ("reference_lanes", "sampled_lanes", "ratios", "values")
+    }
+    shape = (source.shape[0], 5, 1, 1) if source.ndim == 4 else (source.shape[0], 1, 5, 1, 1)
+    return {
+        **batch,
+        "controls": stacked["sampled_lanes"].view(shape).expand_as(batch["controls"]),
+        "control_reference_lanes": stacked["reference_lanes"],
+        "control_ratios": stacked["ratios"],
+        "control_values": stacked["values"],
+        "temporal_support": "joint_loss_mask",
+    }
+
+
+@torch.no_grad()
+def apply_control_targets(
+    batch, reference, sampled, *, burn_in: int, settings: dict, loss_profile: dict | None
+) -> tuple[dict, dict[str, float]]:
+    from musubi_tuner.dlssnr.training_step import supervised_values
+
+    source, target = batch["source"], batch["target"]
+    mask = supervised_values(batch.get("loss_mask", torch.ones_like(source[..., :1, :, :])), burn_in)
+    frames = 1 if source.ndim == 4 else source.shape[1] - burn_in
+    ratios, values = batch["control_ratios"].repeat(frames, 1), batch["control_values"].repeat(frames, 1)
+    generated = control_targets(
+        supervised_values(source, burn_in),
+        supervised_values(target, burn_in),
+        mask,
+        reference,
+        sampled,
+        ratios,
+        sigma=settings["residual_sigma"],
+        input_edge=loss_profile is not None,
+    )
+    augmented = dict(batch)
+    for name in ("target", "preclamp_target", "edge_target"):
+        if source.ndim == 4:
+            augmented[name] = generated[name]
+        else:
+            full = target.detach().float().clone()
+            full[:, burn_in:] = generated[name].reshape(frames, source.shape[0], *source.shape[2:]).transpose(0, 1)
+            augmented[name] = full
+    weights = mask.double()
+    mass = 3 * weights.sum(dim=(1, 2, 3))
+    raw = {
+        "control/_mass": float(mass.sum()),
+        "control/_tone": float((values[:, 0].double() * mass).sum()),
+        "control/_structure": float((values[:, 1].double() * mass).sum()),
+        "control/_reference": float(((ratios == 1).all(dim=1) * mass).sum()),
+        "control/_zero": float(((ratios == 0).all(dim=1) * mass).sum()),
+        "control/_rgb_clipped": float((generated["rgb_clipped"] * weights).sum()),
+        "control/_edge_clipped": float((generated["edge_clipped"] * weights).sum()),
+    }
+    return augmented, raw
+
+
+def finalize_control_metrics(metrics: dict[str, float]) -> dict[str, float]:
+    result = dict(metrics)
+    if "control/_mass" not in result:
+        return result
+    mass = result.pop("control/_mass")
+    for name in ("tone", "structure", "reference", "zero", "rgb_clipped", "edge_clipped"):
+        numerator = result.pop(f"control/_{name}")
+        suffix = "mean" if name in ("tone", "structure") else "fraction"
+        result[f"control/{name}_{suffix}"] = numerator / mass if mass > 0 else 0.0
+    return result
