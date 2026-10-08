@@ -127,6 +127,8 @@ def _args(root, name, *, lora=False, distributed=False, dropout=0.0, resume=Fals
         args.dino_loss_weight = 0.1
     if (root / "base_anchor").exists():
         args.base_anchor_weight = 2.0
+    if (root / "control_randomization").exists():
+        args.control_randomization = True
     if (root / "detail_diagnostics").exists():
         args.eval_detail_diagnostics = args.eval_native = True
         args.sample_every_n_steps = 1
@@ -150,7 +152,12 @@ def _data(root, *, temporal=False):
         toml.dumps(
             {
                 "general": {"resolution": 64, "batch_size": 2, "enable_bucket": True, "bucket_no_upscale": True},
-                "datasets": [{"train_manifest": "pairs.jsonl"}],
+                "datasets": [
+                    {
+                        "train_manifest": "pairs.jsonl",
+                        **({"nr_controls_mode": "fixed"} if (root / "control_randomization").exists() else {}),
+                    }
+                ],
             }
         ),
         encoding="utf-8",
@@ -335,7 +342,7 @@ def _worker(root, rank, lora, dropout, resume, failure):
             return loss_fn
 
         trainer.create_dino_loss = create_dino
-    if (root / "base_anchor").exists():
+    if (root / "base_anchor").exists() or (root / "control_randomization").exists():
         from musubi_tuner.dlssnr.base_anchor import NRBaseAnchor
 
         class ObservedAnchor(NRBaseAnchor):
@@ -345,11 +352,18 @@ def _worker(root, rank, lora, dropout, resume, failure):
                 super().__init__(model, network)
                 if rank == 1 and (root / "anchor_rank_mismatch").exists():
                     self.identity["base_parameters_sha256"] = "mismatched"
+                if rank == 1 and (root / "control_reference_mismatch").exists():
+                    self.reference_identity["base_parameters_sha256"] = "mismatched"
 
             def forward(self, *args, **kwargs):
                 if rank == 1 and (root / "fail_anchor_forward").exists():
                     raise RuntimeError("base anchor forward failed")
                 return super().forward(*args, **kwargs)
+
+            def predict(self, *args, **kwargs):
+                if rank == 1 and (root / "fail_control_reference").exists():
+                    raise RuntimeError("control reference failed")
+                return super().predict(*args, **kwargs)
 
         trainer.NRBaseAnchor = ObservedAnchor
     content_created = []
@@ -376,11 +390,21 @@ def _worker(root, rank, lora, dropout, resume, failure):
 
         trainer.create_content_metric = create_content
     original = trainer._microbatch
-    indices = []
+    indices, augmentation = [], []
 
     def observed(dataset, index, config, plan):
         indices.append(plan.indices(index))
-        return original(dataset, index, config, plan)
+        batch, seeds = original(dataset, index, config, plan)
+        if "control_ratios" in batch:
+            augmentation.append(
+                {
+                    "sample_ids": [dataset.rows[item]["sample_id"] for item in plan.indices(index)],
+                    "epoch": index // len(plan),
+                    "ratios": batch["control_ratios"].tolist(),
+                    "seeds": seeds,
+                }
+            )
+        return batch, seeds
 
     trainer._microbatch = observed
     original_save = trainer.save_state
@@ -429,6 +453,7 @@ def _worker(root, rank, lora, dropout, resume, failure):
             "rng": hashlib.sha256(torch.get_rng_state().numpy().tobytes()).hexdigest(),
             "ema": ema_snapshots,
             "content_created": content_created,
+            "augmentation": augmentation,
         }
     (root / f"rank{rank}.json").write_text(json.dumps(result), encoding="utf-8")
 
