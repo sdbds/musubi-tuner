@@ -5,6 +5,7 @@ import math
 import torch
 
 from musubi_tuner.dlssnr.controls import fixed_control_tensor, resolve_fixed_controls
+from musubi_tuner.dlssnr.losses import masked_gaussian_lowpass
 from musubi_tuner.dlssnr.temporal import augmentation_seed
 
 
@@ -56,3 +57,52 @@ def sample_control_point(
     else:
         ratios = tuple(torch.rand(2, generator=generator).tolist())
     return encode_control_point(reference, ratios)
+
+
+@torch.no_grad()
+def control_targets(source, target, mask, reference, sampled, ratios, *, sigma: float, input_edge: bool) -> dict[str, torch.Tensor]:
+    shape = source.shape
+    if source.ndim != 4 or shape[1] != 3:
+        raise ValueError("control target image shape must be N3HW")
+    images = {"source": source, "target": target}
+    for label, snapshot in (("reference", reference), ("sampled", sampled)):
+        for name in ("neural_preclamp", "rendered_proxy"):
+            images[f"{label}/{name}"] = snapshot[name]
+    if (
+        any(value.shape != shape for value in images.values())
+        or mask.shape != (shape[0], 1, *shape[-2:])
+        or ratios.shape != (shape[0], 2)
+    ):
+        raise ValueError("control target image, mask and ratio shapes must match exactly")
+    images = {key: value.float() for key, value in images.items()}
+    mask, ratios = mask.float(), ratios.float()
+    if any(not torch.isfinite(value).all() for value in (*images.values(), mask, ratios)):
+        raise ValueError("control targets require finite images, masks, references and ratios")
+    if not ((mask >= 0) & (mask <= 1)).all() or not ((ratios >= 0) & (ratios <= 1)).all():
+        raise ValueError("control target masks and ratios must be in [0,1]")
+    a_t, a_s = ratios[:, 0, None, None, None], ratios[:, 1, None, None, None]
+    at_reference = (ratios == 1).all(dim=1)[:, None, None, None]
+    at_zero = (ratios == 0).all(dim=1)[:, None, None, None]
+
+    def construct(original, field):
+        baseline, current = images[f"reference/{field}"], images[f"sampled/{field}"]
+        residual = original - baseline
+        value = current + a_s * residual + (a_t - a_s) * masked_gaussian_lowpass(residual, mask, sigma)
+        # Endpoint selection avoids cancellation and respects FP16 control aliases.
+        value = torch.where(at_reference, original, value)
+        value = torch.where(at_zero | (mask == 0), current, value)
+        if not torch.isfinite(value).all():
+            raise ValueError("constructed control target is not finite")
+        return value.detach()
+
+    with torch.autocast(source.device.type, enabled=False):
+        preclamp = construct(images["target"], "neural_preclamp")
+        rendered = construct(images["target"], "rendered_proxy")
+        edge = construct(images["source"], "rendered_proxy") if input_edge else rendered
+        return {
+            "preclamp_target": preclamp,
+            "target": rendered.clamp(0, 1),
+            "edge_target": edge.clamp(0, 1),
+            "rgb_clipped": (rendered < 0) | (rendered > 1),
+            "edge_clipped": (edge < 0) | (edge > 1),
+        }

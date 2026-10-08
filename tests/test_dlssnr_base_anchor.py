@@ -120,6 +120,14 @@ def test_reference_is_initial_model_with_same_controls_seeds_and_own_history(lor
         )
     expected = torch.cat([frame["rendered_proxy"] for frame in frames])
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    snapshot = reference.predict(model, network, batch, seeds, burn_in)
+    torch.testing.assert_close(snapshot["rendered_proxy"], actual, rtol=0, atol=0)
+    torch.testing.assert_close(
+        snapshot["neural_preclamp"], torch.cat([frame["neural_preclamp"] for frame in frames]), rtol=0, atol=0
+    )
+    assert all(not value.requires_grad for value in snapshot.values())
+    assert "loss" not in reference.reference_identity
+    assert reference.reference_identity["base_parameters_sha256"] == reference.identity["base_parameters_sha256"]
     assert not actual.requires_grad
     assert [child.training for child in model.modules()] == modes
     assert torch.equal(torch.random.get_rng_state(), rng)
@@ -146,7 +154,8 @@ def test_fp8_lora_anchor_is_the_effective_quantized_base_without_a_copy(scaled):
     torch.testing.assert_close(reference(model, network, batch, seeds, 0), expected, rtol=0, atol=0)
 
 
-def test_reference_failure_restores_lora_model_modes_and_all_rng(monkeypatch):
+@pytest.mark.parametrize("method", ["forward", "predict"])
+def test_reference_failure_restores_lora_model_modes_and_all_rng(monkeypatch, method):
     model = SmallNR()
     network = small_inject(model, {"dropout": 0.3})
     reference = anchor(model, network)
@@ -164,7 +173,7 @@ def test_reference_failure_restores_lora_model_modes_and_all_rng(monkeypatch):
     monkeypatch.setattr(training_step, "forward_frame", fail)
     batch, seeds = batch_and_seeds()
     with pytest.raises(RuntimeError, match="reference failed"):
-        reference(model, network, batch, seeds, 0)
+        getattr(reference, method)(model, network, batch, seeds, 0)
     assert [child.training for child in model.modules()] == modes
     after = capture_rng()
     assert torch.equal(before.pop("torch"), after.pop("torch"))
