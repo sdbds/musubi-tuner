@@ -1,7 +1,7 @@
 # DLSS-NR Random Controls and Synthetic Temporal Training
 
-**Status:** Proposed for review. Approach A was selected on 2026-10-08; the
-detailed contracts below still require approval before implementation.
+**Status:** Approved on 2026-10-08. Approach A and the detailed design were
+confirmed; implementation plans are the next review gate.
 **Baseline:** `DLSSNR` at `cf50676`.
 
 ## 1. Scope
@@ -232,6 +232,10 @@ Dataset TOML gains these augmentation settings, inheritable from `[general]`:
 | --- | --- | --- |
 | `synthetic_temporal` | `false` | Boolean; requires temporal training |
 | `synthetic_max_shift_px` | `0.5` when enabled | Finite in `[0,1]`; reject an explicit value when synthesis is disabled |
+
+An entry that explicitly disables synthesis may discard an inherited shift
+default, but must not declare its own shift value. A general shift setting with
+no enabled dataset is unused and rejected.
 
 The existing explicit `sequence_length`, `burn_in` and `tbptt_length` CLI settings
 remain required, with `sequence_length = burn_in + tbptt_length`, burn-in at
