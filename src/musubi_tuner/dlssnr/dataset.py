@@ -240,9 +240,16 @@ class NRDataset(Dataset):
         return len(self.rows)
 
     def __getitem__(self, index):
+        return self.get_sample(index)
+
+    def get_sample(self, index: int, *, epoch: int = 0, sample_id: str | None = None) -> dict:
         row = self.rows[index]
         frames = [self._load_frame(frame, row.get("motion_layout"), index) for frame in row["frames"]]
-        metadata = {"sample_id": row["sample_id"], "sequence_id": row["sequence_id"], "crop_id": row.get("crop_id", 0)}
+        metadata = {
+            "sample_id": row["sample_id"] if sample_id is None else sample_id,
+            "sequence_id": row["sequence_id"],
+            "crop_id": row.get("crop_id", 0),
+        }
         if self.fixed_controls is not None:
             metadata["fixed_controls"] = dict(self.fixed_controls)
         return {**frames[0], **metadata} if self.single_frame else {"frames": frames, **metadata}
@@ -509,8 +516,12 @@ class NRDatasetCollection(Dataset):
         return len(self.references)
 
     def __getitem__(self, index):
+        return self.get_sample(index)
+
+    def get_sample(self, index: int, *, epoch: int = 0, sample_id: str | None = None) -> dict:
         group, local_index = self.references[index]
-        return {**self.datasets[group][local_index], "sample_id": self.rows[index]["sample_id"]}
+        identity = self.rows[index]["sample_id"] if sample_id is None else sample_id
+        return self.datasets[group].get_sample(local_index, epoch=epoch, sample_id=identity)
 
     def validate(self):
         for dataset in self.datasets:
@@ -527,8 +538,13 @@ def collate_single_frames(samples):
 
 
 def collate_clips(clips):
+    policies = {clip.get("temporal_support") for clip in clips}
+    if len(policies) != 1 or not policies <= {None, "joint_loss_mask"}:
+        raise ValueError("clip microbatches require one supported temporal_support policy")
     fields = ("source", "target", "controls", "motion", "history_valid", "temporal_valid", "loss_mask")
     batch = {name: torch.stack([torch.stack([frame[name] for frame in clip["frames"]]) for clip in clips]) for name in fields}
     batch["reset"] = torch.tensor([[frame["reset"] for frame in clip["frames"]] for clip in clips], dtype=torch.bool)
     batch["sample_id"] = [clip["sample_id"] for clip in clips]
+    if "joint_loss_mask" in policies:
+        batch["temporal_support"] = "joint_loss_mask"
     return batch

@@ -112,6 +112,21 @@ def test_seeds_vary_by_epoch_repeat_crop_and_domain_without_global_rng():
     assert torch.equal(torch.random.get_rng_state(), before[2])
 
 
+@pytest.mark.parametrize("device", ["cpu", "meta"])
+def test_control_sampling_does_not_depend_on_ambient_device_or_dtype(device):
+    settings = {**SETTINGS, "anchor_probability": 0, "corner_probability": 0}
+    expected = sample(settings)
+    previous_dtype = torch.get_default_dtype()
+    try:
+        torch.set_default_dtype(torch.float64)
+        with torch.device(device):
+            actual = sample(settings)
+    finally:
+        torch.set_default_dtype(previous_dtype)
+    for name in expected:
+        torch.testing.assert_close(actual[name], expected[name], rtol=0, atol=0)
+
+
 def targets(source, target, mask, reference, sampled, ratios, *, sigma=6, input_edge=True):
     from musubi_tuner.dlssnr.control_randomization import control_targets
 

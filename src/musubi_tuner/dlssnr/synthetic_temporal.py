@@ -4,8 +4,10 @@ import math
 
 import torch
 import torch.nn.functional as F
+from torch.utils.data import Dataset
 
-from musubi_tuner.dlssnr.temporal import augmentation_seed
+from musubi_tuner.dlssnr.identity import json_sha256
+from musubi_tuner.dlssnr.temporal import AUGMENTATION_SEED_POLICY, augmentation_seed
 
 
 def validate_max_shift(max_shift_px: float) -> None:
@@ -20,8 +22,8 @@ def sample_offsets(length: int, max_shift_px: float, *, seed: int, epoch: int, s
     generator = torch.Generator(device="cpu").manual_seed(
         augmentation_seed(seed, epoch, sample_id, crop_id, domain="synthetic_jitter")
     )
-    offsets = torch.zeros(length, 2, dtype=torch.float32)
-    offsets[1:] = (torch.rand(length - 1, 2, generator=generator) * 2 - 1) * max_shift_px
+    offsets = torch.zeros(length, 2, dtype=torch.float32, device="cpu")
+    offsets[1:] = (torch.rand(length - 1, 2, generator=generator, dtype=torch.float32, device="cpu") * 2 - 1) * max_shift_px
     return offsets
 
 
@@ -109,3 +111,66 @@ def synthesize_clip(sample: dict, offsets: torch.Tensor) -> dict:
             previous_support = support
     metadata = {name: value for name, value in sample.items() if name not in frames[0]}
     return {**metadata, "frames": frames, "temporal_support": "joint_loss_mask"}
+
+
+class NRSyntheticTemporalDataset(Dataset):
+    def __init__(self, base, sequence_length: int, *, seed: int, max_shift_px: float):
+        if not base.single_frame or any(len(row["frames"]) != 1 for row in base.rows):
+            raise ValueError("synthetic temporal data require a single-frame paired dataset")
+        if type(sequence_length) is not int or sequence_length < 2:
+            raise ValueError("synthetic temporal sequence_length must be at least two")
+        validate_max_shift(max_shift_px)
+        self.base, self.sequence_length, self.seed, self.max_shift_px = base, sequence_length, seed, float(max_shift_px)
+        self.single_frame = False
+        self.fixed_controls = base.fixed_controls
+        self.bucket_sizes, self.sequence_ids = base.bucket_sizes, base.sequence_ids
+        self.rows = [
+            {
+                **row,
+                "frames": [{"frame_index": row["frames"][0]["frame_index"] + i, "reset": i == 0} for i in range(sequence_length)],
+            }
+            for row in base.rows
+        ]
+        self.synthetic_protocol = {
+            "schema": "dlssnr_synthetic_temporal_v1",
+            "seed_policy": AUGMENTATION_SEED_POLICY,
+            "seed": seed,
+            "random_domain": "synthetic_jitter",
+            "sequence_length": sequence_length,
+            "max_shift_px": self.max_shift_px,
+            "interpolation": "bilinear",
+            "align_corners": False,
+            "source_padding": "border_context_only",
+            "labels": "normalized_masked_resampling",
+            "history_validity": "current_source_and_full_previous_bilinear_footprint",
+            "temporal_metric": "joint_loss_mask_normalized_residual",
+        }
+
+    def __len__(self):
+        return len(self.base)
+
+    def __getitem__(self, index):
+        return self.get_sample(index)
+
+    def get_sample(self, index: int, *, epoch: int = 0, sample_id: str | None = None) -> dict:
+        sample = self.base.get_sample(index, epoch=epoch, sample_id=sample_id)
+        validate_synthetic_support(sample, self.max_shift_px)
+        offsets = sample_offsets(
+            self.sequence_length,
+            self.max_shift_px,
+            seed=self.seed,
+            epoch=epoch,
+            sample_id=sample["sample_id"],
+            crop_id=sample["crop_id"],
+        )
+        return synthesize_clip(sample, offsets)
+
+    def iter_frames(self, index):
+        yield from self.get_sample(index)["frames"]
+
+    def validate(self):
+        for index in range(len(self)):
+            validate_synthetic_support(self.base.get_sample(index), self.max_shift_px)
+
+    def fingerprint(self):
+        return json_sha256({"source": self.base.fingerprint(), "synthetic_temporal": self.synthetic_protocol})

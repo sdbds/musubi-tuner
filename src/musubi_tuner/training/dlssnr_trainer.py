@@ -38,6 +38,7 @@ from musubi_tuner.dlssnr.numerics import fp32_execution
 from musubi_tuner.dlssnr.runtime import configure_model_runtime, numerics_metadata, runtime_policy, validate_runtime_device
 from musubi_tuner.dlssnr.profiles import PROFILE_ID
 from musubi_tuner.dlssnr.temporal import SEED_POLICY, stable_frame_seed
+from musubi_tuner.dlssnr.synthetic_temporal import NRSyntheticTemporalDataset
 from musubi_tuner.dlssnr.training_step import loss_denominators, training_loss
 from musubi_tuner.dlssnr.weight_quantization import capture_native_reference, native_quantization_report
 from musubi_tuner.training.dlssnr_ema import NRParameterEMA
@@ -243,7 +244,18 @@ def _dataset_entry(data, training, loss, evaluation):
     width, height = data["bucket_size"]
     buckets = {name: data[name] for name in ("enable_bucket", "bucket_no_upscale")}
     buckets["fixed_controls"] = data.get("fixed_controls")
-    if "image_directory" in data:
+    if data.get("synthetic_temporal"):
+        if training["mode"] != "temporal":
+            raise ValueError("synthetic_temporal requires temporal training mode")
+        base = (
+            load_directory_pairs(data)
+            if "image_directory" in data
+            else load_single_frame_manifest(data["train_manifest"], width, height, **buckets)
+        )
+        train = NRSyntheticTemporalDataset(
+            base, training["sequence_length"], seed=training["seed"], max_shift_px=data["synthetic_temporal"]["max_shift_px"]
+        )
+    elif "image_directory" in data:
         if training["mode"] != "single_frame":
             raise ValueError("temporal training requires a manifest with explicit frames and motion")
         train = load_directory_pairs(data)
@@ -273,8 +285,8 @@ def _dataset_entry(data, training, loss, evaluation):
 
 def _microbatch(dataset, microbatch_index, config, plan):
     training = config["training"]
-    samples = [dataset[index] for index in plan.indices(microbatch_index)]
     epoch = microbatch_index // len(plan)
+    samples = [dataset.get_sample(index, epoch=epoch) for index in plan.indices(microbatch_index)]
     seeds = []
     for sample in samples:
         frames = [sample] if training["mode"] == "single_frame" else sample["frames"]
@@ -473,6 +485,16 @@ class NRSupervisedTrainer:
             identity["implementation"]["control_randomization.py"] = file_sha256(
                 Path(__file__).parents[1] / "dlssnr/control_randomization.py"
             )
+        synthetic_protocols = [
+            {"dataset_index": index, "protocol": dataset.synthetic_protocol}
+            for index, dataset in enumerate(getattr(train_data, "datasets", [train_data]))
+            if hasattr(dataset, "synthetic_protocol")
+        ]
+        if synthetic_protocols:
+            identity["synthetic_temporal"] = synthetic_protocols
+            identity["implementation"]["synthetic_temporal.py"] = file_sha256(
+                Path(__file__).parents[1] / "dlssnr/synthetic_temporal.py"
+            )
         if config["evaluation"].get("detail_diagnostics"):
             identity["detail_diagnostics"] = diagnostic_protocol()
             identity["implementation"]["detail_metrics.py"] = file_sha256(Path(__file__).parents[1] / "dlssnr/detail_metrics.py")
@@ -551,6 +573,8 @@ class NRSupervisedTrainer:
             metadata["base_anchor"] = base_anchor.identity
         if "control_randomization" in config:
             metadata["control_randomization"] = identity["control_randomization"]
+        if synthetic_protocols:
+            metadata["synthetic_temporal"] = synthetic_protocols
         if content_identity is not None:
             metadata["content_preservation"] = content_identity
         baseline = None

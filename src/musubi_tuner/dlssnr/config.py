@@ -16,6 +16,7 @@ from musubi_tuner.dlssnr.filenames import validate_filename
 from musubi_tuner.dlssnr.geometry import resolve_geometry
 from musubi_tuner.dlssnr.profiles import PROFILE_ID
 from musubi_tuner.dlssnr.temporal import AUGMENTATION_SEED_POLICY
+from musubi_tuner.dlssnr.synthetic_temporal import validate_max_shift
 
 
 def _integer(value, name: str, minimum: int = 1) -> None:
@@ -117,17 +118,35 @@ def load_dataset_config(path: str | Path) -> dict:
         )
     general = raw.get("general", {})
     datasets = raw.get("datasets")
-    settings = {"resolution", "batch_size", "enable_bucket", "bucket_no_upscale", "num_repeats", "caption_extension"}
+    settings = {
+        "resolution",
+        "batch_size",
+        "enable_bucket",
+        "bucket_no_upscale",
+        "num_repeats",
+        "caption_extension",
+        "synthetic_temporal",
+        "synthetic_max_shift_px",
+    }
     if not isinstance(general, dict) or (unknown := set(general) - settings):
         raise ValueError(f"dataset [general] supports only {sorted(settings)}")
     if not isinstance(datasets, list) or not datasets or any(not isinstance(item, dict) for item in datasets):
         raise ValueError("DLSS-NR requires at least one [[datasets]] entry")
+    if "synthetic_temporal" in general and type(general["synthetic_temporal"]) is not bool:
+        raise ValueError("general.synthetic_temporal must be a boolean")
+    if "synthetic_max_shift_px" in general:
+        validate_max_shift(general["synthetic_max_shift_px"])
     paths = {"train_manifest", "validation_manifest", "sequence_manifest", "image_directory", "control_directory"}
     entries = []
     for dataset in datasets:
         if unknown := set(dataset) - paths - settings - set(CONTROL_DEFAULTS) - {"nr_controls_mode", "cache_directory"}:
             raise ValueError(f"unsupported dataset fields: {sorted(unknown)}; training settings belong on the command line")
-        entries.append(_resolve_dataset_entry({**general, **dataset}, path.parent, paths))
+        effective = {**general, **dataset}
+        if dataset.get("synthetic_temporal") is False and "synthetic_max_shift_px" not in dataset:
+            effective.pop("synthetic_max_shift_px", None)
+        entries.append(_resolve_dataset_entry(effective, path.parent, paths))
+    if "synthetic_max_shift_px" in general and not any(entry.get("synthetic_temporal") for entry in entries):
+        raise ValueError("general.synthetic_max_shift_px requires an enabled synthetic_temporal dataset")
     if len(entries) == 1:
         return entries[0]
     return {"datasets": entries, "batch_size": entries[0]["batch_size"]}
@@ -148,6 +167,15 @@ def _resolve_dataset_entry(effective, base_directory, paths):
     if directory != bool(effective.get("control_directory")):
         raise ValueError("directory pairs require both image_directory and control_directory")
     data = {"bucket_size": resolution, "batch_size": batch_size}
+    synthetic = effective.get("synthetic_temporal", False)
+    if type(synthetic) is not bool:
+        raise ValueError("dataset.synthetic_temporal must be a boolean")
+    if synthetic:
+        shift = effective.get("synthetic_max_shift_px", 0.5)
+        validate_max_shift(shift)
+        data["synthetic_temporal"] = {"schema": "dlssnr_synthetic_temporal_v1", "max_shift_px": float(shift)}
+    elif "synthetic_max_shift_px" in effective:
+        raise ValueError("synthetic_max_shift_px requires synthetic_temporal=true")
     for name in ("enable_bucket", "bucket_no_upscale"):
         value = effective.get(name, False)
         if type(value) is not bool:
@@ -195,6 +223,8 @@ def build_train_config(args, *, lora=False) -> dict:
     data = load_dataset_config(args.dataset_config)
     control_settings = _control_settings(args, data)
     mode = args.training_mode
+    if mode != "temporal" and any(entry.get("synthetic_temporal") for entry in data.get("datasets", [data])):
+        raise ValueError("synthetic_temporal requires temporal training mode")
     lengths = (args.sequence_length, args.burn_in, args.tbptt_length)
     if mode == "temporal" and any(value is None for value in lengths):
         raise ValueError("temporal mode requires --sequence_length, --burn_in and --tbptt_length")
@@ -230,7 +260,7 @@ def build_train_config(args, *, lora=False) -> dict:
         if args.loss_temporal != 0:
             raise ValueError("single-frame mode requires --loss_temporal=0")
     elif mode == "temporal":
-        if any("image_directory" in entry for entry in data.get("datasets", [data])):
+        if any("image_directory" in entry and not entry.get("synthetic_temporal") for entry in data.get("datasets", [data])):
             raise ValueError("temporal training requires a manifest with explicit frames, motion and validity masks")
         if lengths[0] != lengths[1] + lengths[2] or lengths[1] < 1:
             raise ValueError("sequence_length must equal burn_in + tbptt_length, with both at least 1")
