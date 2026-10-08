@@ -213,3 +213,63 @@ def test_real_lora_is_merged_with_its_own_multiplier_before_export(real_canonica
     assert report["lora"]["multiplier"] == 0.5
     assert report["lora"]["sha256"] == file_sha256(adapter_path)
     assert file_sha256(base / "model.safetensors") == before
+
+
+def test_real_qat_artifact_roundtrip_matches_published_weights_and_surrogate(real_canonical, tmp_path):
+    import torch
+    from musubi_tuner.dlssnr.artifacts import save_canonical
+    from musubi_tuner.dlssnr.checkpoint import unpack_record
+    from musubi_tuner.dlssnr.dll import read_weights
+    from musubi_tuner.dlssnr.model import NRModel
+    from musubi_tuner.dlssnr.numerics import fp32_execution
+    from musubi_tuner.dlssnr.pipeline import forward_frame
+    from musubi_tuner.dlssnr.profiles import build_records
+    from musubi_tuner.dlssnr.runtime import configure_model_runtime, default_runtime_policy, with_native_weight_qat
+    from musubi_tuner.dlssnr.weight_quantization import native_storage_kinds, native_weight_ste
+
+    io = importlib.import_module("musubi_tuner.dlssnr.dll_io")
+    source, base = real_canonical
+    model = NRModel().eval()
+    model.load_canonical(str(base / "model.safetensors"))
+    configure_model_runtime(model, with_native_weight_qat(default_runtime_policy(), True))
+    edits = {
+        "blocks.0.ffn.fc1.weight": 1.0626,
+        "blocks.0.input_adapter.weight": 1.0006,
+        "blocks.0.attn.prior": -2.0007,
+        "blocks.0.attn.temperature": 0.3333,
+        "blocks.70.blend_scale": 0.5003,
+    }
+    parameters = dict(model.named_parameters())
+    kinds = native_storage_kinds()
+    expected = {}
+    with torch.no_grad():
+        for name, value in edits.items():
+            parameters[name].flatten()[0] = value
+            expected[name] = native_weight_ste(parameters[name], kinds[name]).clone()
+    trained = tmp_path / "qat"
+    save_canonical(model, trained, source_dir=base)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    image = torch.full((1, 3, 48, 48), 0.5, device=device)
+    controls = torch.ones(1, 5, 48, 48, device=device)
+    with torch.no_grad(), fp32_execution():
+        raw = forward_frame(model.to(device), image, controls, 42)["raw_head"].cpu()
+    del model, parameters
+    output = tmp_path / "qat.dll"
+    report = io.pack_dll(source, trained, output)
+    assert report["quantized_tensors_verified"] is True
+    # The public importer intentionally accepts only the audited original DLL.
+    # Re-extract modified payloads with the same record decoder used by export.
+    resource = read_weights(output.read_bytes())
+    unpacked = {
+        name: torch.from_numpy(value)
+        for record in build_records()
+        for name, value in unpack_record(record, bytes(resource.records[record.name].payload)).items()
+        if not name.startswith("opaque.")
+    }
+    for name, wanted in expected.items():
+        torch.testing.assert_close(unpacked[name].view(torch.int32), wanted.view(torch.int32), rtol=0, atol=0)
+    restored = NRModel().eval()
+    restored.load_state_dict(unpacked, strict=True)
+    with torch.no_grad(), fp32_execution():
+        actual = forward_frame(restored.to(device), image, controls, 42)["raw_head"].cpu()
+    torch.testing.assert_close(actual, raw, rtol=0, atol=0)

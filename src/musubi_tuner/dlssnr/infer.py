@@ -18,6 +18,7 @@ from musubi_tuner.dlssnr.runtime import (
     configure_model_runtime,
     validate_runtime_device,
     validate_runtime_policy,
+    with_native_weight_qat,
 )
 
 
@@ -38,9 +39,11 @@ def load_model(model_dir: str | Path, device: str = "auto", *, runtime_overrides
     source_identity = inspect_canonical(model_dir, development_smoke=True)
     saved = read_artifact_runtime(model_dir)
     overrides = {key: value for key, value in (runtime_overrides or {}).items() if value is not None}
-    if unknown := set(overrides) - (set(default_runtime_policy()) - {"schema"}):
+    if unknown := set(overrides) - ((set(default_runtime_policy()) - {"schema"}) | {"native_weight_qat"}):
         raise ValueError(f"unsupported inference runtime overrides: {sorted(unknown)}")
     policy = {**saved, **overrides}
+    if "native_weight_qat" in overrides:
+        policy = with_native_weight_qat(policy, overrides["native_weight_qat"])
     if overrides.get("fp8_base") is False and "fp8_scaled" not in overrides:
         policy["fp8_scaled"] = False
     validate_runtime_policy(policy)
@@ -64,6 +67,7 @@ def add_runtime_arguments(parser):
     parser.add_argument("--mixed_precision", choices=["no", "fp16", "bf16"], default=None)
     parser.add_argument("--fp8_base", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--fp8_scaled", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--native_weight_qat", action=argparse.BooleanOptionalAction, default=None)
     backends = parser.add_mutually_exclusive_group()
     backends.add_argument("--attention_backend", choices=["native", "sdpa", "flash_attn", "xformers", "sage_attn"], default=None)
     for backend in ("sdpa", "flash_attn", "xformers", "sage_attn"):
@@ -74,7 +78,15 @@ def add_runtime_arguments(parser):
 def runtime_overrides_from_args(args):
     return {
         name: getattr(args, name)
-        for name in ("numerics_profile", "mixed_precision", "fp8_base", "fp8_scaled", "attention_backend", "attention_scope")
+        for name in (
+            "numerics_profile",
+            "mixed_precision",
+            "fp8_base",
+            "fp8_scaled",
+            "attention_backend",
+            "attention_scope",
+            "native_weight_qat",
+        )
         if getattr(args, name) is not None
     }
 

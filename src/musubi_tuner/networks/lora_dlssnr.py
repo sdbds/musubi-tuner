@@ -7,6 +7,7 @@ Adapters live on this module, not on the frozen base. QKV stays one head-major m
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import math
 from pathlib import Path
@@ -65,6 +66,16 @@ class DLSSNRLoRA(nn.Module):
         self.target_names: list[str] = []
         self.profile = ""
         self.report: dict = {}
+        self.enabled = True
+
+    @contextmanager
+    def disable_adapters(self):
+        enabled = self.enabled
+        try:
+            self.enabled = False
+            yield
+        finally:
+            self.enabled = enabled
 
     @property
     def elements(self) -> int:
@@ -83,9 +94,13 @@ class DLSSNRLoRA(nn.Module):
         module.weight.requires_grad_(False)
 
         def forward(x: torch.Tensor, module: ChannelLinear = module, adapter: LoRADelta = adapter) -> torch.Tensor:
+            if not self.enabled:
+                return module.project(module.published_weight(module.materialized_weight()), x)
             # Real NR weights amplify split-GEMM rounding through cosine attention.
             # Use the same effective weight and projection as a merged checkpoint.
-            result = module.project(module.materialized_weight() + adapter.delta_weight(), x)
+            if module.native_weight_kind is not None and adapter.training and adapter.dropout > 0:
+                raise ValueError("native weight QAT requires zero LoRA dropout")
+            result = module.project(module.published_weight(module.materialized_weight() + adapter.delta_weight()), x)
             if adapter.training and adapter.dropout > 0:
                 hidden = module.project(adapter.lora_down, x)
                 dropped = F.dropout(hidden, adapter.dropout) - hidden
@@ -218,9 +233,7 @@ def merge_adapter(base: dict[str, torch.Tensor], network: DLSSNRLoRA, *, multipl
     return merged
 
 
-def merge_to_directory(
-    base_dir: str | Path, adapter_path: str | Path, output_dir: str | Path, *, multiplier: float = 1.0
-) -> None:
+def merge_to_directory(base_dir: str | Path, adapter_path: str | Path, output_dir: str | Path, *, multiplier: float = 1.0) -> None:
     """Write a canonical directory whose weights are base + adapter. The base file is not modified."""
     from safetensors import safe_open
     from musubi_tuner.dlssnr.artifacts import inspect_canonical, save_canonical

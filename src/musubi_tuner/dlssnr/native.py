@@ -48,6 +48,27 @@ def _same_bits(left: np.ndarray, right: np.ndarray) -> np.ndarray:
     return left.view(np.uint32) == right.view(np.uint32)
 
 
+def quantization_statistics(name, kind, source, trained, blended, quantized) -> dict:
+    """Shared byte-level accounting for DLL export and training diagnostics."""
+    unchanged = _same_bits(trained, source)
+    error = quantized.astype(np.float64) - blended
+    blended_changed = ~_same_bits(blended, source)
+    exported_changed = ~_same_bits(quantized, source)
+    return {
+        "name": name,
+        "storage": kind,
+        "values": int(trained.size),
+        "trained_changed_values": int(np.count_nonzero(~unchanged)),
+        "blended_changed_values": int(np.count_nonzero(blended_changed)),
+        "exported_changed_values": int(np.count_nonzero(exported_changed)),
+        "rounded_values": int(np.count_nonzero(~_same_bits(quantized, blended))),
+        "lost_update_values": int(np.count_nonzero(blended_changed & ~exported_changed)),
+        "max_abs_quantization_error": float(np.max(np.abs(error))),
+        "mean_abs_quantization_error": float(np.mean(np.abs(error))),
+        "rmse": float(np.sqrt(np.mean(error * error))),
+    }
+
+
 def repack_trained_record(
     record: RecordLayout, original: bytes, tensors: dict[str, np.ndarray], *, mix: float = 1.0, strength: float = 1.0
 ) -> tuple[bytes, list[dict]]:
@@ -88,24 +109,7 @@ def repack_trained_record(
         except ValueError as error:
             raise ValueError(f"{name}: {error}") from error
         prepared[name] = quantized
-        error = quantized.astype(np.float64) - blended
-        blended_changed = ~_same_bits(blended, source)
-        exported_changed = ~_same_bits(quantized, source)
-        statistics.append(
-            {
-                "name": name,
-                "storage": kinds[name],
-                "values": int(value.size),
-                "trained_changed_values": int(np.count_nonzero(~unchanged)),
-                "blended_changed_values": int(np.count_nonzero(blended_changed)),
-                "exported_changed_values": int(np.count_nonzero(exported_changed)),
-                "rounded_values": int(np.count_nonzero(~_same_bits(quantized, blended))),
-                "lost_update_values": int(np.count_nonzero(blended_changed & ~exported_changed)),
-                "max_abs_quantization_error": float(np.max(np.abs(error))),
-                "mean_abs_quantization_error": float(np.mean(np.abs(error))),
-                "rmse": float(np.sqrt(np.mean(error * error))),
-            }
-        )
+        statistics.append(quantization_statistics(name, kinds[name], source, value, blended, quantized))
     payload = repack_record(record, prepared)
     restored = unpack_record(record, payload)
     for name, value in prepared.items():

@@ -248,6 +248,8 @@ def test_bucket_plan_never_mixes_shapes_or_duplicates_small_bucket_tails(tmp_pat
 @pytest.mark.parametrize("mode", ["single_frame", "temporal"])
 @pytest.mark.usefixtures("small_math")
 def test_mixed_buckets_train_and_resume_exactly_with_partial_batches(tmp_path, lora, mode):
+    from musubi_tuner.dlssnr.config import build_train_config
+    from musubi_tuner.dlssnr.dataset import NRBatchPlan
     from musubi_tuner.training import dlssnr_trainer as trainer
 
     args = make_args(tmp_path, lora=lora, accum=2, batch=2, mode=mode)
@@ -264,13 +266,16 @@ def test_mixed_buckets_train_and_resume_exactly_with_partial_batches(tmp_path, l
         encoding="utf-8",
     )
     args.max_train_steps = 3
+    data, _ = trainer._datasets(build_train_config(args, lora=lora))
+    plan = NRBatchPlan(data, 2, shuffle=True, seed=args.seed)
+    expected_samples = sum(len(plan.indices(index)) for index in range(args.max_train_steps * args.gradient_accumulation_steps))
     train = trainer.train_lora_from_args if lora else trainer.train_from_args
     train(args)
     run = tmp_path / "output/dlssnr"
     filename = "adapter.safetensors" if lora else "model.safetensors"
     expected = {key: tensor.clone() for key, tensor in load_file(run / "final" / filename).items()}
     state = torch.load(run / "state-step000003/trainer_state.pt", weights_only=True)
-    assert state["consumed_samples"] == 7
+    assert state["consumed_samples"] == expected_samples
     args.resume = run / "state-step000001"
     train(args)
     actual = load_file(run / "final" / filename)

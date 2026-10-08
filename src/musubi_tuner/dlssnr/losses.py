@@ -2,13 +2,41 @@
 
 from __future__ import annotations
 
+import math
+
 import torch
+import torch.nn.functional as F
 
 from musubi_tuner.dlssnr.temporal import warp_bilinear
 
 
 def _rho(error: torch.Tensor) -> torch.Tensor:
     return torch.sqrt(error * error + 1e-6) - 1e-3
+
+
+def masked_gaussian_lowpass(error: torch.Tensor, mask: torch.Tensor, sigma: float) -> torch.Tensor:
+    """Normalized Gaussian convolution; excluded pixels never contribute to nearby supervision."""
+    if type(sigma) not in (int, float) or not math.isfinite(sigma) or not 0 < sigma <= 32:
+        raise ValueError("lowpass sigma must be finite and satisfy 0 < sigma <= 32")
+    if error.ndim != 4 or mask.shape != (error.shape[0], 1, *error.shape[-2:]):
+        raise ValueError("lowpass expects BCHW errors and a matching B1HW mask")
+    radius = math.ceil(3 * sigma)
+    with torch.autocast(error.device.type, enabled=False):
+        coordinates = torch.arange(-radius, radius + 1, device=error.device, dtype=error.dtype)
+        kernel = torch.exp(-0.5 * (coordinates / sigma).square())
+        # The center is exactly one even when a positive sigma underflows in this dtype.
+        kernel[radius] = 1
+        kernel = kernel / kernel.sum()
+        mask = mask.to(error)
+        weighted = torch.where(mask > 0, error, 0) * mask
+        values = torch.cat((weighted, mask), dim=1)
+        channels = values.shape[1]
+        horizontal = kernel.view(1, 1, 1, -1).expand(channels, 1, 1, -1)
+        vertical = kernel.view(1, 1, -1, 1).expand(channels, 1, -1, 1)
+        values = F.conv2d(F.pad(values, (radius, radius, 0, 0), mode="replicate"), horizontal, groups=channels)
+        values = F.conv2d(F.pad(values, (0, 0, radius, radius), mode="replicate"), vertical, groups=channels)
+        numerator, support = values[:, :-1], values[:, -1:]
+        return numerator / torch.where(support > 0, support, 1)
 
 
 def _masked_mean(value: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -61,6 +89,24 @@ def single_frame_loss(
         "loss/edge": float(edge.detach()),
         "loss": float(total.detach()),
     }
+
+
+def joint_temporal_support(current_mask, previous_mask, motion, temporal_valid, reset) -> tuple[torch.Tensor, torch.Tensor]:
+    warped_mask, inside = warp_bilinear(previous_mask.float(), motion)
+    active = (~reset).view(-1, 1, 1, 1)
+    valid = temporal_valid.float() * inside * active * current_mask * warped_mask
+    return valid, warped_mask
+
+
+def masked_temporal_residual(
+    current, previous, target, previous_target, current_mask, previous_mask, motion, temporal_valid, reset
+) -> tuple[torch.Tensor, torch.Tensor]:
+    valid, warped_mask = joint_temporal_support(current_mask, previous_mask, motion, temporal_valid, reset)
+    # Normalize before differencing: excluded bilinear neighbors are not observations.
+    previous_error = torch.where(previous_mask > 0, previous - previous_target, 0) * previous_mask
+    warped_error, _ = warp_bilinear(previous_error, motion)
+    warped_error = warped_error / torch.where(warped_mask > 0, warped_mask, 1)
+    return current - target - warped_error, valid
 
 
 def temporal_rho(

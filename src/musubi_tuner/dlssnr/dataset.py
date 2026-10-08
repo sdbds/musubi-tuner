@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+from itertools import accumulate
 from pathlib import Path
 
 import numpy as np
@@ -56,10 +57,10 @@ def _proxy_size(path: Path) -> tuple[int, int]:
         return image.size
 
 
-def _resize_paired_frame(frame, bucket):
+def _resize_paired_frame(frame, bucket, *, crop_only=False):
     width, height = frame["source"].shape[-1], frame["source"].shape[-2]
     bucket_width, bucket_height = bucket
-    scale = max(bucket_width / width, bucket_height / height)
+    scale = 1.0 if crop_only else max(bucket_width / width, bucket_height / height)
     resized_width, resized_height = int(width * scale + 0.5), int(height * scale + 0.5)
     left, top = (resized_width - bucket_width) // 2, (resized_height - bucket_height) // 2
     for name in ("source", "target", "controls", "motion", "history_valid", "temporal_valid", "loss_mask"):
@@ -239,9 +240,18 @@ class NRDataset(Dataset):
         return len(self.rows)
 
     def __getitem__(self, index):
+        return self.get_sample(index)
+
+    def get_sample(self, index: int, *, epoch: int = 0, sample_id: str | None = None) -> dict:
         row = self.rows[index]
         frames = [self._load_frame(frame, row.get("motion_layout"), index) for frame in row["frames"]]
-        metadata = {"sample_id": row["sample_id"], "sequence_id": row["sequence_id"], "crop_id": row.get("crop_id", 0)}
+        metadata = {
+            "sample_id": row["sample_id"] if sample_id is None else sample_id,
+            "sequence_id": row["sequence_id"],
+            "crop_id": row.get("crop_id", 0),
+        }
+        if self.fixed_controls is not None:
+            metadata["fixed_controls"] = dict(self.fixed_controls)
         return {**frames[0], **metadata} if self.single_frame else {"frames": frames, **metadata}
 
     def _load_frame(self, frame, motion_layout, sample_index):
@@ -287,7 +297,10 @@ class NRDataset(Dataset):
             "frame_index": frame["frame_index"],
         }
         if self.enable_bucket:
-            loaded = _resize_paired_frame(loaded, self.bucket_sizes[sample_index])
+            # Match BucketSelector's native-size branch: alignment trims pixels,
+            # not their spacing. Over-budget images still need cover resizing.
+            crop_only = self.bucket_no_upscale and shape[0] * shape[1] <= self.width * self.height
+            loaded = _resize_paired_frame(loaded, self.bucket_sizes[sample_index], crop_only=crop_only)
         if self.require_target and not loaded["loss_mask"].any():
             raise ValueError(f"frame {frame['frame_index']}: loss mask has no supervised pixels")
         return loaded
@@ -317,10 +330,17 @@ class NRDataset(Dataset):
         )
 
 
+BATCH_SHUFFLE_POLICY = "dlssnr_epoch_shuffle_v1"
+
+
 class NRBatchPlan:
     """Deterministic same-bucket batches, including partial tails without duplication."""
 
-    def __init__(self, dataset, batch_size):
+    def __init__(self, dataset, batch_size, *, shuffle=False, seed=0):
+        if type(shuffle) is not bool or type(seed) is not int or seed < 0:
+            raise ValueError("shuffle must be boolean and seed must be a nonnegative integer")
+        self.shuffle, self.seed = shuffle, seed
+        self._cached_epoch = self._cached_plan = None
         group_indices = getattr(dataset, "group_indices", [0] * len(dataset))
         batch_sizes = getattr(dataset, "batch_sizes", [batch_size])
         groups = [{} for _ in batch_sizes]
@@ -329,15 +349,37 @@ class NRBatchPlan:
         self.managers = [BucketBatchManager(buckets, size) for buckets, size in zip(groups, batch_sizes)]
         self.manager = self.managers[0]
         self.batches = [manager.get_batch_items(index) for manager in self.managers for index in range(len(manager))]
-        self.prefix_counts = [0]
-        for batch in self.batches:
-            self.prefix_counts.append(self.prefix_counts[-1] + len(batch))
+        self.prefix_counts = list(accumulate(map(len, self.batches), initial=0))
 
     def __len__(self):
         return len(self.batches)
 
     def indices(self, microbatch_index):
-        return self.batches[microbatch_index % len(self)]
+        epoch, offset = divmod(microbatch_index, len(self))
+        batches, _ = self._epoch_plan(epoch)
+        return list(batches[offset])
+
+    def _epoch_plan(self, epoch):
+        if not self.shuffle:
+            return self.batches, self.prefix_counts
+        if self._cached_epoch != epoch:
+            # Rebuild from immutable bucket order; never replay earlier epochs or consume training RNG.
+            seed = int(json_sha256([BATCH_SHUFFLE_POLICY, self.seed, epoch])[:16], 16)
+            generator = torch.Generator(device="cpu").manual_seed(seed)
+            batches = []
+            for manager in self.managers:
+                buckets = {}
+                for key in manager.bucket_resos:
+                    items = manager.buckets[key]
+                    order = torch.randperm(len(items), generator=generator, device="cpu").tolist()
+                    buckets[key] = [items[index] for index in order]
+                shuffled = BucketBatchManager(buckets, manager.batch_size)
+                batches.extend(shuffled.get_batch_items(index) for index in range(len(shuffled)))
+            order = torch.randperm(len(batches), generator=generator, device="cpu").tolist()
+            batches = [batches[index] for index in order]
+            self._cached_plan = batches, list(accumulate(map(len, batches), initial=0))
+            self._cached_epoch = epoch
+        return self._cached_plan
 
     def show_bucket_info(self):
         for manager in self.managers:
@@ -345,11 +387,15 @@ class NRBatchPlan:
 
     def sample_count(self, microbatches):
         epochs, offset = divmod(microbatches, len(self))
-        return epochs * self.prefix_counts[-1] + self.prefix_counts[offset]
+        count = epochs * self.prefix_counts[-1]
+        if offset:
+            _, prefix_counts = self._epoch_plan(epochs)
+            count += prefix_counts[offset]
+        return count
 
     def report(self):
-        return {
-            "policy": "dlssnr_same_bucket_batches_v1",
+        report = {
+            "policy": BATCH_SHUFFLE_POLICY if self.shuffle else "dlssnr_same_bucket_batches_v1",
             "samples_per_epoch": self.prefix_counts[-1],
             "batches_per_epoch": len(self),
             "batch_size": self.manager.batch_size,
@@ -361,6 +407,9 @@ class NRBatchPlan:
                 for key in manager.bucket_resos
             ],
         }
+        if self.shuffle:
+            report.update(shuffle_seed=self.seed, shuffle_rng="torch_cpu_randperm", order_sha256_scope="epoch0")
+        return report
 
 
 def load_single_frame_manifest(
@@ -467,8 +516,12 @@ class NRDatasetCollection(Dataset):
         return len(self.references)
 
     def __getitem__(self, index):
+        return self.get_sample(index)
+
+    def get_sample(self, index: int, *, epoch: int = 0, sample_id: str | None = None) -> dict:
         group, local_index = self.references[index]
-        return {**self.datasets[group][local_index], "sample_id": self.rows[index]["sample_id"]}
+        identity = self.rows[index]["sample_id"] if sample_id is None else sample_id
+        return self.datasets[group].get_sample(local_index, epoch=epoch, sample_id=identity)
 
     def validate(self):
         for dataset in self.datasets:
@@ -485,8 +538,13 @@ def collate_single_frames(samples):
 
 
 def collate_clips(clips):
+    policies = {clip.get("temporal_support") for clip in clips}
+    if len(policies) != 1 or not policies <= {None, "joint_loss_mask"}:
+        raise ValueError("clip microbatches require one supported temporal_support policy")
     fields = ("source", "target", "controls", "motion", "history_valid", "temporal_valid", "loss_mask")
     batch = {name: torch.stack([torch.stack([frame[name] for frame in clip["frames"]]) for clip in clips]) for name in fields}
     batch["reset"] = torch.tensor([[frame["reset"] for frame in clip["frames"]] for clip in clips], dtype=torch.bool)
     batch["sample_id"] = [clip["sample_id"] for clip in clips]
+    if "joint_loss_mask" in policies:
+        batch["temporal_support"] = "joint_loss_mask"
     return batch

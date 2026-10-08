@@ -111,10 +111,29 @@ def _args(root, name, *, lora=False, distributed=False, dropout=0.0, resume=Fals
         args.network_dropout = dropout
     if (root / "fp8").exists():
         args.numerics_profile, args.fp8_base, args.fp8_scaled = "train_experimental", True, True
-    if (root / "temporal").exists():
+    if (root / "temporal").exists() or (root / "synthetic_temporal").exists():
         args.training_mode = "temporal"
         args.sequence_length, args.burn_in, args.tbptt_length = 3, 1, 2
         args.loss_temporal = 0.1
+    if not (root / "shuffle").exists():
+        args.shuffle_dataset = False
+    if (root / "ema").exists():
+        args.ema_decay = 0.5
+    if (root / "qat").exists():
+        args.native_weight_qat = True
+    if (root / "frequency").exists():
+        args.loss_profile, args.loss_lowpass_sigma, args.loss_edge = "frequency_split", 4, 0.2
+    if (root / "dino").exists():
+        args.dino_loss_weight = 0.1
+    if (root / "base_anchor").exists():
+        args.base_anchor_weight = 2.0
+    if (root / "control_randomization").exists():
+        args.control_randomization = True
+    if (root / "detail_diagnostics").exists():
+        args.eval_detail_diagnostics = args.eval_native = True
+        args.sample_every_n_steps = 1
+    if (root / "content_preservation").exists():
+        args.eval_content_preservation = True
     if resume:
         args.resume = root / "output" / name / "state-step000001"
     return args
@@ -133,7 +152,13 @@ def _data(root, *, temporal=False):
         toml.dumps(
             {
                 "general": {"resolution": 64, "batch_size": 2, "enable_bucket": True, "bucket_no_upscale": True},
-                "datasets": [{"train_manifest": "pairs.jsonl"}],
+                "datasets": [
+                    {
+                        "train_manifest": "pairs.jsonl",
+                        **({"nr_controls_mode": "fixed"} if (root / "control_randomization").exists() else {}),
+                        **({"synthetic_temporal": True} if (root / "synthetic_temporal").exists() else {}),
+                    }
+                ],
             }
         ),
         encoding="utf-8",
@@ -191,19 +216,31 @@ def _launch(root, *, lora=False, dropout=0.0, resume=False, failure=False):
 
 @pytest.mark.parametrize("lora", [False, True])
 @pytest.mark.parametrize("temporal", [False, True])
-def test_two_ranks_match_global_pixel_weighted_batch_and_keep_bucket_tails(tmp_path, monkeypatch, lora, temporal):
+@pytest.mark.parametrize("shuffle", [False, True])
+def test_two_ranks_match_global_pixel_weighted_batch_and_keep_bucket_tails(tmp_path, monkeypatch, lora, temporal, shuffle):
     from musubi_tuner.networks import lora_dlssnr
 
     _data(tmp_path, temporal=temporal)
+    if shuffle:
+        (tmp_path / "shuffle").touch()
     codes, logs = _launch(tmp_path, lora=lora)
     assert codes == [0, 0], logs
     ranks = [json.loads((tmp_path / f"rank{rank}.json").read_text()) for rank in range(2)]
-    # Public buckets sort width first: (48,64), then the (64,48) full and tail batches.
-    assert ranks[0]["indices"] == [[3, 4], [2], [0, 1], [3, 4]]
-    assert ranks[1]["indices"] == [[0, 1], [3, 4], [2], [0, 1]]
+    if shuffle:
+        from musubi_tuner.dlssnr.config import build_train_config
+        from musubi_tuner.dlssnr.dataset import NRBatchPlan
+
+        data, _ = trainer._datasets(build_train_config(_args(tmp_path, "reference", lora=lora), lora=lora))
+        plan = NRBatchPlan(data, 2, shuffle=True, seed=4)
+        global_order = [plan.indices(index) for index in range(8)]
+    else:
+        # Public buckets sort width first: (48,64), then the (64,48) full and tail batches.
+        global_order = [[3, 4], [0, 1], [2], [3, 4], [0, 1], [2], [3, 4], [0, 1]]
+    assert ranks[0]["indices"] == global_order[0::2]
+    assert ranks[1]["indices"] == global_order[1::2]
     folder = tmp_path / "output/ddp"
     records = [json.loads(line) for line in (folder / "metrics.jsonl").read_text().splitlines()]
-    assert [record["consumed_samples"] for record in records] == [7, 14]
+    assert [record["consumed_samples"] for record in records] == [sum(map(len, global_order[:stop])) for stop in (4, 8)]
     assert [record["update"] for record in records] == [1, 2]
     state = torch.load(folder / "state-step000002/trainer_state.pt", weights_only=True)
     assert state["identity"]["world_size"] == 2
@@ -223,21 +260,26 @@ def test_two_ranks_match_global_pixel_weighted_batch_and_keep_bucket_tails(tmp_p
     )
 
 
-def test_distributed_dropout_resume_restores_each_rank_and_rejects_world_change(tmp_path, monkeypatch):
+@pytest.mark.parametrize("shuffle", [False, True])
+def test_distributed_dropout_resume_restores_each_rank_and_rejects_world_change(tmp_path, monkeypatch, shuffle):
     from musubi_tuner.networks import lora_dlssnr
 
     _data(tmp_path)
+    if shuffle:
+        (tmp_path / "shuffle").touch()
     codes, logs = _launch(tmp_path, lora=True, dropout=0.3)
     assert codes == [0, 0], logs
     folder = tmp_path / "output/ddp"
     expected = {name: value.clone() for name, value in load_file(folder / "final/adapter.safetensors").items()}
     state = torch.load(folder / "state-step000002/trainer_state.pt", weights_only=True)
+    indices = [json.loads((tmp_path / f"rank{rank}.json").read_text())["indices"] for rank in range(2)]
     assert state["scheduler"]["last_epoch"] == state["global_update"] == 2
     codes, logs = _launch(tmp_path, lora=True, dropout=0.3, resume=True)
     assert codes == [0, 0], logs
     torch.testing.assert_close(load_file(folder / "final/adapter.safetensors"), expected, rtol=0, atol=0)
     resumed = torch.load(folder / "state-step000002/trainer_state.pt", weights_only=True)
     for rank in range(2):
+        assert json.loads((tmp_path / f"rank{rank}.json").read_text())["indices"] == indices[rank][2:]
         torch.testing.assert_close(
             resumed["rank_states"][rank]["rng"]["torch"], state["rank_states"][rank]["rng"]["torch"], rtol=0, atol=0
         )
@@ -281,19 +323,136 @@ def _worker(root, rank, lora, dropout, resume, failure):
 
     trainer.NRModel = SmallNR
     lora_dlssnr.inject = small_inject
+    if (root / "fail_synthetic_sample").exists():
+        from musubi_tuner.dlssnr.synthetic_temporal import NRSyntheticTemporalDataset
+
+        original_sample = NRSyntheticTemporalDataset.get_sample
+
+        def fail_synthetic_sample(self, *args, **kwargs):
+            if rank == 1:
+                raise RuntimeError("synthetic sample failed")
+            return original_sample(self, *args, **kwargs)
+
+        NRSyntheticTemporalDataset.get_sample = fail_synthetic_sample
     if (root / "fp8").exists():
         from test_dlssnr_fp8 import TinyFP8NR, tiny_fp8_inject
 
         trainer.NRModel = TinyFP8NR
         lora_dlssnr.inject = tiny_fp8_inject
+    if (root / "dino").exists():
+        from musubi_tuner.dlssnr.dino_loss import NRDinoLoss
+        from test_dlssnr_dino import tiny_dino_loss
+
+        def create_dino(settings):
+            if rank == 1 and (root / "fail_dino_load").exists():
+                raise OSError("DINO load failed")
+            loss_fn = tiny_dino_loss(settings)
+            if rank == 1 and (root / "dino_rank_mismatch").exists():
+                with torch.no_grad():
+                    loss_fn.backend.mean.add_(0.1)
+                loss_fn = NRDinoLoss(loss_fn.backend, settings, provenance={"provider": "synthetic_test_only"})
+            return loss_fn
+
+        trainer.create_dino_loss = create_dino
+    if (root / "base_anchor").exists() or (root / "control_randomization").exists():
+        from musubi_tuner.dlssnr.base_anchor import NRBaseAnchor
+
+        class ObservedAnchor(NRBaseAnchor):
+            def __init__(self, model, network):
+                if rank == 1 and (root / "fail_anchor_load").exists():
+                    raise OSError("base anchor load failed")
+                super().__init__(model, network)
+                if rank == 1 and (root / "anchor_rank_mismatch").exists():
+                    self.identity["base_parameters_sha256"] = "mismatched"
+                if rank == 1 and (root / "control_reference_mismatch").exists():
+                    self.reference_identity["base_parameters_sha256"] = "mismatched"
+
+            def forward(self, *args, **kwargs):
+                if rank == 1 and (root / "fail_anchor_forward").exists():
+                    raise RuntimeError("base anchor forward failed")
+                return super().forward(*args, **kwargs)
+
+            def predict(self, *args, **kwargs):
+                if rank == 1 and (root / "fail_control_reference").exists():
+                    raise RuntimeError("control reference failed")
+                return super().predict(*args, **kwargs)
+
+        trainer.NRBaseAnchor = ObservedAnchor
+    content_created = []
+    if (root / "content_preservation").exists():
+        from musubi_tuner.dlssnr import content_metrics
+        from test_dlssnr_dino import tiny_dino_loss
+
+        content_metrics.create_dino_loss = tiny_dino_loss
+
+        def create_content(dino_loss=None):
+            if rank != 0:
+                raise AssertionError("content evaluation must only load on rank zero")
+            if (root / "fail_content_load").exists():
+                raise OSError("content metric load failed")
+            metric = content_metrics.create_content_metric(dino_loss)
+            content_created.append({"shared": dino_loss is not None and metric.feature_loss.backend is dino_loss.backend})
+            if (root / "fail_content_eval").exists():
+
+                def fail(*_):
+                    raise RuntimeError("content metric evaluation failed")
+
+                metric.register_forward_pre_hook(fail)
+            return metric
+
+        trainer.create_content_metric = create_content
     original = trainer._microbatch
-    indices = []
+    indices, augmentation = [], []
 
     def observed(dataset, index, config, plan):
         indices.append(plan.indices(index))
-        return original(dataset, index, config, plan)
+        batch, seeds = original(dataset, index, config, plan)
+        if "control_ratios" in batch or (root / "synthetic_temporal").exists():
+            augmentation.append(
+                {
+                    "sample_ids": [dataset.rows[item]["sample_id"] for item in plan.indices(index)],
+                    "epoch": index // len(plan),
+                    "ratios": batch["control_ratios"].tolist() if "control_ratios" in batch else None,
+                    "seeds": seeds,
+                    "motion_sha256": hashlib.sha256(batch["motion"].numpy().tobytes()).hexdigest() if "motion" in batch else None,
+                    "temporal_support": batch.get("temporal_support"),
+                }
+            )
+        return batch, seeds
 
     trainer._microbatch = observed
+    original_save = trainer.save_state
+    ema_snapshots = []
+
+    def observed_save(*args, **kwargs):
+        original_save(*args, **kwargs)
+        ema = kwargs.get("ema")
+        if ema is not None:
+            digest = hashlib.sha256()
+            for name, value in sorted(ema.shadow.items()):
+                digest.update(name.encode("utf-8"))
+                digest.update(value.detach().cpu().numpy().tobytes())
+            ema_snapshots.append({"num_updates": ema.num_updates, "sha256": digest.hexdigest()})
+
+    trainer.save_state = observed_save
+    if (root / "fail_detail_eval").exists():
+        original_evaluate = trainer.evaluate
+
+        def fail_detail_evaluation(*args, **kwargs):
+            if kwargs.get("detail_diagnostics"):
+                raise RuntimeError("diagnostic probe failed")
+            return original_evaluate(*args, **kwargs)
+
+        trainer.evaluate = fail_detail_evaluation
+    if (root / "fail_ema_save").exists():
+        original_product = trainer.NRSupervisedTrainer._save_product
+
+        def fail_ema_product(folder, *args, **kwargs):
+            if folder.name == "ema":
+                raise OSError("EMA output failed")
+            return original_product(folder, *args, **kwargs)
+
+        trainer.NRSupervisedTrainer._save_product = staticmethod(fail_ema_product)
     train = trainer.train_lora_from_args if lora else trainer.train_from_args
     try:
         train(_args(root, "ddp", lora=lora, distributed=True, dropout=dropout, resume=resume))
@@ -302,8 +461,14 @@ def _worker(root, rank, lora, dropout, resume, failure):
             raise
         result = {"error": str(error)}
     else:
-        assert not failure, "expected the existing output directory to fail"
-        result = {"indices": indices, "rng": hashlib.sha256(torch.get_rng_state().numpy().tobytes()).hexdigest()}
+        assert not failure, "expected training to fail"
+        result = {
+            "indices": indices,
+            "rng": hashlib.sha256(torch.get_rng_state().numpy().tobytes()).hexdigest(),
+            "ema": ema_snapshots,
+            "content_created": content_created,
+            "augmentation": augmentation,
+        }
     (root / f"rank{rank}.json").write_text(json.dumps(result), encoding="utf-8")
 
 

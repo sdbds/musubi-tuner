@@ -10,7 +10,16 @@ import torch
 from accelerate.utils import set_seed
 
 from musubi_tuner.dlssnr.artifacts import inspect_canonical, save_canonical, write_json
+from musubi_tuner.dlssnr.base_anchor import NRBaseAnchor
 from musubi_tuner.dlssnr.config import build_train_config, config_sha256
+from musubi_tuner.dlssnr.control_randomization import (
+    apply_control_targets,
+    attach_control_batch,
+    encode_control_point,
+    finalize_control_metrics,
+    sample_control_point,
+)
+from musubi_tuner.dlssnr.content_metrics import create_content_metric
 from musubi_tuner.dlssnr.dataset import (
     NRBatchPlan,
     NRDatasetCollection,
@@ -21,13 +30,18 @@ from musubi_tuner.dlssnr.dataset import (
     load_directory_pairs,
 )
 from musubi_tuner.dlssnr.evaluation import evaluate
+from musubi_tuner.dlssnr.detail_metrics import diagnostic_protocol
+from musubi_tuner.dlssnr.dino_loss import create_dino_loss
 from musubi_tuner.dlssnr.identity import file_sha256, implementation_identity
 from musubi_tuner.dlssnr.model import NRModel
 from musubi_tuner.dlssnr.numerics import fp32_execution
 from musubi_tuner.dlssnr.runtime import configure_model_runtime, numerics_metadata, runtime_policy, validate_runtime_device
 from musubi_tuner.dlssnr.profiles import PROFILE_ID
 from musubi_tuner.dlssnr.temporal import SEED_POLICY, stable_frame_seed
+from musubi_tuner.dlssnr.synthetic_temporal import NRSyntheticTemporalDataset
 from musubi_tuner.dlssnr.training_step import loss_denominators, training_loss
+from musubi_tuner.dlssnr.weight_quantization import capture_native_reference, native_quantization_report
+from musubi_tuner.training.dlssnr_ema import NRParameterEMA
 from musubi_tuner.training.dlssnr_services import (
     assert_finite_gradients,
     assert_finite_parameters,
@@ -110,17 +124,73 @@ def clear_lane15_state(model, optimizer):
 class NRTrainModule(torch.nn.Module):
     """The only prepared model; adapters have exactly one registered owner."""
 
-    def __init__(self, model, loss_weights, burn_in=0, network=None):
+    def __init__(
+        self,
+        model,
+        loss_weights,
+        burn_in=0,
+        network=None,
+        *,
+        loss_profile=None,
+        dino_loss=None,
+        base_anchor=None,
+        control_randomization=None,
+    ):
         super().__init__()
         self.model = model
         self.network = network
         self.loss_weights = loss_weights
         self.burn_in = burn_in
+        self.loss_profile = loss_profile
+        self.dino_loss = dino_loss
+        self.base_anchor = base_anchor
+        self.control_randomization = control_randomization
+        if control_randomization is not None and base_anchor is None:
+            raise ValueError("control randomization requires a frozen reference provider")
 
     def forward(self, batch, seeds, normalizers=None):
         # Accelerator owns scaling; NR owns exactly which products use autocast.
         with torch.autocast(batch["source"].device.type, enabled=False):
-            return training_loss(self.model, batch, seeds, self.loss_weights, self.burn_in, normalizers)
+            # Finish the reference pass before building the student graph. Its
+            # checkpoint replay must always see the adapters enabled.
+            reference, control_metrics = None, {}
+            if self.control_randomization is not None:
+                sampled = self.base_anchor.predict(self.model, self.network, batch, seeds, self.burn_in)
+                if (batch["control_ratios"] == 1).all():
+                    reference_point = sampled
+                else:
+                    shape = (
+                        (batch["source"].shape[0], 5, 1, 1) if batch["source"].ndim == 4 else (batch["source"].shape[0], 1, 5, 1, 1)
+                    )
+                    reference_batch = {
+                        **batch,
+                        "controls": batch["control_reference_lanes"].view(shape).expand_as(batch["controls"]),
+                    }
+                    reference_point = self.base_anchor.predict(self.model, self.network, reference_batch, seeds, self.burn_in)
+                batch, control_metrics = apply_control_targets(
+                    batch,
+                    reference_point,
+                    sampled,
+                    burn_in=self.burn_in,
+                    settings=self.control_randomization,
+                    loss_profile=self.loss_profile,
+                )
+                if self.loss_weights.get("base_anchor", 0) > 0:
+                    reference = sampled["rendered_proxy"]
+            elif self.base_anchor is not None and self.loss_weights.get("base_anchor", 0) > 0:
+                reference = self.base_anchor(self.model, self.network, batch, seeds, self.burn_in)
+            loss, metrics = training_loss(
+                self.model,
+                batch,
+                seeds,
+                self.loss_weights,
+                self.burn_in,
+                normalizers,
+                loss_profile=self.loss_profile,
+                dino_loss=self.dino_loss,
+                base_reference=reference,
+            )
+            return loss, {**metrics, **control_metrics}
 
 
 def _one_update(model, optimizer, batch, seeds, weights, burn_in):
@@ -174,7 +244,18 @@ def _dataset_entry(data, training, loss, evaluation):
     width, height = data["bucket_size"]
     buckets = {name: data[name] for name in ("enable_bucket", "bucket_no_upscale")}
     buckets["fixed_controls"] = data.get("fixed_controls")
-    if "image_directory" in data:
+    if data.get("synthetic_temporal"):
+        if training["mode"] != "temporal":
+            raise ValueError("synthetic_temporal requires temporal training mode")
+        base = (
+            load_directory_pairs(data)
+            if "image_directory" in data
+            else load_single_frame_manifest(data["train_manifest"], width, height, **buckets)
+        )
+        train = NRSyntheticTemporalDataset(
+            base, training["sequence_length"], seed=training["seed"], max_shift_px=data["synthetic_temporal"]["max_shift_px"]
+        )
+    elif "image_directory" in data:
         if training["mode"] != "single_frame":
             raise ValueError("temporal training requires a manifest with explicit frames and motion")
         train = load_directory_pairs(data)
@@ -191,9 +272,15 @@ def _dataset_entry(data, training, loss, evaluation):
         )
     validation = {}
     if data.get("validation_manifest"):
-        validation["validation"] = load_temporal_manifest(
-            data["validation_manifest"], width, height, None, require_temporal_mask=False, **buckets
-        )
+        if data.get("synthetic_temporal"):
+            base = load_single_frame_manifest(data["validation_manifest"], width, height, **buckets)
+            validation["validation"] = NRSyntheticTemporalDataset(
+                base, training["sequence_length"], seed=training["seed"], max_shift_px=data["synthetic_temporal"]["max_shift_px"]
+            )
+        else:
+            validation["validation"] = load_temporal_manifest(
+                data["validation_manifest"], width, height, None, require_temporal_mask=False, **buckets
+            )
     if data.get("sequence_manifest"):
         sequences = load_temporal_manifest(data["sequence_manifest"], width, height, None, require_temporal_mask=False, **buckets)
         if any(len(row["frames"]) < evaluation["min_sequence_frames"] for row in sequences.rows):
@@ -204,8 +291,8 @@ def _dataset_entry(data, training, loss, evaluation):
 
 def _microbatch(dataset, microbatch_index, config, plan):
     training = config["training"]
-    samples = [dataset[index] for index in plan.indices(microbatch_index)]
     epoch = microbatch_index // len(plan)
+    samples = [dataset.get_sample(index, epoch=epoch) for index in plan.indices(microbatch_index)]
     seeds = []
     for sample in samples:
         frames = [sample] if training["mode"] == "single_frame" else sample["frames"]
@@ -216,8 +303,23 @@ def _microbatch(dataset, microbatch_index, config, plan):
             ]
         )
     if training["mode"] == "single_frame":
-        return collate_single_frames(samples), [item[0] for item in seeds]
-    return collate_clips(samples), seeds
+        batch, seeds = collate_single_frames(samples), [item[0] for item in seeds]
+    else:
+        batch = collate_clips(samples)
+    if "control_randomization" in config:
+        draws = [
+            sample_control_point(
+                sample["fixed_controls"],
+                config["control_randomization"],
+                seed=training["seed"],
+                epoch=epoch,
+                sample_id=sample["sample_id"],
+                crop_id=sample["crop_id"],
+            )
+            for sample in samples
+        ]
+        batch = attach_control_batch(batch, draws)
+    return batch, seeds
 
 
 class NRSupervisedTrainer:
@@ -243,7 +345,9 @@ class NRSupervisedTrainer:
         training, output = config["training"], config["output"]
         coordinated_call(accelerator, lambda: validate_runtime_device(policy, accelerator.device, training=True))
         train_data, validation = coordinated_call(accelerator, lambda: _datasets(config))
-        batch_plan = NRBatchPlan(train_data, training["batch_size"])
+        batch_plan = NRBatchPlan(
+            train_data, training["batch_size"], shuffle=training.get("shuffle_dataset", False), seed=training["seed"]
+        )
         if accelerator.is_main_process:
             batch_plan.show_bucket_info()
         source_dir = config["model"].get("model_dir")
@@ -261,11 +365,43 @@ class NRSupervisedTrainer:
         )
         source_forward_validated = "forward_validation_report" in source_identity
         model, network, optimizer, base_identity = coordinated_call(accelerator, lambda: self._initialize_model(policy))
+        # Always reference initialization, not the student restored below.
+        use_base_anchor = config["loss"].get("base_anchor", 0) > 0
+        base_anchor = (
+            coordinated_call(accelerator, lambda: NRBaseAnchor(model, network))
+            if use_base_anchor or "control_randomization" in config
+            else None
+        )
+        native_reference = None
+        if policy.get("native_weight_qat") or config["evaluation"].get("native"):
+            native_reference = coordinated_call(accelerator, lambda: capture_native_reference(model, network), main_only=True)
         optimizer_cfg = config["optimizer"]
         scheduler = coordinated_call(
             accelerator, lambda: create_nr_lr_scheduler(optimizer, optimizer_cfg, training["max_train_steps"])
         )
-        train_module = NRTrainModule(model, config["loss"], training["burn_in"], network)
+        dino_loss = coordinated_call(accelerator, lambda: create_dino_loss(config["dino_loss"])) if "dino_loss" in config else None
+        content_metric = content_identity = None
+        if config["evaluation"].get("content_preservation"):
+
+            def initialize_content_metric():
+                metric = create_content_metric(dino_loss)
+                return metric, metric.identity
+
+            # Only rank zero evaluates. Do not register an evaluation-only model
+            # on the prepared training module or allocate it on every rank.
+            initialized = coordinated_call(accelerator, initialize_content_metric, main_only=True)
+            content_metric = initialized[0] if initialized is not None else None
+            content_identity = gather_rank_values(accelerator, initialized[1] if initialized is not None else None)[0]
+        train_module = NRTrainModule(
+            model,
+            config["loss"],
+            training["burn_in"],
+            network,
+            loss_profile=config.get("loss_profile"),
+            dino_loss=dino_loss,
+            base_anchor=base_anchor,
+            control_randomization=config.get("control_randomization"),
+        )
         _check_optimizer(train_module, optimizer)
         parameter_map = {
             name: {"shape": list(parameter.shape), "elements": parameter.numel()}
@@ -323,10 +459,51 @@ class NRSupervisedTrainer:
             "runtime.py",
             "fp8.py",
             "attention.py",
+            "native.py",
+            "evaluation.py",
         ):
             identity["implementation"][name] = file_sha256(Path(__file__).parents[1] / "dlssnr" / name)
         for name in ("dlssnr_trainer.py", "dlssnr_services.py", "dlssnr_state.py", "optimizer_setup.py", "lr_scheduler.py"):
             identity["implementation"][name] = file_sha256(Path(__file__).parent / name)
+        if training.get("ema_decay") is not None:
+            identity["implementation"]["dlssnr_ema.py"] = file_sha256(Path(__file__).parent / "dlssnr_ema.py")
+        if dino_loss is not None:
+            identity["dino_loss"] = dino_loss.identity
+            identity["implementation"]["dino_loss.py"] = file_sha256(Path(__file__).parents[1] / "dlssnr/dino_loss.py")
+        if content_identity is not None:
+            identity["content_preservation"] = content_identity
+            for name in ("content_metrics.py", "dino_loss.py"):
+                identity["implementation"][name] = file_sha256(Path(__file__).parents[1] / "dlssnr" / name)
+        if base_anchor is not None:
+            identity["implementation"]["base_anchor.py"] = file_sha256(Path(__file__).parents[1] / "dlssnr/base_anchor.py")
+        if use_base_anchor:
+            identity["base_anchor"] = base_anchor.identity
+        if "control_randomization" in config:
+            reference_controls = []
+            for entry in config["data"].get("datasets", [config["data"]]):
+                point = encode_control_point(entry["fixed_controls"], (1, 1))
+                reference_controls.append({name: point[name].tolist() for name in ("reference_lanes", "values")})
+            identity["control_randomization"] = {
+                **config["control_randomization"],
+                "reference": base_anchor.reference_identity,
+                "reference_controls": reference_controls,
+            }
+            identity["implementation"]["control_randomization.py"] = file_sha256(
+                Path(__file__).parents[1] / "dlssnr/control_randomization.py"
+            )
+        synthetic_protocols = [
+            {"dataset_index": index, "protocol": dataset.synthetic_protocol}
+            for index, dataset in enumerate(getattr(train_data, "datasets", [train_data]))
+            if hasattr(dataset, "synthetic_protocol")
+        ]
+        if synthetic_protocols:
+            identity["synthetic_temporal"] = synthetic_protocols
+            identity["implementation"]["synthetic_temporal.py"] = file_sha256(
+                Path(__file__).parents[1] / "dlssnr/synthetic_temporal.py"
+            )
+        if config["evaluation"].get("detail_diagnostics"):
+            identity["detail_diagnostics"] = diagnostic_protocol()
+            identity["implementation"]["detail_metrics.py"] = file_sha256(Path(__file__).parents[1] / "dlssnr/detail_metrics.py")
         for name in ("bucket.py", "architectures.py"):
             identity["implementation"][f"dataset/{name}"] = file_sha256(Path(__file__).parents[1] / "dataset" / name)
         identity["implementation"]["lora_dlssnr.py"] = file_sha256(Path(__file__).parents[1] / "networks/lora_dlssnr.py")
@@ -355,6 +532,12 @@ class NRSupervisedTrainer:
 
         coordinated_call(accelerator, create_run_dir, main_only=True)
         wrapped, optimizer = accelerator.prepare(train_module, optimizer)
+        if content_identity is not None:
+            coordinated_call(accelerator, lambda: content_metric.to(accelerator.device), main_only=True)
+        ema = coordinated_call(
+            accelerator,
+            lambda: NRParameterEMA(train_module, training["ema_decay"]) if training.get("ema_decay") is not None else None,
+        )
         if world > 1:
             set_seed(training["seed"] + rank)
         logger.info(
@@ -382,11 +565,58 @@ class NRSupervisedTrainer:
             or not source_forward_validated,
             "temporal_trained": training["mode"] == "temporal",
         }
+        if ema is not None:
+            metadata["weight_variant"] = "raw"
+            metadata["ema"] = {
+                "decay": ema.decay,
+                "scope": "lora_parameters" if self.lora else "trainable_parameters",
+                "dtype": "float32",
+                "initialization": "initial_parameters",
+            }
+        if dino_loss is not None:
+            metadata["dino_loss"] = dino_loss.identity
+        if use_base_anchor:
+            metadata["base_anchor"] = base_anchor.identity
+        if "control_randomization" in config:
+            metadata["control_randomization"] = identity["control_randomization"]
+        if synthetic_protocols:
+            metadata["synthetic_temporal"] = synthetic_protocols
+        if content_identity is not None:
+            metadata["content_preservation"] = content_identity
         baseline = None
 
         def run_evaluation():
             with evaluation_mode(train_module):
-                return evaluate(model, validation, training["seed"], accelerator.device)
+                return evaluate(
+                    model,
+                    validation,
+                    training["seed"],
+                    accelerator.device,
+                    compare_native=config["evaluation"].get("native", False),
+                    detail_diagnostics=config["evaluation"].get("detail_diagnostics", False),
+                    content_metric=content_metric,
+                )
+
+        def run_ema_evaluation():
+            with ema.average_parameters():
+                return run_evaluation()
+
+        evaluation_evidence = {}
+        if content_identity is not None:
+            evaluation_evidence["content_preservation"] = content_identity
+        if config["evaluation"].get("detail_diagnostics"):
+            evaluation_evidence["detail_diagnostics"] = diagnostic_protocol()
+        if config["evaluation"].get("native"):
+            from musubi_tuner.dlssnr.runtime import default_runtime_policy, with_native_weight_qat
+
+            evaluation_evidence["native_evaluation"] = {
+                "runtime_policy": with_native_weight_qat(default_runtime_policy(), True),
+                "native_equivalent": False,
+                "mix": 1.0,
+                "strength": 1.0,
+                "lora_multiplier": 1.0,
+                "history": "independent_student_rollouts",
+            }
 
         if validation and config["evaluation"]["compare_baseline"]:
             baseline = coordinated_call(accelerator, run_evaluation, main_only=True)
@@ -397,7 +627,7 @@ class NRSupervisedTrainer:
                     load_adapter(network, Path(resume) / "adapter.safetensors", base_identity)
                 else:
                     model.load_canonical(str(Path(resume) / "model.safetensors"))
-                restore_state(restored, optimizer, accelerator=accelerator, scheduler=scheduler)
+                restore_state(restored, optimizer, accelerator=accelerator, scheduler=scheduler, ema=ema)
 
             coordinated_call(accelerator, restore)
 
@@ -413,13 +643,27 @@ class NRSupervisedTrainer:
             logger.warning("NR source forward compatibility is unvalidated; training does not certify native/DLL compatibility")
 
         def save_product(folder, update, *, with_state=False):
-            coordinated_call(
-                accelerator,
-                lambda: self._save_product(folder, model, network, source_dir, metadata, base_identity, update),
-                main_only=True,
-            )
+            def save_weights():
+                product_metadata = metadata
+                if ema is not None:
+                    product_metadata = {**metadata, "ema": {**metadata["ema"], "num_updates": ema.num_updates}}
+                self._save_product(folder, model, network, source_dir, product_metadata, base_identity, update, native_reference)
+                if ema is not None:
+                    with ema.average_parameters():
+                        self._save_product(
+                            folder / "ema",
+                            model,
+                            network,
+                            source_dir,
+                            {**product_metadata, "weight_variant": "ema"},
+                            base_identity,
+                            update,
+                            native_reference,
+                        )
+
+            coordinated_call(accelerator, save_weights, main_only=True)
             if with_state:
-                save_state(folder, optimizer, identity, update, cursor, accelerator=accelerator, scheduler=scheduler)
+                save_state(folder, optimizer, identity, update, cursor, accelerator=accelerator, scheduler=scheduler, ema=ema)
 
         for step in range(completed, steps):
             microbatches = coordinated_call(
@@ -430,7 +674,13 @@ class NRSupervisedTrainer:
             )
             denominators = {name: 0.0 for name in config["loss"]}
             for batch, _ in microbatches:
-                for name, count in loss_denominators(batch, training["burn_in"]).items():
+                for name, count in loss_denominators(
+                    batch,
+                    training["burn_in"],
+                    loss_profile=config.get("loss_profile"),
+                    include_dino=dino_loss is not None,
+                    include_base_anchor=use_base_anchor,
+                ).items():
                     denominators[name] += count
             denominators = reduce_values(accelerator, denominators)
             attempt_rng = capture_rng(accelerator.device)
@@ -460,11 +710,14 @@ class NRSupervisedTrainer:
                 raise RuntimeError("FP16 gradient overflow exceeded --max_overflow_retries; no successful update saved")
             clear_lane15_state(model, optimizer)
             coordinated_call(accelerator, lambda: assert_finite_parameters(train_module))
+            if ema is not None:
+                coordinated_call(accelerator, ema.update)
             scheduler.step()
             count = reduce_values(accelerator, {"samples": sum(len(seeds) for _, seeds in microbatches)})
             cursor += int(count["samples"])
             update = step + 1
             metrics = reduce_values(accelerator, metrics, max_keys=("blend_max",))
+            metrics = finalize_control_metrics(metrics)
             metrics["overflow_retries"] = attempt
             metrics["learning_rate"] = scheduler.get_last_lr()[0]
 
@@ -477,6 +730,12 @@ class NRSupervisedTrainer:
             interval = config["evaluation"]["sample_every_n_steps"]
             if validation and ((interval and update % interval == 0) or update == steps):
                 candidate = coordinated_call(accelerator, run_evaluation, main_only=True)
+                ema_evidence = {}
+                if ema is not None:
+                    ema_evidence = {
+                        "ema_candidate": coordinated_call(accelerator, run_ema_evaluation, main_only=True),
+                        "ema": {**metadata["ema"], "num_updates": ema.num_updates},
+                    }
                 coordinated_call(
                     accelerator,
                     lambda: write_json(
@@ -487,6 +746,8 @@ class NRSupervisedTrainer:
                             "runtime_policy": policy,
                             "baseline": baseline,
                             "candidate": candidate,
+                            **evaluation_evidence,
+                            **ema_evidence,
                         },
                     ),
                     main_only=True,
@@ -537,7 +798,7 @@ class NRSupervisedTrainer:
         return model, network, optimizer, base_identity
 
     @staticmethod
-    def _save_product(folder, model, network, source_dir, metadata, base_identity, update):
+    def _save_product(folder, model, network, source_dir, metadata, base_identity, update, native_reference=None):
         from musubi_tuner.networks.lora_dlssnr import save_adapter
 
         metadata = {
@@ -547,6 +808,7 @@ class NRSupervisedTrainer:
             "temporal_validated": False,
             "native_export_validated": False,
         }
+        quantization = native_quantization_report(model, native_reference, network) if native_reference is not None else None
         if network is None:
             save_canonical(model, folder, source_dir=source_dir, metadata=metadata)
         else:
@@ -562,6 +824,14 @@ class NRSupervisedTrainer:
                 },
             )
         write_json(folder / "run_config.json", metadata["config"])
+        if quantization is not None:
+            write_json(folder / "native_quantization.json", quantization)
+            logger.info(
+                "NR %s native weight flips at update %d: %.6f%%",
+                metadata.get("weight_variant", "raw"),
+                update,
+                100 * quantization["totals"]["flip_fraction"],
+            )
 
 
 def _train_from_args(args, *, lora):

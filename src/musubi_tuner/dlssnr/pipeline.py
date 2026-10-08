@@ -11,6 +11,7 @@ from musubi_tuner.dlssnr.geometry import Geometry, resolve_geometry
 from musubi_tuner.dlssnr.model import NRModel
 from musubi_tuner.dlssnr.preprocess import build_features
 from musubi_tuner.dlssnr.temporal import publish_history, warp_bilinear
+from musubi_tuner.dlssnr.weight_quantization import native_weight_ste
 
 
 def forward_frame(
@@ -41,6 +42,8 @@ def forward_frame(
     preclamp = source_proxy + raw[:, 0:3] / 4
     neural = preclamp.clamp(0, 1)
     blend = model.blocks["70"].blend_scale
+    if getattr(model, "native_weight_qat", False):
+        blend = native_weight_ste(blend, "f16")
     if history is None or usable is None:
         weight = neural.new_zeros(source_proxy.shape[0], 1, geometry.valid_height, geometry.valid_width)
         rendered = neural

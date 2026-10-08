@@ -14,7 +14,7 @@ from musubi_tuner.dlssnr.identity import file_sha256
 from musubi_tuner.training.dlssnr_services import capture_rng, coordinated_call, gather_rank_values, restore_rng
 
 
-def save_state(folder, optimizer, identity, update, cursor, *, accelerator=None, scheduler=None):
+def save_state(folder, optimizer, identity, update, cursor, *, accelerator=None, scheduler=None, ema=None):
     state = {
         "rank": accelerator.process_index if accelerator is not None else 0,
         "rng": capture_rng(accelerator.device if accelerator is not None else None),
@@ -22,11 +22,11 @@ def save_state(folder, optimizer, identity, update, cursor, *, accelerator=None,
     }
     rank_states = gather_rank_values(accelerator, state)
     coordinated_call(
-        accelerator, lambda: _write_state(folder, optimizer, identity, update, cursor, rank_states, scheduler), main_only=True
+        accelerator, lambda: _write_state(folder, optimizer, identity, update, cursor, rank_states, scheduler, ema), main_only=True
     )
 
 
-def _write_state(folder, optimizer, identity, update, cursor, rank_states, scheduler):
+def _write_state(folder, optimizer, identity, update, cursor, rank_states, scheduler, ema=None):
     folder = Path(folder)
     payload = {
         "schema": "dlssnr_train_state_v3",
@@ -37,6 +37,10 @@ def _write_state(folder, optimizer, identity, update, cursor, rank_states, sched
         "scheduler": scheduler.state_dict() if scheduler is not None else None,
         "rank_states": rank_states,
     }
+    if ema is not None:
+        if ema.num_updates != update:
+            raise ValueError("EMA update count does not match the checkpoint boundary")
+        payload["ema"] = ema.state_dict()
     with tempfile.NamedTemporaryFile(dir=folder, delete=False, suffix=".pt") as handle:
         temporary = Path(handle.name)
     try:
@@ -81,7 +85,11 @@ def read_state(folder, identity):
     return payload
 
 
-def restore_state(payload, optimizer, *, accelerator=None, scheduler=None):
+def restore_state(payload, optimizer, *, accelerator=None, scheduler=None, ema=None):
+    if (ema is None) != (payload.get("ema") is None):
+        raise ValueError("resume EMA state does not match the requested training configuration")
+    if ema is not None:
+        ema.load_state_dict(payload["ema"], expected_updates=payload["global_update"])
     if (scheduler is None) != (payload.get("scheduler") is None):
         raise ValueError("resume scheduler state does not match the requested training configuration")
     optimizer.load_state_dict(payload["optimizer"])

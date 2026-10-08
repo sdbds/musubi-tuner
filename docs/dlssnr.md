@@ -101,8 +101,10 @@ Existing data can still use `train_manifest` instead of the two directory fields
 Its default `nr_controls_mode = "files"` reads the existing `controls_path`.
 Selecting `fixed` explicitly overrides `controls_path` in that dataset and its
 validation manifests with the TOML conditions; overridden NPY files are not read.
-Temporal data still requires a manifest declaring frame order, motion and validity
-masks. Ordinary directory images are not automatically treated as clips.
+Real temporal data requires a manifest declaring frame order, motion and validity
+masks. Directory pairs or single-frame manifests can instead opt into
+`synthetic_temporal = true`, as described under Synthetic Temporal Clips below;
+ordinary still images are not automatically treated as clips.
 `caption_extension` and `cache_directory` may remain in shared dataset settings,
 but NR reads neither captions nor diffusion caches.
 
@@ -120,10 +122,10 @@ or text-encoder caches. NR has its own architecture ID, `nr`, with a bucket step
 forward computation are unchanged.
 
 - With `enable_bucket = true`, the product of the `resolution` dimensions is the area budget. Bucket selection follows the original aspect ratio. For example, a `128 x 128` budget maps a `320 x 192` input to a `160 x 96` bucket; portrait inputs use the corresponding portrait bucket.
-- `bucket_no_upscale = true` follows the shared project behavior. Images within the area budget are rounded down to multiples of 16 without enlargement. If either resulting axis is below 48, the sample is rejected rather than enlarged or padded. Images over budget still select aspect-ratio candidates and use cover resizing/cropping; extreme aspect ratios can enlarge the shorter axis, so this flag does not prohibit every possible upscale.
+- `bucket_no_upscale = true` follows the shared bucket selection. Images within the area budget are rounded down to multiples of 16 and **center-cropped without resampling**. If either resulting axis is below 48, the sample is rejected rather than enlarged or padded. Images over budget still select aspect-ratio candidates and use cover resizing/cropping; extreme aspect ratios can enlarge the shorter axis, so this flag does not prohibit every possible upscale.
 - Omitting `enable_bucket` keeps it disabled and retains strict fixed-resolution behavior. All paired tensors must already match `resolution`; mismatches raise errors. The example TOMLs explicitly enable bucketing and no-upscale.
-- Paired tensors must align on the original pixel grid. Every frame in a clip must share the original input dimensions, bucket, aspect-preserving cover resize and center-crop position. There are no per-frame random crops or independent target/control resizes to hide bad pairing.
-- RGB, encoded controls and continuous loss masks share FP32 bilinear/antialias resizing. Binary history/temporal masks use pixel-center-aligned nearest-exact resizing to remain binary. Motion uses bilinear resizing; x/y displacement is scaled by the actual rounded width/height ratios. Identical current/previous-frame crop offsets cancel out, and the reprojection inside mask still excludes history outside the crop.
+- Paired tensors must align on the original pixel grid. Every frame in a clip must share the original input dimensions, bucket and center-crop position, with the same cover resize when one is needed. There are no per-frame random crops or independent target/control resizes to hide bad pairing.
+- When resizing, RGB, encoded controls and continuous loss masks share FP32 bilinear/antialias sampling. Binary history/temporal masks use pixel-center-aligned nearest-exact sampling to remain binary. Motion uses bilinear sampling; x/y displacement is scaled by the actual rounded width/height ratios. The native-size crop skips all interpolation and leaves retained motion vectors unchanged. Identical current/previous-frame crop offsets cancel out, and the reprojection inside mask still excludes history outside the crop.
 - A microbatch contains only samples with matching dimensions and frame counts. Different buckets can participate in one gradient-accumulation window; loss remains normalized by the total valid pixel count. Each bucket's short final batch is retained without dropping or duplicate padding. `consumed_samples` records the actual count.
 
 Indexing reads image headers or NPY mmap shapes to select buckets without keeping
@@ -131,13 +133,462 @@ pixels resident. Before training, each sample is decoded to validate pairing,
 values and the remaining supervision region after transformation. Training and
 validation share transform rules. The `bucket_plan` in `run_config.json` records
 the actual buckets, samples per bucket, batches per epoch and a fingerprint of
-the deterministic batch order. NR retains fixed bucket/manifest order and
-deterministic center crops, with no added random shuffling or augmentation.
+the deterministic batch order. NR training shuffles samples and batches each
+epoch by default. Center crops and paired spatial transforms remain deterministic
+with either ordering policy.
+
+For example, an `834 x 1257` pair fits a `1024 x 1024` area budget. With no-upscale,
+it becomes `832 x 1248` by cropping at `left=1, top=4`, without the previous
+`832/834` cover rescale. The retained RGB, controls and masks keep their original
+values. Odd crop margins put the extra removed pixel on the right/bottom. The
+budget check uses original dimensions: specifying a smaller `832 x 1248` budget
+still takes the over-budget resize path. No new parameter is needed for this fix.
+Dataset implementation hashes protect exact resume; pre-fix training states
+cannot resume exactly under the changed transform.
 
 Bucketing does not establish native-output equivalence: enhancing an image before
-resizing generally differs from enhancing it afterward. To preserve native paired
-pixel scale, use no-upscale and source dimensions aligned to 16 within the area
-budget. Resized pairs are a training-data transform, not evidence of DLL forward parity.
+resizing generally differs from enhancing it afterward, and cropping changes the
+available context. To preserve native paired pixel spacing, use no-upscale with
+source dimensions within the area budget; alignment then removes only border
+pixels. These transforms do not establish DLL forward parity.
+
+### Reproducible Epoch Shuffling
+
+Both Python training entry points enable epoch shuffling automatically; no
+shuffle argument is needed. The existing `--seed` defaults to `42`.
+
+Samples are shuffled within each dataset/bucket/frame-count group, followed by
+the global batch order. Dataset-specific batch sizes and repeat counts are
+preserved. Every row instance, including configured repeats, occurs exactly once
+per epoch; short tails are neither dropped nor padded with duplicates. Frames
+inside a temporal clip are never shuffled. Evaluation order is unchanged.
+
+The permutation is derived from the shuffle-policy version, `--seed` and epoch
+using a private CPU PyTorch generator. It does not consume the Python, NumPy,
+Torch training or dropout RNG streams. Per-sample noise seeds still depend on
+sample identity and epoch, not the sample's shuffled position. Plans can jump
+directly to a resumed epoch without replaying earlier epochs; only one epoch's
+permutation and prefix counts are cached.
+
+DDP ranks reconstruct the same global plan and take their existing interleaved
+microbatch positions. An accumulation window can cross an epoch boundary.
+Because a short tail can occupy a different position in each epoch,
+`consumed_samples` and resume checks use that epoch's actual prefix counts.
+`run_config.json` records `bucket_plan.policy=dlssnr_epoch_shuffle_v1`,
+`shuffle_seed`, `shuffle_rng` and `order_sha256_scope=epoch0`; the order hash
+describes the first epoch, not a fixed ordering reused forever.
+
+Shuffling is enabled by default. `--no-shuffle_dataset` optionally selects the
+legacy fixed order. Changing the shuffle flag or seed during `--resume`
+is rejected, as are the existing data/runtime/world-size/implementation identity
+changes. To enable shuffling for an older run, start a new run from saved canonical
+weights (merge an existing LoRA first) rather than reusing incompatible optimizer
+state. Use the same PyTorch version for exact continuation.
+
+### Optional Parameter EMA
+
+EMA is disabled by default. Both training entry points accept `--ema_decay 0.999`
+to enable it; the supplied decay must be finite and strictly between zero and one.
+Omitting the option allocates no EMA weights and retains the existing products.
+
+The shadow starts from the initial trainable FP32 parameters and follows
+`shadow = decay * shadow + (1 - decay) * parameter` after each successful optimizer
+update. There is no decay warmup or bias correction. Accumulation microsteps and
+FP16 overflow retries do not advance it. QAT averages the unrounded FP32 masters,
+not native quantization codes. Frozen parameters and buffers, including frozen
+FP8 bases and single-frame temporal heads, are not averaged. Each DDP rank tracks
+the same parameter EMA after synchronized updates.
+
+For LoRA, this averages the trainable adapter factors. In general,
+`EMA(B) @ EMA(A)` is not `EMA(B @ A)`: this is **parameter EMA**, not an exact
+average of merged full-model weights or predictions. Averaging can also move a
+QAT-trained weight back across a native quantization boundary. Neither EMA nor
+the example decay is a claim of better DLL output.
+
+The raw optimizer weights stay in `final/` and each periodic checkpoint directory.
+An additional `ema/` subdirectory contains a normal canonical model or LoRA
+adapter with the same runtime and base-quantization metadata. Training metadata
+records `weight_variant`, EMA scope, decay and successful-update count. The EMA
+model uses the normal inference/DLL packing path; merge an EMA LoRA before DLL
+packing, just as for a raw adapter. Resume uses the **parent** state directory,
+never its `ema/` product.
+
+When validation is configured, reports retain the raw `candidate` and add a
+separate `ema_candidate`. Each evaluation starts its own histories; parameters,
+training modes and training RNG are restored afterward. `--eval_native` evaluates
+both candidates through the native-quantized proxy. With QAT or native evaluation,
+raw and EMA products each receive their own `native_quantization.json`.
+
+`--save_state` stores the FP32 shadow and update count inside the checksummed
+`trainer_state.pt`. Missing/inconsistent EMA state, a changed decay, or enabling
+or disabling EMA during exact resume is rejected. EMA adds one FP32 copy of
+trainable parameters per device and another temporary copy during EMA evaluation
+or export; it also adds evaluation work and output storage.
+
+### Optional Frequency-Split Loss
+
+The existing `pixel` objective remains the default. Both training entry points
+accept `--loss_profile frequency_split` to replace it with low-frequency target
+matching and input-gradient anchoring. The existing loss weights retain their
+defaults, but select these terms in the new profile:
+
+| Weight | Frequency-split objective | Metric |
+| --- | --- | --- |
+| `--loss_pre` | Charbonnier of the low-pass preclamp-minus-target residual | `loss/lowpass_pre` |
+| `--loss_out` | Charbonnier of the low-pass rendered-minus-target residual | `loss/lowpass_out` |
+| `--loss_edge` | Horizontal/vertical RGB gradient consistency with the **input**, not the target | `loss/input_edge` |
+| `--loss_temporal` | Low-pass, motion-compensated change in output-minus-target residuals | `loss/lowpass_temporal` |
+
+There is no additional full-band target pixel/edge term in this profile. The
+gradient anchor is a weighted constraint, not an exact edge lock or a depth/normal
+estimator. Excessive edge weight can restrict desired appearance changes.
+
+`--loss_lowpass_sigma` defaults to `6` for this profile and accepts finite values
+in `(0, 32]`. Sigma is measured in image pixels **after** bucket transforms, not
+in source-image pixels. The bound limits filter support. The Gaussian is separable,
+truncated at radius `ceil(3 * sigma)`, and uses replicated image boundaries. The
+value is a starting setting, not a validated optimum. Supplying sigma with the
+default pixel profile is rejected instead of silently ignoring it.
+
+Spatial filtering uses `G(mask * residual) / G(mask)`, with zero-support outputs
+set to zero, then weights the Charbonnier term by the original loss mask. Excluded
+target values cannot bleed into adjacent supervision, and holes do not turn
+constant residuals into artificial edges. Soft masks retain their weight in the
+global valid-pixel denominator; input edges require both neighboring pixels.
+
+For temporal loss, the previous residual is masked **before** bilinear warping
+and normalized by its warped mask. This prevents invalid bilinear neighbors from
+entering otherwise valid pixels. The common support combines current and warped
+previous loss masks, temporal validity, the inside test and reset status. The
+motion-compensated residual is low-pass filtered on that support. Burn-in remains
+excluded. Loss and denominator calculation use the same support, including across
+accumulation windows, variable bucket tails and DDP ranks.
+
+The selected profile and sigma are saved in the resolved run configuration and
+resume identity. Changing either requires a new run, not exact resume. QAT, EMA
+and deployment-proxy evaluation remain independent options. Validation MAE/PSNR
+are unchanged; training loss values from different profiles are not directly
+comparable. This is a conservative objective for imperfect pairs, not evidence
+that new photorealistic texture or noise sensitivity has been learned.
+
+### Optional Control Randomization
+
+`--control_randomization` teaches the new enhancement to vary with tone and
+structure. Every training dataset must use `nr_controls_mode = "fixed"`, with
+positive `nr_tone` and `nr_structure` after FP16 control encoding. These fixed
+values define the reference point where the paired photo is the full enhancement
+target. File-based control maps are rejected rather than silently replaced.
+
+```text
+--control_randomization --control_residual_sigma 6
+```
+
+One point is sampled per logical sample and epoch, constant over every clip frame
+including burn-in. Tone and structure range from zero to their dataset reference
+values; inference still uses actual native knob values. Style and auto-mask stay
+fixed. Explicit skin stays fixed, while `nr_skin = -1` follows structure. Ratios
+use effective FP16-encoded values, so controls that encode identically receive
+the same endpoint target.
+
+| Option | Enabled default | Constraint |
+| --- | --- | --- |
+| `--control_residual_sigma` | `6` | Finite, `0 < sigma <= 32`, in transformed pixels |
+| `--control_anchor_probability` | `0.25` | Reference-point probability in `[0,1]` |
+| `--control_corner_probability` | `0.25` | Uniform four-corner probability in `[0,1]` |
+
+The probabilities must sum to at most one. The remainder samples independent
+uniform tone/structure ratios. Because the four corners include the reference
+point, its default total probability is 31.25%, before FP16 aliases. All three
+numeric options require the enable flag. These defaults are experiment settings,
+not measured optimal proportions.
+
+For each loss role, let `B` be the initial frozen NR output, `A` its ordinary
+target, and `G_M` a mask-normalized Gaussian filter. The generated target is:
+
+```text
+R = A - B(reference_controls)
+target = B(sampled_controls) + structure_ratio * R
+         + (tone_ratio - structure_ratio) * G_M(R)
+```
+
+Rendered RGB, DINO and temporal terms use the paired target and rendered teacher
+field, clamped to `[0,1]`. The preclamp term uses the teacher's preclamp field and
+is not RGB-clamped. The frequency-split edge term uses the input as `A`; its
+generated guide is logged as `loss/control_edge`. Pixel-profile edges use the
+generated rendered target. At zero, all roles reproduce their base fields; at
+the reference point they reproduce their original targets exactly on supervised
+pixels. Zero enhancement is the base response at zero controls, not an identity
+image transform. Excluded labels never enter the residual Gaussian.
+
+The residual sigma defines target construction independently of
+`--loss_lowpass_sigma`. Existing loss weights and the selected profile still
+apply; no full-band or perceptual term is enabled implicitly. For augmented
+clips, both loss profiles use the normalized masked temporal residual with joint
+current/previous label support. Only frequency-split additionally low-pass filters
+that residual. Ordinary unaugmented pixel training is unchanged.
+
+Distinct points normally add two no-gradient reference rollouts before the
+student forward, each with independent history and matched frame-noise seeds.
+Full training keeps one frozen initial model; LoRA bypasses adapters on its
+frozen effective base. A wholly reference-point microbatch needs one rollout.
+Optional base anchoring shares this provider and its sampled-point prediction;
+provider allocation alone never enables the anchor loss. References stay outside
+the optimizer, EMA and exports, and are initialized before restoring student state.
+
+Sampling uses private, domain-separated RNG keyed by seed, epoch, final logical
+sample/repeat ID and crop ID. Overflow retries reuse prepared points. Metadata
+binds settings, encoded references, frozen weights, numerical policy and
+implementation hashes to exact resume. Logs report effective tone/structure
+means, reference/zero fractions and RGB/edge clipping fractions, weighted by
+global valid RGB mass rather than rank-local means. Validation retains fixed
+reference controls and ordinary photo targets. Synthetic supervision does not
+prove real-weight control monotonicity or improved image quality.
+
+### Optional DINOv3 Loss
+
+Both NR trainers accept `--dino_loss_weight`; its default `0` leaves the objective
+unchanged and does not import SenseCraft or load a feature model. This reuses the
+SenseCraft ViT backend used by the HiDream-O1 implementation associated with
+[PR #947](https://github.com/kohya-ss/musubi-tuner/pull/947). HiDream-O1 is unchanged.
+Install the tested optional dependency in the training environment:
+
+```shell
+uv pip install ".[dinov3]"
+```
+
+This extra pins SenseCraft 0.3.11. It uses the project's Transformers version;
+other SenseCraft feature APIs have not been validated. The existing repository
+`uv.lock` predates the current project dependency pins; this installation command
+resolves from `pyproject.toml`, rather than relying on that stale lockfile.
+Enabling the loss loads pretrained weights through Hugging Face's normal cache
+and authentication. Prepare access/cache on the training machine first. Loading
+errors abort training; there is no random-feature fallback.
+
+Add these arguments to an existing full/LoRA training command to combine it with
+the frequency-split objective:
+
+```text
+--loss_profile frequency_split --loss_lowpass_sigma 6 --dino_loss_weight 0.1
+```
+
+The weight is an example for an ablation, not a tuned recommendation. DINO is an
+auxiliary term; at least one base NR loss must remain enabled.
+
+| Option | Enabled Default | Meaning |
+| --- | --- | --- |
+| `--dino_loss_model_type` | `small` | DINOv3 ViT `small`, `small_plus`, `base` or `large` |
+| `--dino_loss_layer` | `-4` | Zero-based layer or Python-style negative index into the original model |
+| `--dino_loss_resize` | `224` | Longest-side limit, multiple of 16 in `[16, 1024]` |
+| `--dino_loss_use_gram` | enabled | L1 distance between channel Gram statistics of patch features |
+| `--dino_loss_use_norm` | enabled | L2-normalize each patch feature before comparison |
+
+Use `--no-dino_loss_use_gram` for position-wise patch-feature MSE only on aligned
+pairs, or `--no-dino_loss_use_norm` to compare unnormalized features. Secondary
+options with zero weight are rejected. The first NR integration supports ViT
+patches only, excluding CLS/register tokens. It resolves the layer before
+truncating the network, avoiding repeated negative-index resolution in SenseCraft
+0.3.11. The feature model stays frozen, in FP32 eval mode with eager attention;
+target extraction has no gradient, while prediction gradients reach the NR model.
+NR's own attention/QAT settings remain independent.
+
+Rendered RGB is clamped to `[0, 1]` and normalized by the backend. Images are
+downscaled with antialiased bilinear sampling, preserving aspect ratio and never
+upscaled, then padded to the patch grid. Masked values are removed **before**
+resampling; RGB is divided by the resampled mask. Empty support and padding use
+neutral RGB `0.5`. Patch weights are average-pooled mask coverage. Channel Gram
+statistics divide by total patch coverage, excluding empty/padded tokens. The
+per-image loss is weighted by the original valid RGB mass and normalized over the
+whole accumulation window and all DDP ranks. Empty support gives zero loss and
+gradient; the dataset loader still rejects wholly unsupervised manifest frames.
+Temporal burn-in frames are excluded.
+
+Gram comparison does not require corresponding patch positions. DINO features
+still depend on position and global context, including neutral mask fills, so
+this is not exact image-translation invariance or complete isolation of masked
+regions. Resizing can remove fine texture. Keep the input structure anchor and
+inspect detail/noise sensitivity separately; a smaller DINO loss alone does not
+establish better texture or structure.
+
+Logs add `loss/dino` and `loss/dino_weighted`. Normalized Gram values can be small;
+do not choose weights by raw scale alone. Validation MAE/PSNR remain unchanged.
+QAT, frozen FP8 LoRA bases and EMA are supported. The feature network adds training
+memory/compute but is excluded from the optimizer, EMA and exported NR/LoRA
+weights, with no new DLL dependency. Settings, frozen tensor checksum, provider
+versions and feature implementation hashes are recorded in metadata and exact
+resume identity. Resume rebuilds the teacher and rejects mismatches. Model loading
+preserves training RNG; each DDP rank must load the same frozen teacher.
+
+### Optional Base-Model Anchoring
+
+`--base_anchor_weight` adds an output-retention loss to both full and LoRA
+training. The default `0` disables this loss; a reference is only allocated if
+control randomization independently needs it. For an ablation, add this to an
+existing command:
+
+```text
+--base_anchor_weight 0.1
+```
+
+The example weight is not tuned. At least one ordinary NR loss must remain
+enabled. The reference sees the same transformed source frames, control maps
+and per-frame noise seeds as the student. Anchoring alone adds no randomized
+controls or extra retention dataset. Temporal reference clips build their own history
+from the first frame, using the same motion, resets and validity masks. They do
+not reuse the student's changing history. Burn-in runs on both models but is
+excluded from the loss.
+
+The term is full-band Charbonnier distance between student and reference
+`rendered_proxy` RGB, weighted by the supervised loss mask. Its denominator is
+the valid RGB mass across all accumulated microbatches and DDP ranks. It stays
+full-band with `frequency_split`: both predictions share the same source
+geometry, unlike potentially misaligned source/target pairs. Logs add
+`loss/base_anchor` and `loss/base_anchor_weighted`.
+
+Full training keeps a frozen, eval-mode copy of the run's initial model. LoRA
+reuses its frozen base with adapters temporarily disabled, avoiding another
+base-weight copy. Both modes add a no-gradient reference forward for each
+microbatch; full training also needs memory for the reference weights. The pass
+preserves RNG and restores adapter/mode state before the student forward and
+checkpoint replay. The teacher is excluded from the optimizer, EMA and exported
+NR/LoRA tensors, and adds no inference or DLL dependency.
+
+QAT uses the same publication policy for reference and student weights. For
+frozen FP8 LoRA, the anchor is the **effective quantized base**, not an unquantized
+or stock-DLL reference. The runtime policy, reference checksum and loss protocol
+are recorded in metadata and exact-resume identity. Resume reconstructs the
+original reference before restoring the trained student; it never makes the
+checkpoint itself the new anchor. Changed weights, settings or implementation
+hashes reject exact resume.
+
+This term can reduce unwanted drift, but can also suppress intended changes.
+It constrains only the sampled training conditions, so it does not establish
+retention on unseen styles, scenes or control settings. Compare held-out raw,
+EMA and native-proxy outputs, along with detail/noise diagnostics, before choosing
+a weight. Image quality, GPU cost and actual DLL/game behavior still need testing
+on the deployment machine.
+
+### Optional Detail Diagnostics
+
+`--eval_detail_diagnostics` adds high-frequency energy and paired-seed noise
+sensitivity to validation. It is **off by default**, requires a held-out
+`validation_manifest` or `sequence_manifest`, and needs no feature model or new
+dependency. Add it to an existing full/LoRA training command, for example:
+
+```text
+--eval_detail_diagnostics --eval_native --sample_every_n_steps 100
+```
+
+`--eval_native` is independent: omit it to measure only the configured runtime.
+With interval `0`, the final update is still evaluated. The reports in
+`evaluation/stepNNNNNN.json` retain their existing metrics and add
+`detail_diagnostics` to each case in `baseline`, `candidate` and, when enabled,
+`ema_candidate`. Each case's `native` section gets the same diagnostics under
+native-quantized weights. The baseline is this run's initial model, not
+necessarily the stock DLL. `--no-compare_baseline` leaves only the candidate
+comparisons. The top-level diagnostic protocol and each case's `protocol` record
+the definitions and seed policy; the flag, protocol and implementation are bound
+to exact-resume identity.
+
+`high_frequency.sigma_1px` and `sigma_4px` use Gaussian high-pass residuals at
+sigma 1 and 4 **transformed image pixels**, respectively. For image `x`, mask `m`
+and Gaussian filter `G`, the residual is `x - G(m*x)/G(m)`. Filters are separable,
+truncated at `ceil(3*sigma)`, and use replicated boundaries. Masked values are
+removed before filtering, so holes do not create black-mask edges or import
+excluded pixels. The measurements run in FP32 without autocast/TF32; sums use
+FP64. No further resizing is performed for these diagnostics.
+
+Each scale reports `input_energy`, `target_energy` and `output_energy`: the sum
+of squared RGB residuals weighted by `loss_mask`, divided by
+`valid_rgb_values = 3 * sum(loss_mask)`. Sequence frames are combined by valid
+pixel mass, not by averaging frame scores. `output_to_input`, `target_to_input`
+and `output_to_target` are ratios of those aggregate energies. Ratios with
+denominator energy at or below `1e-12` are JSON `null`, not infinity or a claimed
+zero change. For a non-null ratio `r`, `100*(r-1)` is the percentage energy change.
+These two high-pass scales overlap; they are not disjoint FFT bands and should
+not be added together or compared directly with differently defined measurements.
+
+Noise sensitivity uses one deterministic seed pair per frame. The primary seed
+is the existing evaluation seed; the alternate is `primary_seed XOR 0x9E3779B9`.
+Only the current frame's noise lanes change. Input, controls, incoming history,
+motion, validity and reset flags are identical within the pair. The alternate
+history is discarded. Each model/runtime still maintains its own primary rollout.
+
+`noise_sensitivity.rgb_mae` measures the masked mean absolute difference between
+the two rendered outputs. `preclamp_mae` measures their neural outputs before
+clipping and temporal blending, helping distinguish network response from
+postprocessing attenuation. `high_frequency_rms` reports the RMS of the rendered
+pair's high-pass difference at both scales. These are paired perturbation
+measurements, not a Jacobian, an estimate from many noise trials, or a second
+closed-loop temporal rollout.
+
+Enabling diagnostics adds one forward per frame per evaluated runtime, plus
+filtering. Baseline and EMA evaluations incur that cost too. Training loss and
+weights are unchanged; primary histories, RNG, model modes and numerical flags
+are preserved. Non-finite alternate outputs fail evaluation rather than producing
+misleading JSON. Higher energy or sensitivity can reflect artifacts or noise,
+so neither metric is a quality score or an automatic checkpoint-selection rule.
+Compare against the same baseline/data/protocol, inspect images and temporal
+behavior, and retain separate DLL/game acceptance.
+
+### Optional Content Preservation Evaluation
+
+`--eval_content_preservation` adds a frozen DINOv3 measurement of **output versus
+input**, independently of the training target. It is off by default, adds no
+training loss and does not enable `--dino_loss_weight`. Both NR trainers support
+it when a held-out validation or sequence manifest is configured:
+
+```text
+--eval_content_preservation --eval_native --sample_every_n_steps 100
+```
+
+The existing optional `.[dinov3]` dependency and pretrained-weight cache/access
+requirements apply. No DINOv2 or LPIPS dependency is introduced. Disabled runs
+do not load a content feature model. A requested but unavailable backend aborts
+with an error rather than omitting the measurement or substituting random weights.
+
+The first protocol is fixed: DINOv3 ViT Small, layer `-4`, longest-side limit
+224 without upscaling, L2-normalized **spatial patch MSE**. It excludes CLS/register
+tokens and compares corresponding patch positions, not Gram statistics. This
+can detect a rearrangement that preserves texture statistics. The training
+`--dino_loss_*` options do not change this evaluation protocol. When the training
+loss already uses the same model and feature layer, evaluation shares its frozen
+backbone through a separate wrapper without changing its Gram/normalization settings.
+
+Mask handling reuses the NR DINO preprocessing: remove excluded values before
+antialiased aspect-preserving resize, normalize by resized mask coverage and pad
+with neutral RGB. Patch contributions use average-pooled mask coverage. Frame
+scores are channel-mean squared differences of normalized patch features,
+averaged over valid patch coverage; sequence scores weight frames by their
+original valid RGB mass. The feature network remains in FP32 eval mode without
+TF32 or gradients. Resizing and global attention still limit detection of fine
+or localized changes; a mask does not isolate the network's receptive field.
+
+Each evaluated case adds `content_preservation` with `dinov3_patch_mse`,
+`valid_rgb_values` and its protocol. Baseline, raw, EMA and native-proxy results
+use the same feature model. Existing metrics and primary histories are unchanged;
+alternate-noise diagnostic outputs are not scored by this metric. With sampling
+interval zero, only the final update is evaluated. Baseline comparison remains
+controlled by `--compare_baseline`.
+
+Under DDP only the evaluating main rank creates the content wrapper; compatible
+training feature weights can be reused there. Its protocol, frozen weights,
+provider identity and implementation hashes are bound to metadata and exact
+resume on all ranks. The evaluator does not enter the optimizer, EMA or exported
+NR/LoRA tensors. Loading and evaluation preserve training RNG. Enabling it adds
+feature-forward cost and, when no compatible training backbone exists, extra
+frozen-model memory. Existing states from a different implementation cannot be
+resumed exactly.
+
+The control scanner accepts the same flag for source-only inputs. It adds
+`dinov3_patch_mse_vs_input` to each primary-output JSON/CSV row and records the
+feature protocol once in `scan_report.json`. It does not add NR forward passes,
+but does extract input and output DINO features for each measurement.
+
+This is a content-drift indicator, not a quality score or a new constraint on
+training. Copying the input gives zero distance but performs no enhancement.
+Compare it with target fidelity, detail/noise diagnostics and actual images.
+Its values are not interchangeable with published DINOv2 or LPIPS scores, and
+must not be compared across different feature identities or preprocessing rules.
 
 ## Current Scope
 
@@ -214,6 +665,91 @@ does not prove compatibility of updated weights.
 
 ## Memory and Runtime Modes
 
+### Export-Aligned Weight QAT
+
+`--native_weight_qat` opts full or LoRA training into native weight publication.
+FP32 master weights and optimizer state are retained. Each projection uses the
+storage type declared by the canonical profile: direct FP32 to E4M3FN or FP16,
+round-to-nearest/ties-to-even, without a learned scale or silent clipping. LoRA
+publishes the **combined effective base plus delta**, not separately quantized
+adapters. Existing scalar publications remain in place; temporal blend is also
+published as FP16. Temperatures retain their FP32 storage and existing runtime
+half publication. Activation rounding is unchanged: its half-then-E4 rule is not
+the weight export rule.
+
+QAT requires `--network_dropout 0` for LoRA. The existing nonzero-dropout path is a
+separate projection branch, not a single exportable weight. Frozen FP8 base storage
+can still be used with its existing experimental-mode restrictions; QAT runs after
+that effective base is materialized and the adapter is added.
+
+To isolate deployment mismatch first, add these arguments to an existing training
+command (the dataset must include a held-out `validation_manifest` or
+`sequence_manifest` for `--eval_native`):
+
+```text
+--native_weight_qat --eval_native --attention_backend native --mixed_precision no --gradient_checkpointing --sample_every_n_steps 100
+```
+
+This does not select a learning rate or change the loss. Gradient accumulation,
+warmup/cosine scheduling and `--max_grad_norm` remain independent options. Start
+with a short run at the actual training resolution before committing to a long
+run; QAT adds rounding and range-check work and is not an FP8 GEMM acceleration.
+
+`--eval_native` is independent of QAT and can diagnose ordinary FP32 or experimental
+training too. Each validation case retains its existing metrics and adds:
+
+- `native`: target-error, saturation and temporal metrics under native-quantized
+  effective weights, FP32 products and native attention.
+- `native_gap`: masked RGB/preclamp MAE and RGB maximum absolute difference between
+  the configured training runtime and that deployment proxy, using the same seed.
+
+The two paths roll out **independent histories**; neither receives the other path's
+previous output. Evaluation restores numerical policies, model/adapter modes and
+training RNG, and never rewrites master weights or optimizer state. A zero gap
+when training already uses QAT and FP32 native attention is expected; it is not
+evidence of equivalence to DLL accumulation kernels.
+
+With QAT or native evaluation enabled, every saved checkpoint and `final` directory
+also contains `native_quantization.json`. It uses the DLL exporter's quantizer
+and per-tensor statistics, with totals and `by_storage` summaries of code flips,
+updates lost to rounding, maximum/mean error and RMSE. `flip_fraction` is a fraction
+in `[0,1]`, not a percentage. The reference is the run's **initial effective weights
+after native quantization**, including any frozen-base quantization recipe. This
+snapshot stays compressed on CPU; it does not retain a second GPU model. For a run
+starting from an off-grid fine-tuned checkpoint or scaled FP8 base, this reference
+is not necessarily the original DLL. Use the DLL export report for changes relative
+to that original template.
+
+These probes assume `mix=1`, `strength=1` and `lora_multiplier=1`. Changing export
+controls requires a new comparison. They remain surrogate measurements and record
+`native_equivalent=false`; game/DLL output acceptance is separate. High flip rates
+or lower target MAE alone do not establish better appearance or temporal stability.
+
+QAT is off by default. Old runtime-v1 artifacts retain their behavior; enabled QAT
+is bound to runtime-v2 metadata in canonical weight headers and LoRA files, and is
+restored on inference/merge. `--native_weight_qat` or `--no-native_weight_qat` can
+explicitly override publication in the image/video generators. Saved canonical
+tensors remain the unrounded FP32 masters for continued training and DLL export.
+Resume requires the same QAT setting and implementation identity; start a new run
+from old weights rather than trying to resume pre-change optimizer state.
+
+On 2026-10-07, the real canonical weights completed a synthetic 832 x 1248,
+batch-size-1 CUDA smoke on an RTX 4090 with PyTorch 2.13.0+cu130. Both runs used
+FP32 products, native attention, QAT and gradient checkpointing, with one warm-up
+update and **one measured update**:
+
+| Mode | Peak Allocated GiB | Measured Update, Seconds |
+| --- | ---: | ---: |
+| Full, AdamW at 1e-5 | 11.49 | 5.63 |
+| ViT LoRA rank 16, scaled FP8 base, AdamW at 1e-4 | 8.72 | 3.45 |
+
+These are feasibility measurements, not throughput guarantees or quality results.
+The benchmark helper also accepts `--native_weight_qat`; it never exports its
+synthetic training updates. Different data, batch sizes, hardware or temporal
+training require their own measurements.
+
+### Compute and Storage
+
 When GPU memory is limited, try `--gradient_checkpointing` first. It recomputes
 FFN/attention during gradient-enabled training segments, covering boundary blocks,
 the encoder, ViT and decoder. Burn-in and evaluation are not recomputed. Full and
@@ -287,7 +823,9 @@ DDP does not shard the model or make a larger model fit on an individual GPU.
 
 Batch positions use `(update * accumulation + micro) * world_size + rank`.
 Short final batches are not padded, and the deterministic batch plan continues
-into the next epoch. The loss denominator is the total valid pixel count across
+into the next epoch. By default, each epoch has its own seeded
+permutation, shared by all ranks rather than independently shuffled on each rank.
+The loss denominator is the total valid pixel count across
 the accumulated global batch, rather than an average of per-rank means. The main
 process handles shared weights, logs and evaluation; each rank's RNG/scaler is
 saved. Resume requires the same world size, data plan and runtime policy. Automatic
@@ -420,6 +958,21 @@ image quality require separate acceptance checks. Do not use an exported DLL as
 the next repacking template. Keep the original DLL, and continue training from
 canonical model directories.
 
+The public unpack command deliberately rejects already modified DLLs. Export
+verification re-extracts their payloads with the record decoder instead of relaxing
+the audited-template check. The opt-in real-DLL tests cover original unpacking,
+QAT master export, decoded-weight bit equality and surrogate forward equality after
+re-extraction. In PowerShell, using this repository's Python environment:
+
+```powershell
+$env:PYTHONPATH = "src"
+$env:DLSSNR_DLL_PATH = "C:\path\to\original\nvngx_dlssnr.dll"
+python -m pytest -q tests/test_dlssnr_dll_io.py
+```
+
+The tests write only temporary model directories and DLL copies, never the original.
+They do not load the modified DLL into a game or certify native kernel parity.
+
 The standalone merge script supports the same LoRA multiplier:
 
 ```bash
@@ -485,12 +1038,17 @@ Common arguments:
 | `--network_dim` / `--network_alpha` | ViT LoRA rank defaults to `16`; omitted alpha follows rank. |
 | `--network_dropout` / `--network_args` | Dropout defaults to `0`. Use `--network_args profile=multiscale` for multiscale LoRA, optionally with `rank_by_width` / `alpha_by_width` dictionaries. Do not combine this with a single dim/alpha. |
 | `--max_train_steps` / `--gradient_accumulation_steps` / `--seed` | Update count, gradient accumulation and random seed. |
+| `--shuffle_dataset` / `--no-shuffle_dataset` | Seeded epoch shuffling of bucket samples and batch order is enabled by default; no argument is required. The negative flag optionally selects legacy fixed order. |
 | `--max_grad_norm` | Clips gradients at the accumulated update boundary. Default `0` disables clipping. |
+| `--ema_decay` | Optional FP32 trainable-parameter EMA, for example `0.999`; omitted means disabled. Raw and EMA products/evaluation remain separate. |
 | `--gradient_checkpointing` | Recomputes activations to reduce memory, preserving the default numerical profile. Disabled by default. |
 | `--numerics_profile train_experimental` / `--mixed_precision` | Explicit experimental mode. CUDA precision accepts `no`, `fp16` or `bf16`; master weights remain FP32. |
 | `--fp8_base` / `--fp8_scaled` | LoRA-only frozen-base storage quantization. Scaled requires base, and both require experimental mode. |
 | `--sdpa` / `--xformers` / `--flash_attn` / `--attention_scope` | Explicit experimental attention and its scope; restrictions are listed above. |
 | `--loss_pre` / `--loss_out` / `--loss_edge` / `--loss_temporal` | Loss weights, defaulting to `1`, `1`, `0.05` and `0`, respectively. |
+| `--loss_profile` / `--loss_lowpass_sigma` | `pixel` is the unchanged default. Optional `frequency_split` uses low-frequency target matching and input edges; sigma defaults to `6` in transformed pixels. |
+| `--control_randomization` | Opt-in tone/structure sampling with detached base-relative targets; requires positive fixed reference controls in every training dataset. |
+| `--control_residual_sigma` / `--control_anchor_probability` / `--control_corner_probability` | Target-band sigma and sampling probabilities; enabled defaults are `6`, `0.25`, `0.25`. These options require control randomization. |
 | `--prior_lr_multiplier` / `--scale_lr_multiplier` / `--temporal_blend_lr_multiplier` | Full-training parameter-group multipliers, default `0.1`. The LoRA entry point rejects these arguments. |
 | `--sample_every_n_steps` / `--min_sequence_frames` | Validation interval and minimum temporal evaluation frame count. A nonzero interval requires validation manifests in the dataset TOML. |
 | `--no-compare_baseline` | Disables the initial-base comparison, which is enabled by default. |
@@ -540,6 +1098,86 @@ Disable FP8 with `--no-fp8_base` / `--no-fp8_scaled`. Sage global inference requ
 explicit `--numerics_profile train_experimental --mixed_precision bf16 --sage_attn --attention_scope global`
 and an available local extension.
 
+### Control Response Scan
+
+Use the standalone scanner to measure how tone and structure affect a frozen
+model, without changing training losses or synthesizing new targets:
+
+```shell
+python tools/scan_dlssnr_controls.py --model_dir models/canonical_dlssnr --sample_manifest data/scan.jsonl --bucket_width 832 --bucket_height 1248 --output_dir output/control_scan --device cuda --eval_native
+```
+
+The JSONL manifest has exactly one reset frame per sample. Targets and control
+files are not required; a minimal record is:
+
+```json
+{"schema":"dlssnr_pairs_v1","sample_id":"frame000","sequence_id":"scene_a","source_encoding":"srgb_proxy","frames":[{"frame_index":0,"input_path":"frame.png","reset":true}]}
+```
+
+Paths are relative to the manifest. Input dimensions must match `bucket_width`
+and `bucket_height`; this tool does not crop or resize. RGB formats and optional
+`loss_mask_path` follow the existing data contract. A mask must have nonempty
+support. The mask affects measurements, not the network input. Existing
+`controls_path` entries are explicitly overridden with fixed maps. Optional
+target paths left in a reused manifest are still validated by the shared loader,
+but targets are not scored. Multi-frame rows are rejected rather than silently
+flattened into independent stills.
+
+The default Cartesian grid is `--tone_values 0 0.5 1` and
+`--structure_values 0 0.5 1`, producing nine control points per input. Custom
+values must be in `[0,1]`. Points that become identical after FP16 control-lane
+encoding are rejected. The JSON report records requested values and the actual
+five encoded lanes for every point.
+
+Other controls stay fixed: `--nr_style 0`, `--nr_skin -1` and auto mask enabled.
+`--nr_skin -1` follows structure, so with auto mask enabled a structure sweep
+also changes the skin lane. Set an explicit skin value to hold that lane fixed.
+Use `--no-nr_auto_mask` to select the existing non-auto encoding. Auto mask is a
+model condition, not a generated validity mask.
+
+Each sample uses the same `--seed`-derived primary noise and XOR-paired alternate
+noise at every control point and runtime. All forwards are independent stills
+with no history. The default grid takes 18 forwards per image; `--eval_native`
+doubles this to 36. The configured runtime inherits the model artifact's policy
+unless explicitly overridden using the ordinary inference flags. The additional
+native scan uses native-quantized weights, FP32 products and native attention.
+It is a deployment proxy, **not actual DLL execution**. Scan canonical full or
+EMA directories directly; merge LoRA into a canonical directory first.
+
+The new output directory contains:
+
+- `scan_report.json`: protocol, effective controls, runtime policies, source and
+  parameter identities, data fingerprints, implementation hashes and per-image
+  measurements. This file is written last and marks successful completion.
+- `scan_metrics.csv`: one row per image, control point and runtime, with the
+  corresponding PNG path. Formula-like text identifiers are escaped for
+  spreadsheet readers; JSON preserves the original identifiers.
+- `images/<sample_id>/input.png` and `configured/` / `native/` subdirectories:
+  primary-seed previews. Metrics use FP32 proxy values before 8-bit PNG rounding.
+
+`rgb_mae_vs_input` and `preclamp_mae_vs_input` measure change from the input,
+not target accuracy. `lowpass_delta_rms` and `highpass_delta_rms` split
+output-minus-input with the mask-normalized Gaussian at `--lowpass_sigma`
+(default 6 pixels, positive and at most 32). These bands overlap; their RMS
+values are not additive energy percentages. High-frequency energy and paired-seed
+noise metrics at sigma 1 and 4 reuse the detail-diagnostics definitions. Ratios
+with negligible input energy are JSON `null` / empty CSV cells. Measurements
+are per image, with no implicit dataset average or quality ranking.
+
+The scanner preserves model modes, runtime settings and RNG state. Existing
+output directories are refused, and input changes during a scan prevent a final
+report. Failed runs may leave partial PNGs; use a new directory for a retry.
+Run it as a single process, not with a distributed launcher. Default scanning
+needs no feature-model dependency or pretrained feature download. The optional
+`--eval_content_preservation` flag adds the DINOv3 measurement described above,
+using the existing `.[dinov3]` extra and recording its feature identity in the report.
+
+Zero tone/structure is measured like any other point, not assumed to be a
+pass-through. A stronger response can also be unwanted distortion. Repeat with
+held-out scenes and multiple seeds on the training machine before deciding how
+to construct randomized-control supervision; the tool does not calibrate that
+mapping automatically.
+
 ## Unsupported Features
 
 Full FP8 optimizer training, SageAttention training, CPU activation offload, block
@@ -574,6 +1212,62 @@ before partial inference outputs are written. Original IDs are never rewritten a
 - Masks accept single-channel PNGs or `[1,H,W]` NPY arrays. History/temporal masks must be binary; optional `loss_mask_path` supports weights in `[0,1]`.
 - With nonzero temporal loss, non-reset frames require a temporal mask and `tbptt_length >= 2`. Loss uses adjacent frames within the differentiable segment only, never across the burn-in boundary.
 - `--loss_temporal 0` allows temporal masks to be omitted, but non-reset frames still require motion and history masks.
+
+### Synthetic Temporal Clips
+
+Set `synthetic_temporal = true` on a dataset entry to turn paired stills into
+clips online, after the shared bucket resize or native crop. The entry accepts
+directory pairs or a **single-frame** training manifest. Unmarked temporal
+entries still require explicit real frames, motion and validity. Both kinds can
+coexist; each retains its own batch-size, repeat and bucket grouping.
+
+See [the synthetic dataset example](../configs/dlssnr_dataset_synthetic_temporal.toml).
+Append explicit temporal settings to an existing training command, for example:
+
+```text
+--training_mode temporal --sequence_length 4 --burn_in 2 --tbptt_length 2
+--loss_temporal 0.1
+```
+
+These are example settings, not changed defaults. Synthesis does not enable
+temporal loss, control randomization, a reference model or any perceptual loss.
+The usual clip-length and burn-in checks still apply.
+
+`synthetic_max_shift_px` defaults to `0.5` and accepts finite values in `[0,1]`.
+Both fields can be inherited from `[general]`. An explicitly disabled entry may
+discard an inherited shift, but cannot declare a local shift; a general shift
+with no enabled consumer is rejected. The source loss mask must retain positive
+support inside the maximum-shift margin. Zero shift permits edge-only support
+and provides a static-sequence control experiment.
+
+Frame zero preserves the original pair. Later frames independently sample the
+original transformed images at `p + d_t`, avoiding repeated-resampling blur.
+Sampling is bilinear with `align_corners=False`; dense current-to-previous motion
+is `d_t - d_(t-1)`. RGB and spatial controls use border extension as model context.
+Fixed controls stay constant. Labels use `warp(target * mask) / warp(mask)`;
+zero coverage has neutral fill, and label masks exclude geometric extension.
+History validity also requires every contributing bilinear neighbor in the
+previous frame to be supported. Joint current/previous label masks are applied
+once in both temporal loss and its global denominator.
+
+Trajectories use private CPU RNG keyed by seed, epoch, final logical sample/repeat
+ID and crop ID, in a separate domain from controls and frame noise. No expanded
+image or flow dataset is written. Batch reports count generated frames; resume
+identity binds original files, seed, transform settings and implementation.
+
+For a marked entry, `validation_manifest` must also contain paired stills and
+uses fixed epoch-zero synthetic clips. `sequence_manifest` **always** remains a
+real explicit-motion sequence. Original sequence IDs are retained, so generated
+frames cannot bypass train/validation overlap checks. Both configured and native
+case reports include `synthetic_temporal` with the generation protocol. Synthetic
+`temporal_mae` measures the normalized masked residual over joint label support,
+excluding neutral fill, invalid history and reset transitions; ordinary real-case
+metric semantics are unchanged. Random control targets are not used in validation.
+
+These clips test subpixel consistency for static scenes. They do not establish
+behavior under moving objects, occlusion, long histories or actual DLL sampling,
+and cannot repair misaligned source/target pairs. Keep synthetic validation,
+held-out photo quality and real temporal evidence separate.
 
 ## Saving and Resuming
 
@@ -613,7 +1307,8 @@ consistency at the cost of temporary matrices and backward work. Artifacts recor
 `--save_state` creates `state-stepNNNNNN/` at periodic and final update boundaries.
 State includes the optimizer, actual global consumed-sample count, each rank's
 CPU/current-CUDA-device/Python/NumPy RNG, FP16 scaler, resolved configuration and
-data/batch-plan/base/implementation fingerprints. The checksum manifest is published
+data/batch-plan/base/implementation fingerprints, plus parameter EMA state when
+enabled. The checksum manifest is published
 only after all state is complete. Successful update count, gradient accumulation
 and world size locate the global resume batch, including short final batches and
 epoch transitions. Without this option, `stepNNNNNN/` weights are still saved, but

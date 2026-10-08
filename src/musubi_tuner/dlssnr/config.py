@@ -11,9 +11,12 @@ from pathlib import Path
 import toml
 
 from musubi_tuner.dlssnr.controls import CONTROL_DEFAULTS, resolve_fixed_controls
+from musubi_tuner.dlssnr.control_randomization import encode_control_point, validate_control_settings
 from musubi_tuner.dlssnr.filenames import validate_filename
 from musubi_tuner.dlssnr.geometry import resolve_geometry
 from musubi_tuner.dlssnr.profiles import PROFILE_ID
+from musubi_tuner.dlssnr.temporal import AUGMENTATION_SEED_POLICY
+from musubi_tuner.dlssnr.synthetic_temporal import validate_max_shift
 
 
 def _integer(value, name: str, minimum: int = 1) -> None:
@@ -24,6 +27,47 @@ def _integer(value, name: str, minimum: int = 1) -> None:
 def _number(value, name: str, *, positive: bool = False) -> None:
     if type(value) not in (int, float) or not math.isfinite(value) or value < 0 or (positive and value == 0):
         raise ValueError(f"{name} must be finite and {'positive' if positive else 'nonnegative'}")
+
+
+def _dino_settings(args):
+    _number(args.dino_loss_weight, "--dino_loss_weight")
+    defaults = {"model_type": "small", "layer": -4, "resize": 224, "use_gram": True, "use_norm": True}
+    supplied = {name: getattr(args, f"dino_loss_{name}") for name in defaults}
+    if not args.dino_loss_weight:
+        if any(value is not None for value in supplied.values()):
+            raise ValueError("DINO options require positive --dino_loss_weight")
+        return None
+    settings = {name: defaults[name] if value is None else value for name, value in supplied.items()}
+    if settings["model_type"] not in ("small", "small_plus", "base", "large"):
+        raise ValueError("unknown --dino_loss_model_type")
+    if type(settings["layer"]) is not int:
+        raise ValueError("--dino_loss_layer must be an integer")
+    resize = settings["resize"]
+    if type(resize) is not int or not 16 <= resize <= 1024 or resize % 16:
+        raise ValueError("--dino_loss_resize must be a multiple of 16 between 16 and 1024")
+    for name in ("use_gram", "use_norm"):
+        if type(settings[name]) is not bool:
+            raise ValueError(f"--dino_loss_{name} must be a boolean")
+    return settings
+
+
+def _control_settings(args, data):
+    defaults = {"residual_sigma": 6.0, "anchor_probability": 0.25, "corner_probability": 0.25}
+    supplied = {name: getattr(args, f"control_{name}", None) for name in defaults}
+    enabled = getattr(args, "control_randomization", False)
+    if type(enabled) is not bool:
+        raise ValueError("control_randomization must be a boolean")
+    if not enabled:
+        if any(value is not None for value in supplied.values()):
+            raise ValueError("control-specific options require --control_randomization")
+        return None
+    settings = {name: default if supplied[name] is None else supplied[name] for name, default in defaults.items()}
+    validate_control_settings(settings)
+    for entry in data.get("datasets", [data]):
+        if "fixed_controls" not in entry:
+            raise ValueError("control_randomization requires nr_controls_mode=fixed for every training dataset")
+        encode_control_point(entry["fixed_controls"], (1, 1))
+    return {"schema": "dlssnr_control_randomization_v1", "seed_policy": AUGMENTATION_SEED_POLICY, **settings}
 
 
 def validate_lora(table: dict) -> None:
@@ -74,17 +118,35 @@ def load_dataset_config(path: str | Path) -> dict:
         )
     general = raw.get("general", {})
     datasets = raw.get("datasets")
-    settings = {"resolution", "batch_size", "enable_bucket", "bucket_no_upscale", "num_repeats", "caption_extension"}
+    settings = {
+        "resolution",
+        "batch_size",
+        "enable_bucket",
+        "bucket_no_upscale",
+        "num_repeats",
+        "caption_extension",
+        "synthetic_temporal",
+        "synthetic_max_shift_px",
+    }
     if not isinstance(general, dict) or (unknown := set(general) - settings):
         raise ValueError(f"dataset [general] supports only {sorted(settings)}")
     if not isinstance(datasets, list) or not datasets or any(not isinstance(item, dict) for item in datasets):
         raise ValueError("DLSS-NR requires at least one [[datasets]] entry")
+    if "synthetic_temporal" in general and type(general["synthetic_temporal"]) is not bool:
+        raise ValueError("general.synthetic_temporal must be a boolean")
+    if "synthetic_max_shift_px" in general:
+        validate_max_shift(general["synthetic_max_shift_px"])
     paths = {"train_manifest", "validation_manifest", "sequence_manifest", "image_directory", "control_directory"}
     entries = []
     for dataset in datasets:
         if unknown := set(dataset) - paths - settings - set(CONTROL_DEFAULTS) - {"nr_controls_mode", "cache_directory"}:
             raise ValueError(f"unsupported dataset fields: {sorted(unknown)}; training settings belong on the command line")
-        entries.append(_resolve_dataset_entry({**general, **dataset}, path.parent, paths))
+        effective = {**general, **dataset}
+        if dataset.get("synthetic_temporal") is False and "synthetic_max_shift_px" not in dataset:
+            effective.pop("synthetic_max_shift_px", None)
+        entries.append(_resolve_dataset_entry(effective, path.parent, paths))
+    if "synthetic_max_shift_px" in general and not any(entry.get("synthetic_temporal") for entry in entries):
+        raise ValueError("general.synthetic_max_shift_px requires an enabled synthetic_temporal dataset")
     if len(entries) == 1:
         return entries[0]
     return {"datasets": entries, "batch_size": entries[0]["batch_size"]}
@@ -105,6 +167,15 @@ def _resolve_dataset_entry(effective, base_directory, paths):
     if directory != bool(effective.get("control_directory")):
         raise ValueError("directory pairs require both image_directory and control_directory")
     data = {"bucket_size": resolution, "batch_size": batch_size}
+    synthetic = effective.get("synthetic_temporal", False)
+    if type(synthetic) is not bool:
+        raise ValueError("dataset.synthetic_temporal must be a boolean")
+    if synthetic:
+        shift = effective.get("synthetic_max_shift_px", 0.5)
+        validate_max_shift(shift)
+        data["synthetic_temporal"] = {"schema": "dlssnr_synthetic_temporal_v1", "max_shift_px": float(shift)}
+    elif "synthetic_max_shift_px" in effective:
+        raise ValueError("synthetic_max_shift_px requires synthetic_temporal=true")
     for name in ("enable_bucket", "bucket_no_upscale"):
         value = effective.get(name, False)
         if type(value) is not bool:
@@ -150,7 +221,10 @@ def _key_value_args(values, name, *, allow_strings=False):
 
 def build_train_config(args, *, lora=False) -> dict:
     data = load_dataset_config(args.dataset_config)
+    control_settings = _control_settings(args, data)
     mode = args.training_mode
+    if mode != "temporal" and any(entry.get("synthetic_temporal") for entry in data.get("datasets", [data])):
+        raise ValueError("synthetic_temporal requires temporal training mode")
     lengths = (args.sequence_length, args.burn_in, args.tbptt_length)
     if mode == "temporal" and any(value is None for value in lengths):
         raise ValueError("temporal mode requires --sequence_length, --burn_in and --tbptt_length")
@@ -158,6 +232,7 @@ def build_train_config(args, *, lora=False) -> dict:
     training = {
         "mode": mode,
         "seed": args.seed,
+        "shuffle_dataset": args.shuffle_dataset,
         "device": args.device,
         "development_smoke": args.development_smoke,
         "batch_size": data.pop("batch_size"),
@@ -169,6 +244,11 @@ def build_train_config(args, *, lora=False) -> dict:
         "gradient_checkpointing": args.gradient_checkpointing,
         "max_overflow_retries": args.max_overflow_retries,
     }
+    if args.ema_decay is not None:
+        _number(args.ema_decay, "--ema_decay", positive=True)
+        if args.ema_decay >= 1:
+            raise ValueError("--ema_decay must be strictly between 0 and 1")
+        training["ema_decay"] = args.ema_decay
     for field in ("batch_size", "sequence_length", "tbptt_length", "gradient_accumulation_steps", "max_train_steps"):
         _integer(training[field], f"--{field}")
     _integer(training["burn_in"], "--burn_in", 0)
@@ -180,7 +260,7 @@ def build_train_config(args, *, lora=False) -> dict:
         if args.loss_temporal != 0:
             raise ValueError("single-frame mode requires --loss_temporal=0")
     elif mode == "temporal":
-        if any("image_directory" in entry for entry in data.get("datasets", [data])):
+        if any("image_directory" in entry and not entry.get("synthetic_temporal") for entry in data.get("datasets", [data])):
             raise ValueError("temporal training requires a manifest with explicit frames, motion and validity masks")
         if lengths[0] != lengths[1] + lengths[2] or lengths[1] < 1:
             raise ValueError("sequence_length must equal burn_in + tbptt_length, with both at least 1")
@@ -215,6 +295,8 @@ def build_train_config(args, *, lora=False) -> dict:
         "attention_backend": args.attention_backend,
         "attention_scope": args.attention_scope,
     }
+    if args.native_weight_qat:
+        model["native_weight_qat"] = True
     for name in ("model_dir", "forward_validation_report"):
         value = getattr(args, name)
         if value is not None:
@@ -250,16 +332,39 @@ def build_train_config(args, *, lora=False) -> dict:
         _number(value, f"--loss_{name}")
     if not any(loss.values()):
         raise ValueError("at least one loss weight must be positive")
+    _number(args.base_anchor_weight, "--base_anchor_weight")
+    if args.base_anchor_weight:
+        loss["base_anchor"] = args.base_anchor_weight
+    dino_settings = _dino_settings(args)
+    if dino_settings is not None:
+        loss["dino"] = args.dino_loss_weight
+    loss_profile = None
+    if args.loss_profile == "frequency_split":
+        sigma = 6.0 if args.loss_lowpass_sigma is None else args.loss_lowpass_sigma
+        _number(sigma, "--loss_lowpass_sigma", positive=True)
+        if sigma > 32:
+            raise ValueError("--loss_lowpass_sigma must be <= 32")
+        loss_profile = {"name": "frequency_split", "lowpass_sigma": sigma}
+    elif args.loss_profile != "pixel":
+        raise ValueError("unknown --loss_profile")
+    elif args.loss_lowpass_sigma is not None:
+        raise ValueError("--loss_lowpass_sigma requires --loss_profile frequency_split")
     evaluation = {
         "sample_every_n_steps": args.sample_every_n_steps,
         "min_sequence_frames": args.min_sequence_frames,
         "compare_baseline": args.compare_baseline,
     }
+    if args.eval_native:
+        evaluation["native"] = True
+    if args.eval_detail_diagnostics:
+        evaluation["detail_diagnostics"] = True
+    if args.eval_content_preservation:
+        evaluation["content_preservation"] = True
     if "sequence_manifest" in data:
         evaluation["sequence_manifest"] = data.pop("sequence_manifest")
     _integer(args.sample_every_n_steps, "--sample_every_n_steps", 0)
     _integer(args.min_sequence_frames, "--min_sequence_frames")
-    if args.sample_every_n_steps and not (
+    if (args.sample_every_n_steps or args.eval_native or args.eval_detail_diagnostics or args.eval_content_preservation) and not (
         any(entry.get("validation_manifest") or entry.get("sequence_manifest") for entry in data.get("datasets", [data]))
         or evaluation.get("sequence_manifest")
     ):
@@ -288,6 +393,12 @@ def build_train_config(args, *, lora=False) -> dict:
         "evaluation": evaluation,
         "output": output,
     }
+    if loss_profile is not None:
+        config["loss_profile"] = loss_profile
+    if dino_settings is not None:
+        config["dino_loss"] = dino_settings
+    if control_settings is not None:
+        config["control_randomization"] = control_settings
     if lora:
         network = _key_value_args(args.network_args, "--network_args", allow_strings=True)
         if unknown := set(network) - {"profile", "qkv_mode", "rank_by_width", "alpha_by_width"}:
@@ -300,6 +411,8 @@ def build_train_config(args, *, lora=False) -> dict:
             raise ValueError("multiscale uses rank_by_width/alpha_by_width, not --network_dim/--network_alpha")
         network["dropout"] = args.network_dropout
         validate_lora(network)
+        if args.native_weight_qat and network["dropout"]:
+            raise ValueError("native weight QAT requires --network_dropout 0; split dropout is not a fused export weight")
         config["lora"] = network
     else:
         groups = {
