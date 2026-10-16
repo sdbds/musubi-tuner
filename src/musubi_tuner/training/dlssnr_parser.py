@@ -43,8 +43,9 @@ def setup_parser(*, lora=False) -> argparse.ArgumentParser:
     parser.add_argument("--fp8_scaled", action="store_true", help="Use block64/channel scaled storage; requires --fp8_base.")
     parser.add_argument(
         "--native_weight_qat",
-        action="store_true",
-        help="Fake-quantize effective weights exactly as native export; keep FP32 masters.",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Fake-quantize effective weights exactly as native export; keep FP32 masters (enabled by default).",
     )
     backends = parser.add_mutually_exclusive_group()
     backends.add_argument(
@@ -63,12 +64,14 @@ def setup_parser(*, lora=False) -> argparse.ArgumentParser:
     )
     parser.add_argument("--max_train_steps", type=int, default=1000, help="Number of optimizer updates.")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
-    parser.add_argument(
+    ema = parser.add_mutually_exclusive_group()
+    ema.add_argument(
         "--ema_decay",
         type=float,
-        default=None,
-        help="Opt into FP32 trainable-parameter EMA with decay strictly between 0 and 1; save and evaluate it separately.",
+        default=0.99,
+        help="FP32 trainable-parameter EMA decay, strictly between 0 and 1 (default: 0.99); saved and evaluated separately.",
     )
+    ema.add_argument("--no-ema", dest="ema_decay", action="store_const", const=None, help="Disable parameter EMA.")
     parser.add_argument("--gradient_checkpointing", action="store_true", help="Recompute NR blocks during backward to save memory.")
     parser.add_argument("--sequence_length", type=int, default=None, help="Temporal mode requires all three clip-length arguments.")
     parser.add_argument("--burn_in", type=int, default=None)
@@ -173,6 +176,6 @@ def setup_parser(*, lora=False) -> argparse.ArgumentParser:
             help="NR adapter options: profile=vit_only|multiscale, qkv_mode, rank_by_width and alpha_by_width.",
         )
     else:
-        for name in ("prior_lr_multiplier", "scale_lr_multiplier", "temporal_blend_lr_multiplier"):
-            parser.add_argument(f"--{name}", type=float, default=0.1)
+        for name, default in (("prior_lr_multiplier", 1.0), ("scale_lr_multiplier", 1.0), ("temporal_blend_lr_multiplier", 0.1)):
+            parser.add_argument(f"--{name}", type=float, default=default)
     return parser

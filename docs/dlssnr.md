@@ -185,11 +185,12 @@ changes. To enable shuffling for an older run, start a new run from saved canoni
 weights (merge an existing LoRA first) rather than reusing incompatible optimizer
 state. Use the same PyTorch version for exact continuation.
 
-### Optional Parameter EMA
+### Parameter EMA
 
-EMA is disabled by default. Both training entry points accept `--ema_decay 0.999`
-to enable it; the supplied decay must be finite and strictly between zero and one.
-Omitting the option allocates no EMA weights and retains the existing products.
+EMA is enabled by default with decay `0.99` in both training entry points.
+Use `--ema_decay` to choose another finite value strictly between zero and one,
+or `--no-ema` to disable it without allocating EMA weights or publishing EMA
+products. These two options are mutually exclusive.
 
 The shadow starts from the initial trainable FP32 parameters and follows
 `shadow = decay * shadow + (1 - decay) * parameter` after each successful optimizer
@@ -203,7 +204,7 @@ For LoRA, this averages the trainable adapter factors. In general,
 `EMA(B) @ EMA(A)` is not `EMA(B @ A)`: this is **parameter EMA**, not an exact
 average of merged full-model weights or predictions. Averaging can also move a
 QAT-trained weight back across a native quantization boundary. Neither EMA nor
-the example decay is a claim of better DLL output.
+the default decay is a claim of better DLL output.
 
 The raw optimizer weights stay in `final/` and each periodic checkpoint directory.
 An additional `ema/` subdirectory contains a normal canonical model or LoRA
@@ -667,7 +668,8 @@ does not prove compatibility of updated weights.
 
 ### Export-Aligned Weight QAT
 
-`--native_weight_qat` opts full or LoRA training into native weight publication.
+Native weight publication is enabled by default in full and LoRA training.
+`--native_weight_qat` explicitly enables it; `--no-native_weight_qat` disables it.
 FP32 master weights and optimizer state are retained. Each projection uses the
 storage type declared by the canonical profile: direct FP32 to E4M3FN or FP16,
 round-to-nearest/ties-to-even, without a learned scale or silent clipping. LoRA
@@ -725,13 +727,20 @@ controls requires a new comparison. They remain surrogate measurements and recor
 `native_equivalent=false`; game/DLL output acceptance is separate. High flip rates
 or lower target MAE alone do not establish better appearance or temporal stability.
 
-QAT is off by default. Old runtime-v1 artifacts retain their behavior; enabled QAT
-is bound to runtime-v2 metadata in canonical weight headers and LoRA files, and is
+Old runtime-v1 artifacts retain their behavior; enabled QAT is bound to runtime-v2
+metadata in canonical weight headers and LoRA files, and is
 restored on inference/merge. `--native_weight_qat` or `--no-native_weight_qat` can
 explicitly override publication in the image/video generators. Saved canonical
 tensors remain the unrounded FP32 masters for continued training and DLL export.
-Resume requires the same QAT setting and implementation identity; start a new run
-from old weights rather than trying to resume pre-change optimizer state.
+Resume requires the same QAT setting and implementation identity. To resume a run
+that used the old defaults, explicitly retain `--no-native_weight_qat --no-ema`
+and, for full training, `--prior_lr_multiplier 0.1 --scale_lr_multiplier 0.1`,
+along with its other original settings. To change these policies, start a new run
+from saved weights rather than reusing incompatible optimizer state.
+
+E4M3 activation fake quantization was already enabled and remains active even with
+weight QAT disabled. These training defaults do not enable `--eval_native` or
+retroactively change the runtime policy stored in existing models and adapters.
 
 On 2026-10-07, the real canonical weights completed a synthetic 832 x 1248,
 batch-size-1 CUDA smoke on an RTX 4090 with PyTorch 2.13.0+cu130. Both runs used
@@ -876,22 +885,74 @@ establish capability or quality acceptance.
 
 ## DLL Unpacking and Repacking
 
-Unpack a user-supplied original DLL directly into the existing canonical training
-format, without depending on MLX or changing the training network:
+The existing unpack/pack scripts support HT canonical training weights and CC
+lossless packed records. By default, unpacking selects every supported resource
+present in the DLL:
 
 ```bash
-python dlssnr_unpack_model.py --source_dll /path/to/original/nvngx_dlssnr.dll --output_dir models/canonical_dlssnr
+python dlssnr_unpack_model.py --source_dll /path/to/original/nvngx_dlssnr.dll --output_dir models/dlssnr
 ```
 
-The entry point also accepts the conversion scripts' usual `--input` / `--output`
-aliases. It currently supports only the audited DLSS-NR 310.8.0 `WEIGHTS_HT`
-resource, with SHA256
-`836f445d06ecd2e59bb9f17b84b91c143396fd76ccda1c9dc7fe81d5edd548f4`.
-Other resources are rejected; filenames are not used to infer versions. The source
-DLL is neither executed nor modified, and the output model directory must be new.
-Unpacking always verifies the canonical byte round-trip and saves the provenance
-files required for training. Existing model directories converted from the same
-source by `dlssnr_convert_model.py` remain supported.
+For the audited 310.9.16 DLL containing both resources, this produces:
+
+```text
+models/dlssnr/
+  models.json
+  HT/
+    model.safetensors
+    model_config.json
+    conversion_report.json
+    ...
+  CC/
+    manifest.json
+    records/
+      block0.layer0.layer.bin
+      ...
+      block30.layer0.blend_scale.bin
+```
+
+`HT/` retains the existing canonical FP32 format and training provenance files.
+`CC/` contains 77 raw records across 31 blocks, totaling 113,887,490 payload bytes.
+CC is **not a trainable canonical checkpoint**. Its serialized dtype and dimensions
+describe the packed container, not homogeneous FP8/FP16 logical tensors. Do not
+reinterpret or scale entire record files as one numeric dtype.
+
+If the DLL contains only HT, unpacking keeps the original single-directory behavior:
+`model.safetensors` is written directly under `--output_dir`. Explicit selection
+also writes directly to the requested output directory:
+
+```bash
+python dlssnr_unpack_model.py --source_dll /path/to/original/nvngx_dlssnr.dll --weights HT --output_dir models/canonical_dlssnr
+python dlssnr_unpack_model.py --source_dll /path/to/original/nvngx_dlssnr.dll --weights CC --output_dir models/cc_records
+```
+
+The supported resource identities are:
+
+- HT: `WEIGHTS_HT`, SHA256 `836f445d06ecd2e59bb9f17b84b91c143396fd76ccda1c9dc7fe81d5edd548f4`. Identical in the audited 310.8.0 and 310.9.16 DLLs.
+- CC: `WEIGHTS_CC_SMALL_FP8`, SHA256 `f743e8eb320f42bc9bdc992ee2bf51f7bb7c8688ced4ecf5ce6807ec4eef7962`. Audited in 310.9.16.
+
+Selection uses PE resource names and content hashes, not filenames or fixed DLL
+offsets. `--input` / `--output` remain aliases. The source DLL is neither executed
+nor modified, and the output directory must be new. A failed multi-model unpack
+does not publish a partial output directory. Existing HT directories converted
+by `dlssnr_convert_model.py` remain supported.
+
+Repacking infers HT or CC from the selected directory. To select a child of a
+multi-model output, pass `--weights`; omitting it at the bundle root is an error:
+
+```bash
+python dlssnr_pack_model.py --template_dll /path/to/original/nvngx_dlssnr.dll --model_dir models/dlssnr --weights CC --output_dll output/cc/nvngx_dlssnr.dll
+python dlssnr_pack_model.py --template_dll /path/to/original/nvngx_dlssnr.dll --model_dir models/dlssnr/HT --output_dll output/ht/nvngx_dlssnr.dll
+```
+
+For CC, edit only the files in `records/`, keeping each file's size unchanged.
+Keep `manifest.json` unchanged: it records the original payload hashes, names,
+sizes and serialized metadata. Repacking replaces only CC payload bytes and
+preserves HT, resource headers, PE data and overlay bytes. The report lists changed
+records and byte counts. An unedited extraction rebuilds the whole DLL identically.
+Same-size edits are not validated for numerical meaning, image quality or native
+execution. CC rejects nondefault mix/strength settings and LoRA options;
+`--record_dir` is an alias for `--model_dir`.
 
 After full training, or after merging LoRA separately, repack the complete model directory:
 
@@ -913,7 +974,7 @@ identity and FP8 quantized-base checks remain in place; arbitrary safetensors fi
 are not treated as compatible adapters. The temporary merge directory is removed
 automatically, and neither the original base nor the adapter is modified.
 
-The three controls are independent. They apply in this order: LoRA merge, mix,
+For HT, the three controls are independent. They apply in this order: LoRA merge, mix,
 strength, then native quantization.
 
 | Option | Default | Meaning |
@@ -954,11 +1015,13 @@ errors. The CLI warns if every requested update rounds back to the original weig
 These checks do not certify native deployment. The tool does not repair the PE
 checksum, re-sign the DLL or bypass load checks; a loader may reject a modified
 DLL. Reports always retain `native_export_validated=false`. In-game loading and
-image quality require separate acceptance checks. Do not use an exported DLL as
-the next repacking template. Keep the original DLL, and continue training from
-canonical model directories.
+image quality require separate acceptance checks. Keep the original DLL, and
+continue HT training from canonical model directories. The selected template
+resource must still match its audited original; previously modified *other*
+resources are preserved. An already modified CC resource cannot serve as a new
+CC template, and an already modified HT resource cannot serve as a new HT template.
 
-The public unpack command deliberately rejects already modified DLLs. Export
+The public unpack command deliberately rejects modified selected resources. Export
 verification re-extracts their payloads with the record decoder instead of relaxing
 the audited-template check. The opt-in real-DLL tests cover original unpacking,
 QAT master export, decoded-weight bit equality and surrogate forward equality after
@@ -968,6 +1031,13 @@ re-extraction. In PowerShell, using this repository's Python environment:
 $env:PYTHONPATH = "src"
 $env:DLSSNR_DLL_PATH = "C:\path\to\original\nvngx_dlssnr.dll"
 python -m pytest -q tests/test_dlssnr_dll_io.py
+```
+
+The combined HT/CC CLI roundtrip and isolated CC-payload edit test is also opt-in:
+
+```powershell
+$env:DLSSNR_CC_DLL_PATH = "C:\path\to\310.9.16\nvngx_dlssnr.dll"
+python -m pytest -q tests/test_dlssnr_cc_dll.py
 ```
 
 The tests write only temporary model directories and DLL copies, never the original.
@@ -1040,7 +1110,8 @@ Common arguments:
 | `--max_train_steps` / `--gradient_accumulation_steps` / `--seed` | Update count, gradient accumulation and random seed. |
 | `--shuffle_dataset` / `--no-shuffle_dataset` | Seeded epoch shuffling of bucket samples and batch order is enabled by default; no argument is required. The negative flag optionally selects legacy fixed order. |
 | `--max_grad_norm` | Clips gradients at the accumulated update boundary. Default `0` disables clipping. |
-| `--ema_decay` | Optional FP32 trainable-parameter EMA, for example `0.999`; omitted means disabled. Raw and EMA products/evaluation remain separate. |
+| `--ema_decay` / `--no-ema` | FP32 trainable-parameter EMA defaults to `0.99`; `--no-ema` disables it. Raw and EMA products/evaluation remain separate. |
+| `--native_weight_qat` / `--no-native_weight_qat` | Export-aligned weight QAT is enabled by default. The negative flag disables weight QAT, not the existing E4M3 activation publications. |
 | `--gradient_checkpointing` | Recomputes activations to reduce memory, preserving the default numerical profile. Disabled by default. |
 | `--numerics_profile train_experimental` / `--mixed_precision` | Explicit experimental mode. CUDA precision accepts `no`, `fp16` or `bf16`; master weights remain FP32. |
 | `--fp8_base` / `--fp8_scaled` | LoRA-only frozen-base storage quantization. Scaled requires base, and both require experimental mode. |
@@ -1049,7 +1120,7 @@ Common arguments:
 | `--loss_profile` / `--loss_lowpass_sigma` | `pixel` is the unchanged default. Optional `frequency_split` uses low-frequency target matching and input edges; sigma defaults to `6` in transformed pixels. |
 | `--control_randomization` | Opt-in tone/structure sampling with detached base-relative targets; requires positive fixed reference controls in every training dataset. |
 | `--control_residual_sigma` / `--control_anchor_probability` / `--control_corner_probability` | Target-band sigma and sampling probabilities; enabled defaults are `6`, `0.25`, `0.25`. These options require control randomization. |
-| `--prior_lr_multiplier` / `--scale_lr_multiplier` / `--temporal_blend_lr_multiplier` | Full-training parameter-group multipliers, default `0.1`. The LoRA entry point rejects these arguments. |
+| `--prior_lr_multiplier` / `--scale_lr_multiplier` / `--temporal_blend_lr_multiplier` | Full-training parameter-group multipliers default to `1`, `1` and `0.1`, respectively. The LoRA entry point rejects these arguments. |
 | `--sample_every_n_steps` / `--min_sequence_frames` | Validation interval and minimum temporal evaluation frame count. A nonzero interval requires validation manifests in the dataset TOML. |
 | `--no-compare_baseline` | Disables the initial-base comparison, which is enabled by default. |
 | `--save_state` / `--save_every_n_steps` / `--resume` | Training-state saves, save interval and resume checkpoint. Without `--save_state`, only weights are saved. |

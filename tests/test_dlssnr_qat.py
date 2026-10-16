@@ -79,19 +79,20 @@ def test_runtime_assigns_native_storage_without_changing_masters():
     torch.testing.assert_close(model.state_dict(), before, rtol=0, atol=0)
 
 
-def test_qat_cli_is_opt_in_and_requires_zero_lora_dropout(tmp_path):
+def test_qat_cli_is_default_on_and_requires_zero_lora_dropout(tmp_path):
     from musubi_tuner.dlssnr.config import build_train_config
     from musubi_tuner.dlssnr.runtime import runtime_policy
     from test_dlssnr_config import make_args
 
     normal = runtime_policy(build_train_config(make_args(tmp_path)))
-    assert normal["schema"] == "dlssnr_runtime_v1"
-    assert "native_weight_qat" not in normal
+    assert normal == qat_policy()
     args = make_args(tmp_path, ["--native_weight_qat"])
     assert runtime_policy(build_train_config(args)) == qat_policy()
     args = make_args(tmp_path, ["--native_weight_qat", "--network_dropout", "0.2"], lora=True)
     with pytest.raises(ValueError, match="dropout"):
         build_train_config(args, lora=True)
+    args = make_args(tmp_path, ["--no-native_weight_qat", "--network_dropout", "0.2"], lora=True)
+    assert build_train_config(args, lora=True)["lora"]["dropout"] == 0.2
 
 
 def test_qat_artifact_preserves_master_weights_and_restores_publication(tmp_path, monkeypatch):

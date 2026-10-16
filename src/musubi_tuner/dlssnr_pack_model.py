@@ -1,4 +1,4 @@
-"""Quantize a full checkpoint or checked LoRA merge into a copy of an original DLL."""
+"""Write selected HT canonical weights or CC packed records into a copy of an original DLL."""
 
 from __future__ import annotations
 
@@ -6,30 +6,41 @@ import argparse
 import json
 import logging
 
-from musubi_tuner.dlssnr.dll_io import pack_dll
+from musubi_tuner.dlssnr.dll_models import pack_selected_model
 
 
 def setup_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Pack DLSS-NR canonical weights into a new DLL; native loading is not certified.")
-    parser.add_argument("--template_dll", required=True, help="Original audited DLL; never modified")
+    parser = argparse.ArgumentParser(
+        description="Pack selected DLSS-NR HT or CC weights into a new DLL; native loading is not certified."
+    )
+    parser.add_argument("--template_dll", required=True, help="DLL with the original audited selected resource; never modified")
     parser.add_argument(
-        "--model_dir", "--input", required=True, help="Full canonical checkpoint, or the matching base for --merge_lora"
+        "--model_dir",
+        "--record_dir",
+        "--input",
+        required=True,
+        help="HT canonical checkpoint, CC record directory, or multi-model output with --weights",
+    )
+    parser.add_argument(
+        "--weights", choices=("HT", "CC"), help="Select a bundle child; otherwise inferred from the model directory"
     )
     parser.add_argument("--output_dll", "--output", required=True, help="New DLL path; also writes <path>.report.json")
     parser.add_argument(
-        "--mix", type=float, default=1.0, help="Template/trained interpolation in [0,1]; 0=template, 1=trained (default)"
+        "--mix", type=float, default=1.0, help="HT only: template/trained interpolation in [0,1]; 0=template, 1=trained (default)"
     )
     parser.add_argument(
         "--strength",
         "--multiplier",
         type=float,
         default=1.0,
-        help="Scale ALL numeric weights after mixing (default 1); not a visual effect strength. Opaque bytes are unchanged.",
+        help="HT only: scale ALL numeric weights after mixing (default 1); not visual effect strength. Opaque bytes are unchanged.",
     )
     parser.add_argument(
-        "--merge_lora", "--lora_weight", help="DLSS-NR adapter.safetensors to merge into --model_dir before packing"
+        "--merge_lora", "--lora_weight", help="HT only: DLSS-NR adapter.safetensors to merge into --model_dir before packing"
     )
-    parser.add_argument("--lora_multiplier", type=float, default=1.0, help="Scale only the LoRA delta before mixing (default 1)")
+    parser.add_argument(
+        "--lora_multiplier", type=float, default=1.0, help="HT only: scale the LoRA delta before mixing (default 1)"
+    )
     return parser
 
 
@@ -38,10 +49,11 @@ def main() -> None:
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     try:
-        report = pack_dll(
+        report = pack_selected_model(
             args.template_dll,
             args.model_dir,
             args.output_dll,
+            weights=args.weights,
             mix=args.mix,
             strength=args.strength,
             merge_lora=args.merge_lora,
@@ -49,10 +61,19 @@ def main() -> None:
         )
     except (OSError, ValueError) as error:
         parser.error(str(error))
-    summary = {key: report[key] for key in ("output_dll", "output_sha256", "whole_dll_byte_identical", "totals")}
+    keys = (
+        "resource_name",
+        "output_dll",
+        "output_sha256",
+        "whole_dll_byte_identical",
+        "totals",
+        "changed_records",
+        "changed_bytes",
+    )
+    summary = {key: report[key] for key in keys if key in report}
     summary["report"] = str(args.output_dll) + ".report.json"
     print(json.dumps(summary, indent=2))
-    if report["totals"]["blended_changed_values"] and not report["totals"]["exported_changed_values"]:
+    if "totals" in report and report["totals"]["blended_changed_values"] and not report["totals"]["exported_changed_values"]:
         logging.warning("All requested changes rounded back to the template weights; the DLL is unchanged.")
     logging.warning("Native loading/image quality is unverified; no PE checksum or signature repair is performed.")
 

@@ -21,7 +21,7 @@ def reset_accelerator():
     AcceleratorState._reset_state(reset_partial_state=True)
 
 
-def test_runtime_defaults_identify_the_unchanged_baseline(tmp_path):
+def test_training_runtime_defaults_keep_fp32_compute_and_enable_weight_qat(tmp_path):
     from musubi_tuner.dlssnr.runtime import runtime_policy
 
     policy = runtime_policy(build_train_config(config_args(tmp_path)))
@@ -30,6 +30,7 @@ def test_runtime_defaults_identify_the_unchanged_baseline(tmp_path):
     assert policy["attention_backend"] == "native"
     assert not policy["gradient_checkpointing"]
     assert not policy["fp8_base"]
+    assert policy["native_weight_qat"] is True
 
 
 @pytest.mark.parametrize("precision", ["fp16", "bf16"])
@@ -63,7 +64,11 @@ def test_projection_executes_low_precision_but_keeps_master_and_output_fp32(tmp_
     from musubi_tuner.dlssnr.runtime import configure_model_runtime, runtime_policy
 
     model = SmallNR().cuda()
-    config = build_train_config(config_args(tmp_path, ["--numerics_profile", "train_experimental", "--mixed_precision", precision]))
+    config = build_train_config(
+        config_args(
+            tmp_path, ["--numerics_profile", "train_experimental", "--mixed_precision", precision, "--no-native_weight_qat"]
+        )
+    )
     configure_model_runtime(model, runtime_policy(config), training=True)
     module = model.blocks["0"].input_adapter
     source = torch.linspace(0.13, 0.93, 16 * 5 * 5, device="cuda").reshape(1, 16, 5, 5)

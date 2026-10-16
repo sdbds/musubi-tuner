@@ -26,6 +26,47 @@ def make_args(tmp_path, options=(), *, lora=False, dataset=None):
     )
 
 
+@pytest.mark.parametrize("lora", [False, True])
+def test_training_defaults_enable_ema_and_native_weights_without_changing_eval_mode(tmp_path, lora):
+    from musubi_tuner.dlssnr.runtime import numerics_metadata, runtime_policy
+
+    config = build_train_config(make_args(tmp_path, lora=lora), lora=lora)
+    assert config["training"]["ema_decay"] == 0.99
+    assert config["model"]["native_weight_qat"] is True
+    assert not config["evaluation"].get("native", False)
+    policy = runtime_policy(config)
+    assert policy["native_weight_qat"] is True
+    assert numerics_metadata(policy)["quantization"] == "half_then_e4m3_activation_fake_quant"
+    if not lora:
+        assert config["parameter_groups"] == {
+            "prior_lr_multiplier": 1.0,
+            "scale_lr_multiplier": 1.0,
+            "temporal_blend_lr_multiplier": 0.1,
+        }
+
+
+@pytest.mark.parametrize("lora", [False, True])
+def test_explicit_opt_out_recovers_legacy_training_policy(tmp_path, lora):
+    from musubi_tuner.dlssnr.runtime import default_runtime_policy, runtime_policy
+
+    options = ["--no-ema", "--no-native_weight_qat"]
+    if not lora:
+        options += ["--prior_lr_multiplier", "0.1", "--scale_lr_multiplier", "0.1"]
+    config = build_train_config(make_args(tmp_path, options, lora=lora), lora=lora)
+    assert "ema_decay" not in config["training"]
+    assert "native_weight_qat" not in config["model"]
+    assert runtime_policy(config) == default_runtime_policy()
+    if not lora:
+        assert set(config["parameter_groups"].values()) == {0.1}
+
+
+def test_ema_disable_cannot_silently_override_an_explicit_decay(tmp_path, capsys):
+    with pytest.raises(SystemExit) as result:
+        make_args(tmp_path, ["--ema_decay", "0.9", "--no-ema"])
+    assert result.value.code == 2
+    assert "not allowed with argument --ema_decay" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize(
     "options",
     [
