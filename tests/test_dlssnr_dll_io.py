@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from safetensors.numpy import load_file, save_file
+from safetensors.numpy import save_file
 
 from test_dlssnr_dll import pe_image, weight_map
 from test_dlssnr_native_quantization import tiny_record
@@ -148,16 +148,23 @@ def test_real_trained_checkpoint_exports_only_expected_payload_changes(real_cano
     from musubi_tuner.dlssnr.checkpoint import unpack_record
     from musubi_tuner.dlssnr.dll import read_weights
     from musubi_tuner.dlssnr.profiles import build_records
+    from musubi_tuner.dlssnr.storage import STORAGE_METADATA_KEY, load_canonical_tensors, storage_policy
 
     io = importlib.import_module("musubi_tuner.dlssnr.dll_io")
     source, base = real_canonical
     model = tmp_path / "trained"
     shutil.copytree(base, model)
-    tensors = load_file(model / "model.safetensors")
+    profile = "dlss_nr_310_8_0"
+    tensors = {name: value.numpy() for name, value in load_canonical_tensors(model / "model.safetensors", profile).items()}
     tensors["blocks.0.ffn.fc1.weight"][0, 0] = np.float32(1.1)
     tensors["blocks.0.ffn.skip_scale"][0] = np.float32(1.0006)
     tensors["blocks.0.attn.temperature"][0] = np.float32(0.3333)
-    save_file(tensors, model / "model.safetensors")
+    storage = storage_policy(profile, "fp32")
+    save_file(tensors, model / "model.safetensors", metadata={STORAGE_METADATA_KEY: json.dumps(storage)})
+    config_path = model / "model_config.json"
+    config = json.loads(config_path.read_text())
+    config["weight_storage"] = storage
+    config_path.write_text(json.dumps(config))
     del tensors
     output = tmp_path / "trained.dll"
     report = io.pack_dll(source, model, output)
@@ -200,11 +207,18 @@ def test_real_lora_is_merged_with_its_own_multiplier_before_export(real_canonica
     adapter_path = tmp_path / "adapter.safetensors"
     save_adapter(network, adapter_path, base_target_sha256(model, network.target_names))
     target = network.target_names[0]
-    expected = (model.state_dict()[target] + 0.125).to(torch.float8_e4m3fn).float().numpy().copy()
+    base_weight = model.state_dict()[target].detach()
+    merged = base_weight + 0.125
+    blended = (base_weight.double() + 0.3 * (merged.double() - base_weight)).float()
+    expected = (blended.double() * 0.7).float().to(torch.float8_e4m3fn).float().numpy().copy()
+    early_rounded = merged.to(torch.float8_e4m3fn).float()
+    wrong_blended = (base_weight.double() + 0.3 * (early_rounded.double() - base_weight)).float()
+    wrong = (wrong_blended.double() * 0.7).float().to(torch.float8_e4m3fn).float().numpy()
+    assert np.any(expected != wrong), "fixture must catch native rounding before mix/strength"
     before = file_sha256(base / "model.safetensors")
     del model, network
     output = tmp_path / "lora.dll"
-    report = io.pack_dll(source, base, output, merge_lora=adapter_path, lora_multiplier=0.5)
+    report = io.pack_dll(source, base, output, merge_lora=adapter_path, lora_multiplier=0.5, mix=0.3, strength=0.7)
     record = next(
         record for record in build_records() if any(view.name == target for region in record.regions for view in region.views)
     )

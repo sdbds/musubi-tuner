@@ -16,8 +16,9 @@ from musubi_tuner.training.dlssnr_parser import setup_parser
 class SmallNR(torch.nn.Module):
     """Replace expensive NR math, not the real optimizer, state, loader or runner."""
 
-    def __init__(self):
+    def __init__(self, profile="dlss_nr_310_8_0"):
         super().__init__()
+        self.profile = profile
         first, last, head = torch.nn.Module(), torch.nn.Module(), torch.nn.Module()
         first.input_adapter = ChannelLinear(32, 16)
         head.rgb, head.logit = ChannelLinear(3, 32), ChannelLinear(1, 32)
@@ -143,6 +144,8 @@ def make_args(tmp_path, *, lora=False, accum=2, batch=1, mode="single_frame", ev
         "--save_every_n_steps",
         "1",
         "--save_state",
+        "--save_precision",
+        "fp32",
         "--no-ema",
         "--no-native_weight_qat",
     ]
@@ -447,8 +450,8 @@ def test_train_validation_overlap_is_rejected(tmp_path, small_math):
 def test_max_grad_norm_is_applied_to_optimizer_updates(tmp_path, small_math, monkeypatch):
     models, originals = [], []
 
-    def capture_model():
-        model = SmallNR()
+    def capture_model(profile="dlss_nr_310_8_0"):
+        model = SmallNR(profile=profile)
         models.append(model)
         originals.append({name: value.detach().clone() for name, value in model.named_parameters()})
         return model
@@ -469,8 +472,8 @@ def test_max_grad_norm_is_applied_to_optimizer_updates(tmp_path, small_math, mon
 
 
 def test_nonfinite_gradients_never_reach_optimizer_or_checkpoint(tmp_path, small_math, monkeypatch):
-    def corrupt_model():
-        model = SmallNR()
+    def corrupt_model(profile="dlss_nr_310_8_0"):
+        model = SmallNR(profile=profile)
         model.blocks["70"].head.rgb.weight.register_hook(lambda grad: torch.full_like(grad, float("nan")))
         return model
 

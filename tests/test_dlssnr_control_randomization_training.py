@@ -447,8 +447,8 @@ def test_checkpoint_replay_after_control_references_keeps_adapters_enabled():
     from test_dlssnr_checkpointing import _blocks
 
     class CheckpointNR(SmallNR):
-        def __init__(self):
-            super().__init__()
+        def __init__(self, profile="dlss_nr_310_8_0"):
+            super().__init__(profile=profile)
             self.stages = _blocks()
             self.checkpointing = False
 

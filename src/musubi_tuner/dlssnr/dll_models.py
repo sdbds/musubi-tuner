@@ -1,4 +1,4 @@
-"""Select HT canonical weights or CC packed records through the existing DLL CLIs."""
+"""Select HT/CC canonical weights or CC packed records through the DLL CLIs."""
 
 from __future__ import annotations
 
@@ -10,22 +10,31 @@ from musubi_tuner.dlssnr.cc_dll_io import MANIFEST_SCHEMA, pack_cc_dll, unpack_c
 from musubi_tuner.dlssnr.dll import has_weight_resource
 from musubi_tuner.dlssnr.dll_io import _require_new, _sha256, pack_dll, unpack_dll
 from musubi_tuner.dlssnr.identity import file_sha256
+from musubi_tuner.dlssnr.profiles import PROFILE_ID, CC_PROFILE_ID
 
 
 RESOURCES = {"HT": "WEIGHTS_HT", "CC": "WEIGHTS_CC_SMALL_FP8"}
 BUNDLE_SCHEMA = "dlssnr_weight_bundle_v1"
 
 
-def _unpack_selected(source: Path, output: Path, weights: str) -> dict:
-    return unpack_cc_dll(source, output) if weights == "CC" else unpack_dll(source, output)
+def _unpack_selected(source: Path, output: Path, weights: str, cc_format: str = "records", save_precision="native") -> dict:
+    if weights == "CC":
+        if cc_format == "canonical":
+            return unpack_dll(source, output, profile=CC_PROFILE_ID, save_precision=save_precision)
+        return unpack_cc_dll(source, output)
+    return unpack_dll(source, output, save_precision=save_precision)
 
 
-def unpack_models(source_dll: str | Path, output_dir: str | Path, *, weights: str = "all") -> dict:
+def unpack_models(
+    source_dll: str | Path, output_dir: str | Path, *, weights: str = "all", cc_format: str = "records", save_precision="native"
+) -> dict:
     """A single selection keeps the legacy output root; multiple selections get named children."""
     source, output = Path(source_dll), Path(output_dir)
     _require_new(output)
+    if cc_format not in ("records", "canonical"):
+        raise ValueError("cc_format must be records or canonical")
     if weights in RESOURCES:
-        return _unpack_selected(source, output, weights)
+        return _unpack_selected(source, output, weights, cc_format, save_precision)
     if weights != "all":
         raise ValueError("weights must be all, HT or CC")
     data = source.read_bytes()
@@ -35,16 +44,16 @@ def unpack_models(source_dll: str | Path, output_dir: str | Path, *, weights: st
     if not selected:
         raise ValueError("DLL has no supported HT or CC weight resource")
     if len(selected) == 1:
-        return _unpack_selected(source, output, selected[0])
+        return _unpack_selected(source, output, selected[0], cc_format, save_precision)
     output.parent.mkdir(parents=True, exist_ok=True)
     reports = {}
     with tempfile.TemporaryDirectory(prefix=".dlssnr-models-", dir=output.parent) as temporary:
         staged = Path(temporary) / "models"
         staged.mkdir()
         for name in selected:
-            report = _unpack_selected(source, staged / name, name)
+            report = _unpack_selected(source, staged / name, name, cc_format, save_precision)
             report["output_dir"] = str((output / name).resolve())
-            if name == "HT":
+            if name == "HT" or cc_format == "canonical":
                 (staged / name / "conversion_report.json").write_text(
                     json.dumps(report, indent=2, allow_nan=False), encoding="utf-8"
                 )
@@ -56,7 +65,9 @@ def unpack_models(source_dll: str | Path, output_dir: str | Path, *, weights: st
                 name: {
                     "directory": name,
                     "resource_name": RESOURCES[name],
-                    "storage": "canonical_fp32" if name == "HT" else "opaque_packed_records",
+                    "storage": f"canonical_{save_precision}"
+                    if name == "HT" or cc_format == "canonical"
+                    else "opaque_packed_records",
                 }
                 for name in selected
             },
@@ -96,7 +107,9 @@ def _select_directory(model: Path, weights: str | None) -> tuple[Path, str]:
     if (model / "model_config.json").is_file():
         if detected is not None:
             raise ValueError("ambiguous model directory contains both HT canonical and CC record manifests")
-        detected = "HT"
+        from musubi_tuner.dlssnr.artifacts import read_canonical_profile
+
+        detected = {PROFILE_ID: "HT", CC_PROFILE_ID: "CC"}[read_canonical_profile(model)]
     if detected is not None and weights is not None and detected != weights:
         raise ValueError(f"selected resource {weights} does not match the {detected} model directory")
     return model, weights or detected or "HT"
@@ -118,7 +131,7 @@ def pack_selected_model(
     _require_new(output)
     _require_new(Path(str(output) + ".report.json"))
     model, selected = _select_directory(Path(model_dir), weights)
-    if selected == "CC":
+    if selected == "CC" and not (model / "model_config.json").is_file():
         if mix != 1 or strength != 1 or merge_lora is not None or lora_multiplier != 1:
             raise ValueError("CC packed records do not support mix, strength or LoRA options; edit same-size record bytes instead")
         return pack_cc_dll(template_dll, model, output)

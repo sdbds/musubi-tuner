@@ -99,7 +99,7 @@ def test_canonical_export_materializes_fp8_once_and_inference_does_not_requantiz
     model.runtime_policy = _policy(numerics_profile="train_experimental", fp8_base=True, fp8_scaled=True)
     quantize_frozen_base(model, scaled=True)
     folder = tmp_path / "artifact"
-    save_canonical(model, folder)
+    save_canonical(model, folder, save_precision="fp32")
     loaded = infer.load_model(folder, "cpu")
     assert loaded.runtime_policy["fp8_base"] is False
     assert loaded.blocks["31"].ffn.fc1.weight.dtype == torch.float32
@@ -145,7 +145,7 @@ def test_legacy_v1_adapter_still_merges_with_fp32_baseline(tmp_path, monkeypatch
     for name in ("runtime_policy", "base_quantization"):
         metadata.pop(name, None)
     save_file({name: value.clone() for name, value in load_file(path).items()}, str(path), metadata=metadata)
-    lora_dlssnr.merge_to_directory(base, path, tmp_path / "merged")
+    lora_dlssnr.merge_to_directory(base, path, tmp_path / "merged", save_precision="fp32")
     merged = infer.load_model(tmp_path / "merged", "cpu")
     assert merged.runtime_policy == _policy()
     source = torch.rand(1, 16, 5, 7)

@@ -14,7 +14,7 @@ from musubi_tuner.dlssnr.controls import CONTROL_DEFAULTS, resolve_fixed_control
 from musubi_tuner.dlssnr.control_randomization import encode_control_point, validate_control_settings
 from musubi_tuner.dlssnr.filenames import validate_filename
 from musubi_tuner.dlssnr.geometry import resolve_geometry
-from musubi_tuner.dlssnr.profiles import PROFILE_ID
+from musubi_tuner.dlssnr.profiles import PROFILE_ID, PROFILES
 from musubi_tuner.dlssnr.temporal import AUGMENTATION_SEED_POLICY
 from musubi_tuner.dlssnr.synthetic_temporal import validate_max_shift
 
@@ -270,7 +270,7 @@ def build_train_config(args, *, lora=False) -> dict:
         raise ValueError("--training_mode must be single_frame or temporal")
     if args.device not in ("auto", "cpu", "cuda") or args.mixed_precision not in ("no", "fp16", "bf16"):
         raise ValueError("NR requires device auto/cpu/cuda and precision no/fp16/bf16")
-    if args.profile != PROFILE_ID or args.numerics_profile not in ("train_surrogate", "train_experimental"):
+    if args.profile not in ("auto", *PROFILES) or args.numerics_profile not in ("train_surrogate", "train_experimental"):
         raise ValueError("unsupported DLSS-NR profile or numerics")
     if args.mixed_precision != "no":
         if args.numerics_profile != "train_experimental":
@@ -305,6 +305,15 @@ def build_train_config(args, *, lora=False) -> dict:
         raise ValueError("--model_dir is required; random initialization is only allowed in --development_smoke")
     if model.get("forward_validation_report") and not model.get("model_dir"):
         raise ValueError("--forward_validation_report requires --model_dir to identify the source weights")
+    from musubi_tuner.dlssnr.artifacts import read_canonical_profile
+
+    if model.get("model_dir"):
+        profile = read_canonical_profile(model["model_dir"])
+        if args.profile != "auto" and args.profile != profile:
+            raise ValueError(f"requested profile {args.profile} differs from checkpoint profile {profile}")
+    else:
+        profile = PROFILE_ID if args.profile == "auto" else args.profile
+    model["profile"] = profile
 
     optimizer_type = args.optimizer_type or "AdamW"
     optimizer_args = _key_value_args(args.optimizer_args, "--optimizer_args")
@@ -376,6 +385,7 @@ def build_train_config(args, *, lora=False) -> dict:
         "output_name": args.output_name,
         "save_every_n_steps": args.save_every_n_steps,
         "save_state": args.save_state,
+        "save_precision": args.save_precision,
     }
     config = {
         "schema_version": 2,

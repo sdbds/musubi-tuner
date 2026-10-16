@@ -13,7 +13,7 @@ from safetensors.torch import save_file
 
 from musubi_tuner.dlssnr.identity import file_sha256, implementation_identity, json_sha256
 from musubi_tuner.dlssnr.numerics import SURROGATE_FLAGS
-from musubi_tuner.dlssnr.profiles import PROFILE_ID
+from musubi_tuner.dlssnr.profiles import PROFILE_ID, PROFILES, get_profile
 
 
 def write_json(path: str | Path, value):
@@ -45,6 +45,16 @@ def save_tensors(path, tensors, *, metadata=None):
         temporary.unlink(missing_ok=True)
 
 
+def read_canonical_profile(folder) -> str:
+    config_file = Path(folder) / "model_config.json"
+    if not config_file.is_file():
+        raise ValueError("canonical provenance is missing model_config.json; unpack CC with --cc_format canonical")
+    config = json.loads(config_file.read_text(encoding="utf-8"))
+    if not isinstance(config, dict) or config.get("schema") != "dlssnr_canonical_v1" or config.get("profile") not in PROFILES:
+        raise ValueError("canonical schema/profile does not match a supported DLSS-NR model")
+    return config["profile"]
+
+
 def inspect_canonical(folder, *, development_smoke=False, validation_report=None, require_forward_validation=False):
     """Check canonical provenance, and forward evidence only when explicitly requested.
 
@@ -54,12 +64,7 @@ def inspect_canonical(folder, *, development_smoke=False, validation_report=None
     folder = Path(folder).resolve()
     if not (folder / "model.safetensors").is_file():
         raise FileNotFoundError(f"missing canonical weights in {folder}")
-    config_file = folder / "model_config.json"
-    if not config_file.is_file():
-        raise ValueError("canonical provenance is missing model_config.json")
-    config = json.loads(config_file.read_text(encoding="utf-8"))
-    if config.get("schema") != "dlssnr_canonical_v1" or config.get("profile") != PROFILE_ID:
-        raise ValueError("canonical schema/profile does not match DLSS-NR 310.8.0")
+    profile = read_canonical_profile(folder)
     read_artifact_runtime(folder)
     identity = {"model_sha256": file_sha256(folder / "model.safetensors")}
     for name in (
@@ -85,7 +90,7 @@ def inspect_canonical(folder, *, development_smoke=False, validation_report=None
                 f"canonical conversion/provenance is missing {sorted(missing)}; development_smoke is experimental only"
             )
         conversion = json.loads((folder / "conversion_report.json").read_text(encoding="utf-8"))
-        if conversion.get("roundtrip") != "byte_identical" or conversion.get("profile") != PROFILE_ID:
+        if conversion.get("roundtrip") != "byte_identical" or conversion.get("profile") != profile:
             raise ValueError("canonical conversion has not passed source round-trip validation")
     if validation_report is not None or require_forward_validation:
         report_file = Path(validation_report) if validation_report is not None else folder / "forward_validation_report.json"
@@ -95,7 +100,7 @@ def inspect_canonical(folder, *, development_smoke=False, validation_report=None
         required_checks = ("raw_head", "neural_preclamp", "rendered_proxy")
         if (
             report.get("schema") != "dlssnr_forward_validation_v1"
-            or report.get("profile") != PROFILE_ID
+            or report.get("profile") != profile
             or report.get("numerics_profile") != "train_surrogate"
             or report.get("float_validated") is not True
             or report.get("model_sha256") != identity["model_sha256"]
@@ -111,9 +116,11 @@ def inspect_canonical(folder, *, development_smoke=False, validation_report=None
 def read_artifact_runtime(folder):
     """Runtime travels with required model files, not only an optional training sidecar."""
     from musubi_tuner.dlssnr.runtime import default_runtime_policy, validate_runtime_policy
+    from musubi_tuner.dlssnr.storage import read_storage_policy
 
     folder = Path(folder)
     config = json.loads((folder / "model_config.json").read_text(encoding="utf-8"))
+    read_storage_policy(folder / "model.safetensors", config["profile"])
     with safe_open(str(folder / "model.safetensors"), framework="pt", device="cpu") as handle:
         metadata = handle.metadata() or {}
     header = metadata.get("dlssnr_runtime_policy")
@@ -137,15 +144,20 @@ def read_artifact_runtime(folder):
     return policy
 
 
-def save_canonical(model, folder, *, source_dir=None, metadata=None):
+def save_canonical(model, folder, *, source_dir=None, metadata=None, save_precision="native"):
     from musubi_tuner.dlssnr.convert import canonical_config
     from musubi_tuner.dlssnr.fp8 import materialize_state_dict
     from musubi_tuner.dlssnr.runtime import default_runtime_policy, numerics_metadata, validate_runtime_policy
+    from musubi_tuner.dlssnr.storage import STORAGE_METADATA_KEY, encode_canonical_tensors
 
     folder = Path(folder).resolve()
     source = Path(source_dir).resolve() if source_dir else None
+    profile = getattr(model, "profile", PROFILE_ID)
+    topology = get_profile(profile)
     if source == folder:
         raise ValueError("refusing to overwrite the source canonical directory")
+    if source and read_canonical_profile(source) != profile:
+        raise ValueError("model profile differs from the source canonical directory")
     report = dict(metadata or {})
     policy = report.get("runtime_policy") or getattr(model, "runtime_policy", None) or default_runtime_policy()
     validate_runtime_policy(policy)
@@ -154,23 +166,33 @@ def save_canonical(model, folder, *, source_dir=None, metadata=None):
         report.update(base_quantization=quantization, fp8_materialized=True, training_runtime_policy=policy)
         policy = {**policy, "fp8_base": False, "fp8_scaled": False}
     report["runtime_policy"] = policy
-    folder.mkdir(parents=True, exist_ok=True)
     tensors = materialize_state_dict(model)
     if source:
         with safe_open(str(source / "model.safetensors"), framework="pt", device="cpu") as handle:
-            for block in range(31, 39):
+            for block in topology.vit_blocks:
                 key = f"blocks.{block}.opaque.layer3"
                 if key in handle.keys():
                     tensors[key] = handle.get_tensor(key)
+    tensors, storage, quantization_report = encode_canonical_tensors(tensors, profile, save_precision)
+    report["storage_quantization"] = quantization_report
+    folder.mkdir(parents=True, exist_ok=True)
+    if source:
         for name in ("model_config.json", "source_manifest.json", "conversion_report.json", "opaque_records.safetensors"):
             if (source / name).is_file():
                 shutil.copyfile(source / name, folder / name)
     else:
-        write_json(folder / "model_config.json", canonical_config())
+        write_json(folder / "model_config.json", canonical_config(profile=profile))
     config = json.loads((folder / "model_config.json").read_text(encoding="utf-8"))
-    config.update(runtime_schema="dlssnr_artifact_runtime_v1", runtime_policy=policy)
+    config.update(runtime_schema="dlssnr_artifact_runtime_v1", runtime_policy=policy, weight_storage=storage)
     write_json(folder / "model_config.json", config)
-    save_tensors(folder / "model.safetensors", tensors, metadata={"dlssnr_runtime_policy": json.dumps(policy, sort_keys=True)})
+    save_tensors(
+        folder / "model.safetensors",
+        tensors,
+        metadata={
+            "dlssnr_runtime_policy": json.dumps(policy, sort_keys=True),
+            STORAGE_METADATA_KEY: json.dumps(storage, sort_keys=True),
+        },
+    )
     write_json(
         folder / "numerics.json",
         {
@@ -190,7 +212,7 @@ def save_canonical(model, folder, *, source_dir=None, metadata=None):
     )
     report.update(
         schema="dlssnr_training_artifact_v1",
-        profile=PROFILE_ID,
+        profile=profile,
         model_sha256=file_sha256(folder / "model.safetensors"),
         float_validated=False,
         temporal_validated=False,

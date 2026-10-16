@@ -1,4 +1,4 @@
-"""Checked DLL/canonical import and export for the audited 310.8.0 weight resource."""
+"""Checked DLL/canonical import and export for audited HT and CC resources."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from musubi_tuner.dlssnr.convert import canonical_config, convert_source
 from musubi_tuner.dlssnr.dll import read_weights
 from musubi_tuner.dlssnr.identity import file_sha256
 from musubi_tuner.dlssnr.native import repack_trained_record, validate_multipliers
-from musubi_tuner.dlssnr.profiles import PROFILE_ID, STAGE_BYTES, build_records, canonical_names
+from musubi_tuner.dlssnr.profiles import PROFILE_ID, CC_PROFILE_ID, build_records, canonical_names, get_profile, stage_bytes
 
 
 logger = logging.getLogger(__name__)
@@ -34,20 +34,27 @@ def _require_new(path: Path) -> None:
         raise FileExistsError(f"refusing to overwrite existing output: {path}")
 
 
-def _load_template(path: Path):
+def _load_template(path: Path, profile: str = PROFILE_ID):
+    topology = get_profile(profile)
+    resource_name, audited_hash = "WEIGHTS_HT", AUDITED_RESOURCE_SHA256
+    if profile == CC_PROFILE_ID:
+        from musubi_tuner.dlssnr.cc_dll_io import AUDITED_RESOURCE_SHA256 as cc_hash, RESOURCE_NAME
+
+        resource_name, audited_hash = RESOURCE_NAME, cc_hash
     data = path.read_bytes()
-    resource = read_weights(data)
+    resource = read_weights(data, resource_name=resource_name)
     resource_hash = _sha256(memoryview(data)[resource.offset : resource.offset + resource.size])
-    if resource_hash != AUDITED_RESOURCE_SHA256:
+    if resource_hash != audited_hash:
         raise ValueError(
-            f"unsupported WEIGHTS_HT resource {resource_hash}; expected audited DLSS-NR 310.8.0 "
-            f"{AUDITED_RESOURCE_SHA256}. Use the original DLL, not an already repacked DLL."
+            f"unsupported {resource_name} resource {resource_hash}; expected audited {profile} "
+            f"{audited_hash}. Use the original DLL, not an already repacked DLL."
         )
-    records = build_records()
+    records = build_records(profile)
+    sizes = stage_bytes(profile)
     if set(resource.records) != {record.name for record in records}:
         raise ValueError("DLL record inventory does not match the canonical profile")
-    blobs, stage_parts, entries = {}, {stage: [] for stage in STAGE_BYTES}, []
-    offsets = dict.fromkeys(STAGE_BYTES, 0)
+    blobs, stage_parts, entries = {}, {stage: [] for stage in sizes}, []
+    offsets = dict.fromkeys(sizes, 0)
     for record in records:
         blob = bytes(resource.records[record.name].payload)
         if len(blob) != record.nbytes:
@@ -68,10 +75,10 @@ def _load_template(path: Path):
         offsets[record.stage] += len(blob)
     stages = {stage: b"".join(parts) for stage, parts in stage_parts.items()}
     hashes = {stage: _sha256(blob) for stage, blob in stages.items()}
-    if {stage: len(blob) for stage, blob in stages.items()} != STAGE_BYTES:
+    if {stage: len(blob) for stage, blob in stages.items()} != sizes:
         raise ValueError("DLL stage sizes differ from canonical profile")
     manifest = {
-        "totals": {"blockCount": 71},
+        "totals": {"blockCount": topology.block_count},
         "stages": [
             {"id": stage, "file": f"{stage}.bin", "packedByteLength": len(blob), "sha256": hashes[stage]}
             for stage, blob in stages.items()
@@ -81,23 +88,29 @@ def _load_template(path: Path):
             "path": str(path.resolve()),
             "sha256": _sha256(data),
             "resource_sha256": resource_hash,
+            "resource_name": resource_name,
             "resource_offset": resource.offset,
             "resource_bytes": resource.size,
         },
     }
-    return data, resource, LoadedSource(path.parent.resolve(), manifest, stages, hashes, records, blobs)
+    return data, resource, LoadedSource(path.parent.resolve(), manifest, stages, hashes, records, blobs, profile)
 
 
-def unpack_dll(source_dll: str | Path, output_dir: str | Path) -> dict:
+def unpack_dll(source_dll: str | Path, output_dir: str | Path, *, profile: str = PROFILE_ID, save_precision="native") -> dict:
     """Import into the existing training contract; never replace an existing directory."""
     source_path, output = Path(source_dll), Path(output_dir)
     _require_new(output)
-    _, _, source = _load_template(source_path)
+    _, _, source = _load_template(source_path, profile)
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".dlssnr-unpack-", dir=output.parent) as temporary:
         staging = Path(temporary) / "model"
-        report = convert_source(source, staging, verify=True)
-        report.update(source_dll=source.manifest["dll"], output_dir=str(output.resolve()), resource_name="WEIGHTS_HT")
+        report = convert_source(source, staging, verify=True, save_precision=save_precision)
+        report.update(
+            source_dll=source.manifest["dll"],
+            output_dir=str(output.resolve()),
+            resource_name=source.manifest["dll"]["resource_name"],
+            training_ready=True,
+        )
         (staging / "conversion_report.json").write_text(json.dumps(report, indent=2, allow_nan=False), encoding="utf-8")
         if file_sha256(source_path) != source.manifest["dll"]["sha256"]:
             raise ValueError("source DLL changed during unpack")
@@ -111,12 +124,12 @@ def _validate_canonical(model: Path, source: LoadedSource) -> dict:
 
     identity = inspect_canonical(model)
     config = json.loads((model / "model_config.json").read_text(encoding="utf-8"))
-    expected = canonical_config(source.records)
-    for field in ("parameter_layout", "prior_layout", "tensors"):
+    expected = canonical_config(source.records, profile=source.profile)
+    for field in ("profile", "parameter_layout", "prior_layout", "tensors"):
         if config.get(field) != expected[field]:
             raise ValueError(f"canonical {field} differs from the supported layout")
     manifest = json.loads((model / "source_manifest.json").read_text(encoding="utf-8"))
-    if manifest.get("totals", {}).get("blockCount") != 71:
+    if manifest.get("totals", {}).get("blockCount") != get_profile(source.profile).block_count:
         raise ValueError("canonical source block count does not match the template DLL")
     # Source filenames and extra extractor metadata are not weight identity.
     for section, fields in (
@@ -147,17 +160,24 @@ def _validate_canonical(model: Path, source: LoadedSource) -> dict:
 
 
 def _pack_canonical(model: Path, source: LoadedSource, *, mix: float, strength: float):
+    from musubi_tuner.dlssnr.storage import decode_stored_tensor, read_storage_policy
+    from musubi_tuner.dlssnr.weight_quantization import native_storage_kinds
+
     identity = _validate_canonical(model, source)
-    expected_names = set(canonical_names(source.records)) | {f"blocks.{block}.opaque.layer3" for block in range(31, 39)}
+    policy = read_storage_policy(model / "model.safetensors", source.profile)
+    kinds = native_storage_kinds(source.profile)
+    expected_names = set(canonical_names(source.records)) | {
+        f"blocks.{block}.opaque.layer3" for block in get_profile(source.profile).vit_blocks
+    }
     payloads, statistics = {}, []
-    with safe_open(str(model / "model.safetensors"), framework="numpy") as handle:
+    with safe_open(str(model / "model.safetensors"), framework="pt", device="cpu") as handle:
         names = set(handle.keys())
         if names != expected_names:
             raise ValueError(
                 f"canonical tensor inventory mismatch; missing={sorted(expected_names - names)[:5]}, "
                 f"unexpected={sorted(names - expected_names)[:5]}. Merge LoRA adapters before packing."
             )
-        adapter = handle.get_tensor("blocks.0.input_adapter.weight")
+        adapter = handle.get_tensor("blocks.0.input_adapter.weight").float().numpy()
         if adapter.shape != (32, 16) or np.any(adapter[:, 15] != 0):
             raise ValueError("input adapter lane 15 must remain zero")
         stage = None
@@ -168,7 +188,7 @@ def _pack_canonical(model: Path, source: LoadedSource, *, mix: float, strength: 
             keys = [view.name for region in record.regions for view in region.views]
             if any(region.kind == "opaque" for region in record.regions):
                 keys.append(f"blocks.{record.block}.opaque.layer3")
-            tensors = {name: handle.get_tensor(name) for name in keys}
+            tensors = {name: decode_stored_tensor(name, handle.get_tensor(name), policy, kinds).numpy() for name in keys}
             payload, stats = repack_trained_record(record, source.blobs[record.name], tensors, mix=mix, strength=strength)
             payloads[record.name] = payload
             statistics.extend(stats)
@@ -218,7 +238,9 @@ def pack_dll(
         raise ValueError("LoRA multiplier must be finite")
     if merge_lora is None and lora_multiplier != 1:
         raise ValueError("lora_multiplier requires merge_lora")
-    original, resource, source = _load_template(template)
+    from musubi_tuner.dlssnr.artifacts import read_canonical_profile
+
+    original, resource, source = _load_template(template, read_canonical_profile(model))
     lora_info = None
     if merge_lora is not None:
         from musubi_tuner.networks.lora_dlssnr import merge_to_directory
@@ -228,7 +250,8 @@ def pack_dll(
         adapter_hash = file_sha256(adapter)
         with tempfile.TemporaryDirectory(prefix="dlssnr-merge-") as temporary:
             merged = Path(temporary) / "merged"
-            merge_to_directory(model, adapter, merged, multiplier=lora_multiplier)
+            # Mix/strength must run before the single native quantization in packing.
+            merge_to_directory(model, adapter, merged, multiplier=lora_multiplier, save_precision="fp32")
             payloads, statistics, identity = _pack_canonical(merged, source, mix=mix, strength=strength)
         if file_sha256(adapter) != adapter_hash or file_sha256(model / "model.safetensors") != input_identity["model_sha256"]:
             raise ValueError("LoRA or base weights changed during export")
@@ -242,7 +265,8 @@ def pack_dll(
     else:
         payloads, statistics, identity = _pack_canonical(model, source, mix=mix, strength=strength)
     candidate = resource.replace(original, payloads)
-    extracted = read_weights(candidate)
+    resource_name = source.manifest["dll"]["resource_name"]
+    extracted = read_weights(candidate, resource_name=resource_name)
     for name, payload in payloads.items():
         if extracted.records[name].payload != payload:
             raise ValueError(f"{name}: DLL re-extraction differs from verified packed weights")
@@ -260,8 +284,8 @@ def pack_dll(
     totals["max_abs_quantization_error"] = max(row["max_abs_quantization_error"] for row in statistics)
     report = {
         "schema": "dlssnr_dll_export_v1",
-        "resource_name": "WEIGHTS_HT",
-        "profile": PROFILE_ID,
+        "resource_name": resource_name,
+        "profile": source.profile,
         "template_dll": str(template.resolve()),
         "template_sha256": _sha256(original),
         "model_dir": str(model.resolve()),

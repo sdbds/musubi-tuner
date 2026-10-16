@@ -1,7 +1,7 @@
 # Portions adapted from OpenDLSS-NR, Copyright (c) 2026 maan (MIT).
 # See LICENSE.OpenDLSS-NR and NOTICE.md in this directory.
 
-"""Fixed DLSS-NR 310.8.0 record layout.
+"""Audited HT and CC packed layouts and their network topology.
 
 Byte ranges come from the OpenDLSS fused-layout rules and were checked against
 the shipped manifest: 153 records, 147,683,778 payload bytes.
@@ -14,6 +14,60 @@ from dataclasses import dataclass
 from musubi_tuner.dlssnr.packing import align_up
 
 PROFILE_ID = "dlss_nr_310_8_0"
+CC_PROFILE_ID = "dlss_nr_310_9_16_cc"
+
+
+@dataclass(frozen=True)
+class ModelProfile:
+    id: str
+    encoder_depths: tuple[int, ...]
+    vit_depth: int = 8
+
+    @property
+    def encoder_blocks(self) -> tuple[range, ...]:
+        return self._ranges(1, self.encoder_depths)
+
+    @property
+    def vit_blocks(self) -> range:
+        start = self.encoder_blocks[-1].stop
+        return range(start, start + self.vit_depth)
+
+    @property
+    def bridge_block(self) -> int:
+        return self.vit_blocks.stop
+
+    @property
+    def decoder_blocks(self) -> tuple[range, ...]:
+        return self._ranges(self.bridge_block + 1, self.encoder_depths[::-1])
+
+    @property
+    def head_block(self) -> int:
+        return self.decoder_blocks[-1].stop
+
+    @property
+    def block_count(self) -> int:
+        return self.head_block + 1
+
+    @staticmethod
+    def _ranges(start: int, depths: tuple[int, ...]) -> tuple[range, ...]:
+        result = []
+        for depth in depths:
+            result.append(range(start, start + depth))
+            start += depth
+        return tuple(result)
+
+
+PROFILES = {
+    PROFILE_ID: ModelProfile(PROFILE_ID, (4, 4, 6, 8, 8)),
+    CC_PROFILE_ID: ModelProfile(CC_PROFILE_ID, (2, 2, 2, 2, 2)),
+}
+
+
+def get_profile(profile: str = PROFILE_ID) -> ModelProfile:
+    if profile not in PROFILES:
+        raise ValueError(f"unsupported DLSS-NR profile: {profile}")
+    return PROFILES[profile]
+
 
 STAGE_BYTES = {
     "enc32": 106_432,
@@ -346,152 +400,128 @@ def _vit(block: int) -> list[tuple[int, _Builder]]:
     return layers
 
 
-def _phase_table() -> dict[int, int | None]:
-    """Window phase consumed in graph order. ViT and block 39 do not take one."""
-    counters = [0] * 7
-    phases: dict[int, int | None] = {}
-
-    def take(block: int, level: int) -> None:
-        phases[block] = counters[level] & 3
-        counters[level] += 1
-
-    take(0, 6)
-    for block in range(1, 5):
-        take(block, 0)
-    for block in range(5, 9):
-        take(block, 1)
-    for block in range(9, 15):
-        take(block, 2)
-    for block in range(15, 23):
-        take(block, 3)
-    for block in range(23, 31):
-        take(block, 4)
-    for block in range(31, 40):
+def _phase_table(profile: str = PROFILE_ID) -> dict[int, int | None]:
+    """Window phases continue across the encoder/decoder at each resolution."""
+    topology = get_profile(profile)
+    phases: dict[int, int | None] = {0: 0, topology.head_block: 1, topology.bridge_block: None}
+    for encoder, decoder in zip(topology.encoder_blocks, reversed(topology.decoder_blocks)):
+        for index, block in enumerate((*encoder, *decoder)):
+            phases[block] = index & 3
+    for block in topology.vit_blocks:
         phases[block] = None
-    for block in range(40, 48):
-        take(block, 4)
-    for block in range(48, 56):
-        take(block, 3)
-    for block in range(56, 62):
-        take(block, 2)
-    for block in range(62, 66):
-        take(block, 1)
-    for block in range(66, 70):
-        take(block, 0)
-    take(70, 6)
     return phases
 
 
-def _stage_for(block: int) -> str:
-    if block <= 4:
+def _stage_for(block: int, profile: str = PROFILE_ID) -> str:
+    topology = get_profile(profile)
+    if block == 0:
         return "enc32"
-    if block <= 8:
-        return "enc64"
-    if block <= 14:
-        return "enc128"
-    if block <= 22:
-        return "enc256"
-    if block <= 30:
-        return "enc512"
-    if block <= 38:
+    if block == topology.head_block:
+        return "dec32"
+    if block in topology.vit_blocks:
         return "vit"
-    if block <= 47:
+    if block == topology.bridge_block:
         return "dec512"
-    if block <= 55:
-        return "dec256"
-    if block <= 61:
-        return "dec128"
-    if block <= 65:
-        return "dec64"
-    return "dec32"
+    for channels, blocks in zip((32, 64, 128, 256, 512), topology.encoder_blocks):
+        if block in blocks:
+            return f"enc{channels}"
+    for channels, blocks in zip((512, 256, 128, 64, 32), topology.decoder_blocks):
+        if block in blocks:
+            return f"dec{channels}"
+    raise ValueError(f"block {block} is outside profile {profile}")
 
 
-def _record(name_block: int, layer: int, parameter: str, builder: _Builder, phases: dict[int, int | None]) -> RecordLayout:
+def _record(
+    name_block: int, layer: int, parameter: str, builder: _Builder, phases: dict[int, int | None], profile: str = PROFILE_ID
+) -> RecordLayout:
     return RecordLayout(
         name=f"block{name_block}.layer{layer}.{parameter}",
         block=name_block,
         layer=layer,
         parameter=parameter,
-        stage=_stage_for(name_block),
+        stage=_stage_for(name_block, profile),
         phase=phases[name_block],
         regions=tuple(builder.regions),
     )
 
 
-def build_records() -> tuple[RecordLayout, ...]:
-    phases = _phase_table()
+def build_records(profile: str = PROFILE_ID) -> tuple[RecordLayout, ...]:
+    topology = get_profile(profile)
+    phases = _phase_table(profile)
     records: list[RecordLayout] = []
-    records.append(_record(0, 0, "layer", _pre(), phases))
 
-    normal = [(range(1, 5), 32, 4), (range(5, 9), 64, 8), (range(9, 15), 128, 14), (range(15, 23), 256, 22)]
-    for blocks, channels, last in normal:
+    def add(block: int, layer: int, builder: _Builder, parameter: str = "layer") -> None:
+        records.append(_record(block, layer, parameter, builder, phases, profile))
+
+    add(0, 0, _pre())
+    for blocks, channels in zip(topology.encoder_blocks[:-1], (32, 64, 128, 256)):
         for block in blocks:
-            is_last = block == last
+            is_last = block == blocks.stop - 1
             transition = (channels, channels * 2) if is_last else None
             tail = (not is_last) or channels == 32
-            records.append(_record(block, 0, "layer", _fused(block, channels, transition, tail), phases))
+            add(block, 0, _fused(block, channels, transition, tail))
 
-    for block in range(23, 31):
+    for block in topology.encoder_blocks[-1]:
         for layer, builder in _split512(block):
-            records.append(_record(block, layer, "layer", builder, phases))
-        if block == 30:
+            add(block, layer, builder)
+        if block == topology.vit_blocks.start - 1:
             extra = _Builder()
             extra.e4(f"{_prefix(block)}.to_vit.weight", 512, 1024)
             extra.pad()
-            records.append(_record(block, 4, "layer", extra, phases))
+            add(block, 4, extra)
 
-    for block in range(31, 39):
+    for block in topology.vit_blocks:
         for layer, builder in _vit(block):
-            records.append(_record(block, layer, "layer", builder, phases))
+            add(block, layer, builder)
 
     bridge = _Builder()
-    bridge.e4("blocks.39.proj.weight", 1024, 512)
-    bridge.f16_vec("blocks.39.skip_scale", 512, "scales")
-    records.append(_record(39, 0, "layer", bridge, phases))
+    bridge.e4(f"{_prefix(topology.bridge_block)}.proj.weight", 1024, 512)
+    bridge.f16_vec(f"{_prefix(topology.bridge_block)}.skip_scale", 512, "scales")
+    add(topology.bridge_block, 0, bridge)
 
-    for block in range(40, 48):
+    for block in topology.decoder_blocks[0]:
         for layer, builder in _split512(block):
-            records.append(_record(block, layer, "layer", builder, phases))
+            add(block, layer, builder)
 
-    decoder = [(48, 256, range(48, 56)), (56, 128, range(56, 62)), (62, 64, range(62, 66)), (66, 32, range(66, 70))]
-    for first, channels, blocks in decoder:
+    for blocks, channels in zip(topology.decoder_blocks[1:], (256, 128, 64, 32)):
         for block in blocks:
-            builder = _upsample(block, channels) if block == first else _fused(block, channels, None, True)
-            records.append(_record(block, 0, "layer", builder, phases))
+            builder = _upsample(block, channels) if block == blocks.start else _fused(block, channels, None, True)
+            add(block, 0, builder)
 
     blend = _Builder()
-    blend.f16_vec("blocks.70.blend_scale", 1, "temporal_blend")
-    records.append(_record(70, 0, "blend_scale", blend, phases))
-    records.append(_record(70, 0, "layer", _post(), phases))
+    blend.f16_vec(f"{_prefix(topology.head_block)}.blend_scale", 1, "temporal_blend")
+    add(topology.head_block, 0, blend, "blend_scale")
+    add(topology.head_block, 0, _post(topology.head_block))
     return tuple(records)
 
 
-def block_channels(block: int) -> int | None:
-    if block == 39:
+def block_channels(block: int, profile: str = PROFILE_ID) -> int | None:
+    topology = get_profile(profile)
+    if block == topology.bridge_block:
         return None
-    if block <= 4 or block >= 66:
-        return 32
-    if block <= 8 or block >= 62:
-        return 64
-    if block <= 14 or block >= 56:
-        return 128
-    if block <= 22 or block >= 48:
-        return 256
-    if block <= 30 or block >= 40:
-        return 512
-    return 1024
+    if block in topology.vit_blocks:
+        return 1024
+    return int(_stage_for(block, profile)[3:])
 
 
-def block_kind(block: int) -> str:
-    if block == 39:
+def block_kind(block: int, profile: str = PROFILE_ID) -> str:
+    topology = get_profile(profile)
+    if block == topology.bridge_block:
         return "transition"
-    if 31 <= block <= 38:
+    if block in topology.vit_blocks:
         return "vit"
-    if 23 <= block <= 30 or 40 <= block <= 47:
+    if block_channels(block, profile) == 512:
         return "split512"
-    if block in (0, 70):
+    if block in (0, topology.head_block):
         return "window32_boundary"
     return "window"
+
+
+def stage_bytes(profile: str = PROFILE_ID) -> dict[str, int]:
+    sizes = dict.fromkeys(STAGE_BYTES, 0)
+    for record in build_records(profile):
+        sizes[record.stage] += record.nbytes
+    return sizes
 
 
 def canonical_names(records: tuple[RecordLayout, ...] | None = None) -> list[str]:

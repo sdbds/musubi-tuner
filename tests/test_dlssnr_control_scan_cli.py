@@ -100,12 +100,13 @@ def test_missing_manifest_fails_before_loading_model_weights(tmp_path):
 
 
 @pytest.mark.parametrize("override", [False, True])
-def test_cli_uses_real_canonical_loader_and_records_effective_runtime(tmp_path, monkeypatch, capsys, override):
+@pytest.mark.parametrize("save_precision", ["native", "fp32"])
+def test_cli_uses_real_canonical_loader_and_records_effective_runtime(tmp_path, monkeypatch, capsys, override, save_precision):
     monkeypatch.setattr(infer, "NRModel", SmallNR)
     torch.manual_seed(5)
     policy = {**default_runtime_policy(), "numerics_profile": "train_experimental", "attention_backend": "sdpa"}
     model_dir = tmp_path / "model"
-    save_canonical(SmallNR(), model_dir, metadata={"runtime_policy": policy})
+    save_canonical(SmallNR(), model_dir, metadata={"runtime_policy": policy}, save_precision=save_precision)
     source_sha = file_sha256(model_dir / "model.safetensors")
     extra = [
         "--tone_values",
@@ -140,5 +141,8 @@ def test_cli_uses_real_canonical_loader_and_records_effective_runtime(tmp_path, 
     assert all(row["auto_mask"] is False and row["style"] == 2 for row in report["measurements"])
     configured = [row["rgb_mae_vs_input"] for row in report["measurements"] if row["runtime"] == "configured"]
     native = [row["rgb_mae_vs_input"] for row in report["measurements"] if row["runtime"] == "native"]
-    assert any(abs(left - right) > 1e-9 for left, right in zip(configured, native))
+    if save_precision == "native":
+        assert configured == native
+    else:
+        assert any(abs(left - right) > 1e-9 for left, right in zip(configured, native))
     assert "scan_report.json" in capsys.readouterr().out

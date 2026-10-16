@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import torch
 
-from musubi_tuner.dlssnr.profiles import build_records
+from musubi_tuner.dlssnr.profiles import PROFILE_ID, build_records
 
 STORAGE_DTYPES = {
     "e4": torch.float8_e4m3fn,
@@ -15,8 +15,8 @@ STORAGE_DTYPES = {
 }
 
 
-def native_storage_kinds() -> dict[str, str]:
-    return {view.name: region.kind for record in build_records() for region in record.regions for view in region.views}
+def native_storage_kinds(profile: str = PROFILE_ID) -> dict[str, str]:
+    return {view.name: region.kind for record in build_records(profile) for region in record.regions for view in region.views}
 
 
 class _NativeWeightRound(torch.autograd.Function):
@@ -55,7 +55,7 @@ def _effective_weights(model, network=None):
 @torch.no_grad()
 def capture_native_reference(model, network=None) -> dict[str, torch.Tensor]:
     """Keep a detached CPU snapshot in native storage, not another FP32 model."""
-    kinds = native_storage_kinds()
+    kinds = native_storage_kinds(getattr(model, "profile", PROFILE_ID))
     return {
         name: native_weight_ste(value.detach().cpu(), kinds[name]).to(STORAGE_DTYPES[kinds[name]]).clone()
         for name, value in _effective_weights(model, network)
@@ -86,7 +86,7 @@ def _summarize(rows):
 def native_quantization_report(model, reference, network=None) -> dict:
     from musubi_tuner.dlssnr.native import quantization_statistics, quantize_tensor
 
-    kinds = native_storage_kinds()
+    kinds = native_storage_kinds(getattr(model, "profile", PROFILE_ID))
     rows = []
     for name, value in _effective_weights(model, network):
         value = value.detach().cpu().contiguous().numpy()

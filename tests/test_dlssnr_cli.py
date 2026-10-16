@@ -91,6 +91,9 @@ def test_dataset_paths_and_cli_paths_use_their_own_base_directories(tmp_path, mo
     work = tmp_path / "work"
     work.mkdir()
     monkeypatch.chdir(work)
+    model = work / "models/base"
+    model.mkdir(parents=True)
+    (model / "model_config.json").write_text(json.dumps({"schema": "dlssnr_canonical_v1", "profile": "dlss_nr_310_8_0"}))
     config = parse_config(tmp_path, "--model_dir", "models/base", "--forward_validation_report", "reports/forward.json")
     assert Path(config["data"]["train_manifest"]) == tmp_path / "data.jsonl"
     assert Path(config["model"]["model_dir"]) == work / "models/base"

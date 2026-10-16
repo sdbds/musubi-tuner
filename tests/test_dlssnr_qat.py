@@ -107,7 +107,7 @@ def test_qat_artifact_preserves_master_weights_and_restores_publication(tmp_path
     with torch.no_grad():
         model.blocks["31"].ffn.fc1.weight.fill_(1.0626)
     folder = tmp_path / "qat"
-    save_canonical(model, folder)
+    save_canonical(model, folder, save_precision="fp32")
     monkeypatch.setattr(infer, "NRModel", TinyFP8NR)
     loaded = infer.load_model(folder, "cpu")
     torch.testing.assert_close(loaded.state_dict(), model.state_dict(), rtol=0, atol=0)

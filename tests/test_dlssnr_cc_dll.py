@@ -306,7 +306,8 @@ def test_multi_unpack_failure_does_not_publish_a_partial_bundle(cc_source, tmp_p
     def fail_cc(*args, **kwargs):
         raise ValueError("CC validation failed")
 
-    def fake_ht(source, output):
+    def fake_ht(source, output, *, save_precision):
+        assert save_precision == "native"
         output.mkdir()
         (output / "conversion_report.json").write_text(json.dumps({"output_dir": str(output)}))
         return {"output_dir": str(output), "roundtrip": "byte_identical"}
@@ -325,7 +326,8 @@ def test_multi_unpack_failure_does_not_publish_a_partial_bundle(cc_source, tmp_p
 def fast_ht_conversion(monkeypatch):
     io = importlib.import_module("musubi_tuner.dlssnr.dll_models")
 
-    def convert(source, output):
+    def convert(source, output, *, save_precision):
+        assert save_precision == "native"
         output.mkdir()
         report = {"output_dir": str(output), "roundtrip": "byte_identical", "resource_name": "WEIGHTS_HT"}
         (output / "conversion_report.json").write_text(json.dumps(report))

@@ -36,7 +36,7 @@ from musubi_tuner.dlssnr.identity import file_sha256, implementation_identity
 from musubi_tuner.dlssnr.model import NRModel
 from musubi_tuner.dlssnr.numerics import fp32_execution
 from musubi_tuner.dlssnr.runtime import configure_model_runtime, numerics_metadata, runtime_policy, validate_runtime_device
-from musubi_tuner.dlssnr.profiles import PROFILE_ID
+from musubi_tuner.dlssnr.profiles import PROFILE_ID, get_profile
 from musubi_tuner.dlssnr.temporal import SEED_POLICY, stable_frame_seed
 from musubi_tuner.dlssnr.synthetic_temporal import NRSyntheticTemporalDataset
 from musubi_tuner.dlssnr.training_step import loss_denominators, training_loss
@@ -79,8 +79,9 @@ def parameter_group(name: str) -> str:
 
 def build_optimizer(model, learning_rate, multipliers, weight_decay, *, include_temporal=False, optimizer_config=None):
     if include_temporal:
-        model.blocks["70"].head.logit.weight.requires_grad_(True)
-        model.blocks["70"].blend_scale.requires_grad_(True)
+        head = model.blocks[str(get_profile(getattr(model, "profile", PROFILE_ID)).head_block)]
+        head.head.logit.weight.requires_grad_(True)
+        head.blend_scale.requires_grad_(True)
     else:
         model.freeze_single_frame()
     grouped = {}
@@ -550,7 +551,7 @@ class NRSupervisedTrainer:
         metadata = {
             "config": config,
             "identity": identity,
-            "profile": PROFILE_ID,
+            "profile": config["model"]["profile"],
             "numerics": numerics_metadata(policy),
             "runtime_policy": policy,
             "base_quantization": getattr(model, "base_quantization", None),
@@ -643,11 +644,24 @@ class NRSupervisedTrainer:
             logger.warning("NR source forward compatibility is unvalidated; training does not certify native/DLL compatibility")
 
         def save_product(folder, update, *, with_state=False):
+            # Optimizer state alone cannot recover FP32 masters from quantized weights.
+            save_precision = "fp32" if with_state else output["save_precision"]
+
             def save_weights():
                 product_metadata = metadata
                 if ema is not None:
                     product_metadata = {**metadata, "ema": {**metadata["ema"], "num_updates": ema.num_updates}}
-                self._save_product(folder, model, network, source_dir, product_metadata, base_identity, update, native_reference)
+                self._save_product(
+                    folder,
+                    model,
+                    network,
+                    source_dir,
+                    product_metadata,
+                    base_identity,
+                    update,
+                    native_reference,
+                    save_precision=save_precision,
+                )
                 if ema is not None:
                     with ema.average_parameters():
                         self._save_product(
@@ -659,6 +673,7 @@ class NRSupervisedTrainer:
                             base_identity,
                             update,
                             native_reference,
+                            save_precision=save_precision,
                         )
 
             coordinated_call(accelerator, save_weights, main_only=True)
@@ -766,7 +781,7 @@ class NRSupervisedTrainer:
         config = self.config
         training, optimizer_cfg = config["training"], config["optimizer"]
         set_seed(training["seed"])
-        model = NRModel().to(dtype=torch.float32)
+        model = NRModel(profile=config["model"]["profile"]).to(dtype=torch.float32)
         source_dir = config["model"].get("model_dir")
         if source_dir:
             model.load_canonical(str(Path(source_dir) / "model.safetensors"))
@@ -798,7 +813,9 @@ class NRSupervisedTrainer:
         return model, network, optimizer, base_identity
 
     @staticmethod
-    def _save_product(folder, model, network, source_dir, metadata, base_identity, update, native_reference=None):
+    def _save_product(
+        folder, model, network, source_dir, metadata, base_identity, update, native_reference=None, *, save_precision="native"
+    ):
         from musubi_tuner.networks.lora_dlssnr import save_adapter
 
         metadata = {
@@ -810,14 +827,14 @@ class NRSupervisedTrainer:
         }
         quantization = native_quantization_report(model, native_reference, network) if native_reference is not None else None
         if network is None:
-            save_canonical(model, folder, source_dir=source_dir, metadata=metadata)
+            save_canonical(model, folder, source_dir=source_dir, metadata=metadata, save_precision=save_precision)
         else:
             save_adapter(network, folder / "adapter.safetensors", base_identity)
             write_json(folder / "training_metadata.json", metadata)
             write_json(
                 folder / "base_identity.json",
                 {
-                    "base_profile": PROFILE_ID,
+                    "base_profile": getattr(model, "profile", PROFILE_ID),
                     "base_weight_sha256": base_identity,
                     "identity_scope": "all_canonical_parameters",
                     "targets": network.target_names,

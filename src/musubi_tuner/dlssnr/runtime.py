@@ -8,6 +8,7 @@ import torch
 
 from musubi_tuner.dlssnr.model import ChannelLinear, GlobalAttn, WindowAttn
 from musubi_tuner.dlssnr.numerics import SURROGATE_FLAGS, fp32_execution
+from musubi_tuner.dlssnr.profiles import PROFILE_ID
 from musubi_tuner.dlssnr.weight_quantization import native_storage_kinds
 
 RUNTIME_SCHEMA = "dlssnr_runtime_v1"
@@ -113,7 +114,7 @@ def configure_model_runtime(model, policy: dict, *, training=False) -> None:
     if not training:
         validate_runtime_device(policy, device)
     dtype = COMPUTE_DTYPES[policy["mixed_precision"]]
-    kinds = native_storage_kinds() if policy.get("native_weight_qat", False) else {}
+    kinds = native_storage_kinds(getattr(model, "profile", PROFILE_ID)) if policy.get("native_weight_qat", False) else {}
     for name, module in model.named_modules():
         if isinstance(module, (ChannelLinear, WindowAttn, GlobalAttn)):
             module.compute_dtype = dtype

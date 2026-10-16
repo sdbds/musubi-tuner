@@ -1,7 +1,7 @@
 """LoRA for DLSS-NR canonical linears.
 
 Adapters live on this module, not on the frozen base. QKV stays one head-major matrix.
-`vit_only` covers blocks 31-38 expand, contract, QKV and attention projection.
+`vit_only` covers the eight ViT blocks' expand, contract, QKV and attention projection.
 `multiscale` covers every other FFN and attention linear, with rank chosen by block width.
 """
 
@@ -17,7 +17,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from musubi_tuner.dlssnr.model import NRModel, ChannelLinear
-from musubi_tuner.dlssnr.profiles import PROFILE_ID, block_channels
+from musubi_tuner.dlssnr.profiles import PROFILE_ID, block_channels, get_profile
 
 VIT_ONLY_ELEMENTS = 2_097_152
 RANK_BY_WIDTH = {32: 2, 64: 4, 128: 8, 256: 8, 512: 16, 1024: 16}
@@ -65,6 +65,7 @@ class DLSSNRLoRA(nn.Module):
         self.adapters = nn.ModuleList()
         self.target_names: list[str] = []
         self.profile = ""
+        self.base_profile = PROFILE_ID
         self.report: dict = {}
         self.enabled = True
 
@@ -120,6 +121,7 @@ def inject(model: nn.Module, table: dict) -> DLSSNRLoRA:
         raise ValueError(f"LoRA profile {profile} matched no linears")
     network = DLSSNRLoRA()
     network.profile = profile
+    network.base_profile = getattr(model, "profile", PROFILE_ID)
     for name, module, rank, alpha in selected:
         network.add(name, module, rank, alpha, dropout)
     for parameter in model.parameters():
@@ -158,7 +160,7 @@ def _select_targets(model: nn.Module, profile: str, table: dict) -> list[tuple[s
         if not isinstance(module, ChannelLinear):
             continue
         weight_name = f"{module_name}.weight"
-        choice = _rank_for(weight_name, module, profile, table)
+        choice = _rank_for(weight_name, module, profile, table, getattr(model, "profile", PROFILE_ID))
         if choice is None:
             continue
         rank, alpha = choice
@@ -166,20 +168,22 @@ def _select_targets(model: nn.Module, profile: str, table: dict) -> list[tuple[s
     return found
 
 
-def _rank_for(weight_name: str, module: ChannelLinear, profile: str, table: dict) -> tuple[int, float] | None:
+def _rank_for(
+    weight_name: str, module: ChannelLinear, profile: str, table: dict, base_profile: str = PROFILE_ID
+) -> tuple[int, float] | None:
     if profile == "vit_only":
         if "rank_by_width" in table:
             raise ValueError("vit_only cannot also set rank_by_width")
-        if not _is_vit_only_target(weight_name):
+        if not _is_vit_only_target(weight_name, base_profile):
             return None
         return int(table["rank"]), float(table["alpha"])
     if profile == "multiscale":
         if "rank" in table or "alpha" in table:
             raise ValueError("multiscale uses the width table, not a single rank/alpha")
-        if _is_excluded(weight_name):
+        if _is_excluded(weight_name, base_profile):
             return None
         block = int(weight_name.split(".")[1])
-        channels = block_channels(block)
+        channels = block_channels(block, base_profile)
         ranks = {int(key): int(value) for key, value in table.get("rank_by_width", RANK_BY_WIDTH).items()}
         alphas = {
             int(key): float(value) for key, value in table.get("alpha_by_width", table.get("rank_by_width", RANK_BY_WIDTH)).items()
@@ -190,23 +194,23 @@ def _rank_for(weight_name: str, module: ChannelLinear, profile: str, table: dict
     raise ValueError(f"unknown LoRA profile {profile}")
 
 
-def _is_vit_only_target(weight_name: str) -> bool:
+def _is_vit_only_target(weight_name: str, base_profile: str = PROFILE_ID) -> bool:
     parts = weight_name.split(".")
     if len(parts) < 4 or parts[0] != "blocks":
         return False
     block = int(parts[1])
-    if block < 31 or block > 38:
+    if block not in get_profile(base_profile).vit_blocks:
         return False
     tail = ".".join(parts[2:])
     return tail in {"ffn.fc1.weight", "ffn.fc2.weight", "attn.qkv.weight", "attn.proj.weight"}
 
 
-def _is_excluded(weight_name: str) -> bool:
+def _is_excluded(weight_name: str, base_profile: str = PROFILE_ID) -> bool:
     if "input_adapter" in weight_name or ".head." in weight_name:
         return True
     if any(token in weight_name for token in (".down.", ".to_vit.", ".up.")):
         return True
-    return weight_name.startswith("blocks.39.")
+    return weight_name.startswith(f"blocks.{get_profile(base_profile).bridge_block}.")
 
 
 def merge_adapter(base: dict[str, torch.Tensor], network: DLSSNRLoRA, *, multiplier: float = 1.0) -> dict[str, torch.Tensor]:
@@ -233,10 +237,12 @@ def merge_adapter(base: dict[str, torch.Tensor], network: DLSSNRLoRA, *, multipl
     return merged
 
 
-def merge_to_directory(base_dir: str | Path, adapter_path: str | Path, output_dir: str | Path, *, multiplier: float = 1.0) -> None:
+def merge_to_directory(
+    base_dir: str | Path, adapter_path: str | Path, output_dir: str | Path, *, multiplier: float = 1.0, save_precision="native"
+) -> None:
     """Write a canonical directory whose weights are base + adapter. The base file is not modified."""
     from safetensors import safe_open
-    from musubi_tuner.dlssnr.artifacts import inspect_canonical, save_canonical
+    from musubi_tuner.dlssnr.artifacts import inspect_canonical, save_canonical, read_canonical_profile
     from musubi_tuner.dlssnr.fp8 import materialize_state_dict, quantize_frozen_base
 
     base = Path(base_dir)
@@ -246,7 +252,7 @@ def merge_to_directory(base_dir: str | Path, adapter_path: str | Path, output_di
     if output.resolve() == base.resolve():
         raise ValueError("refusing to overwrite the source canonical directory")
     inspect_canonical(base, development_smoke=True)
-    model = NRModel().to(dtype=torch.float32)
+    model = NRModel(profile=read_canonical_profile(base)).to(dtype=torch.float32)
     model.load_canonical(str(base / "model.safetensors"))
     with safe_open(str(adapter_path), framework="pt") as handle:
         metadata = handle.metadata() or {}
@@ -260,13 +266,14 @@ def merge_to_directory(base_dir: str | Path, adapter_path: str | Path, output_di
         network.base_quantization = quantize_frozen_base(model, scaled=quantization["scaled"])
     load_adapter(network, adapter_path, identity)
     merged = merge_adapter(materialize_state_dict(model), network, multiplier=multiplier)
-    materialized = NRModel().to(dtype=torch.float32)
+    materialized = NRModel(profile=model.profile).to(dtype=torch.float32)
     materialized.load_state_dict(merged, strict=True)
     output_policy = {**policy, "fp8_base": False, "fp8_scaled": False} if policy is not None else None
     save_canonical(
         materialized,
         output,
         source_dir=base,
+        save_precision=save_precision,
         metadata={
             "experimental_surrogate": True,
             "base_weight_sha256": identity,
@@ -281,10 +288,11 @@ def merge_to_directory(base_dir: str | Path, adapter_path: str | Path, output_di
     (output / "merge_report.json").write_text(
         json.dumps(
             {
-                "base_profile": PROFILE_ID,
+                "base_profile": model.profile,
                 "base_weight_sha256": identity,
                 "adapter": str(adapter_path),
                 "lora_multiplier": multiplier,
+                "save_precision": save_precision,
                 "targets": network.target_names,
                 "runtime_policy": output_policy,
                 "base_quantization": quantization,
@@ -300,6 +308,7 @@ def _network_from_report(model: nn.Module, report: dict) -> DLSSNRLoRA:
     modules = {f"{name}.weight": module for name, module in model.named_modules() if isinstance(module, ChannelLinear)}
     network = DLSSNRLoRA()
     network.profile = report.get("profile", "")
+    network.base_profile = getattr(model, "profile", PROFILE_ID)
     network.report = report
     for target in report.get("targets", []):
         module = modules.get(target["name"])
@@ -325,7 +334,7 @@ def save_adapter(network: DLSSNRLoRA, path: str | Path, base_sha256: str) -> Non
         metadata={
             "schema": LORA_SCHEMA,
             "profile": network.profile,
-            "base_profile": PROFILE_ID,
+            "base_profile": network.base_profile,
             "base_weight_sha256": base_sha256,
             "base_identity_scope": "all_canonical_parameters",
             "forward_mode": LORA_FORWARD,
@@ -349,8 +358,8 @@ def load_adapter(network: DLSSNRLoRA, path: str | Path, expected_base_sha256: st
     with safe_open(str(path), framework="pt") as handle:
         metadata = handle.metadata() or {}
     policy, quantization = _read_adapter_runtime(metadata)
-    if metadata.get("base_profile") != PROFILE_ID:
-        raise ValueError(f"LoRA base profile {metadata.get('base_profile')} != {PROFILE_ID}")
+    if metadata.get("base_profile") != network.base_profile:
+        raise ValueError(f"LoRA base profile {metadata.get('base_profile')} != {network.base_profile}")
     if metadata.get("forward_mode") != LORA_FORWARD:
         raise ValueError("LoRA forward mode does not match the canonical-weight implementation")
     if json.loads(metadata.get("targets", "[]")) != network.target_names:

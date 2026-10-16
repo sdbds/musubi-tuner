@@ -83,7 +83,7 @@ def test_canonical_save_preserves_metadata_and_opaque_bytes(tmp_path):
     before = (source / "opaque_records.safetensors").read_bytes()
     metadata = {"experimental_surrogate": True, "temporal_trained": False}
     output = tmp_path / "final"
-    artifacts.save_canonical(model, output, source_dir=source, metadata=metadata)
+    artifacts.save_canonical(model, output, source_dir=source, metadata=metadata, save_precision="fp32")
     assert (output / "opaque_records.safetensors").read_bytes() == before
     assert json.loads((output / "source_manifest.json").read_text()) == {"origin": "fixture"}
     tensors = load_file(output / "model.safetensors")
