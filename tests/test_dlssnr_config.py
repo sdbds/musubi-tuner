@@ -27,16 +27,17 @@ def make_args(tmp_path, options=(), *, lora=False, dataset=None):
 
 
 @pytest.mark.parametrize("lora", [False, True])
-def test_training_defaults_enable_ema_and_native_weights_without_changing_eval_mode(tmp_path, lora):
+def test_training_defaults_disable_ema_and_weight_qat_but_keep_activation_quantization(tmp_path, lora):
     from musubi_tuner.dlssnr.runtime import numerics_metadata, runtime_policy
 
     config = build_train_config(make_args(tmp_path, lora=lora), lora=lora)
-    assert config["training"]["ema_decay"] == 0.99
-    assert config["model"]["native_weight_qat"] is True
+    assert "ema_decay" not in config["training"]
+    assert "native_weight_qat" not in config["model"]
     assert not config["evaluation"].get("native", False)
     policy = runtime_policy(config)
-    assert policy["native_weight_qat"] is True
+    assert not policy.get("native_weight_qat", False)
     assert numerics_metadata(policy)["quantization"] == "half_then_e4m3_activation_fake_quant"
+    assert numerics_metadata(policy)["tf32"] == "environment"
     if not lora:
         assert config["parameter_groups"] == {
             "prior_lr_multiplier": 1.0,

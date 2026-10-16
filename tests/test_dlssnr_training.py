@@ -154,7 +154,8 @@ def make_args(tmp_path, *, lora=False, accum=2, batch=1, mode="single_frame", ev
 
 
 @pytest.mark.parametrize("lora", [False, True])
-def test_default_training_writes_ema_and_qat_metadata(tmp_path, small_math, lora):
+@pytest.mark.parametrize("enabled", [False, True])
+def test_training_only_writes_ema_and_qat_products_when_requested(tmp_path, small_math, lora, enabled):
     data_args = make_args(tmp_path, lora=lora)
     args = setup_parser(lora=lora).parse_args(
         [
@@ -170,20 +171,23 @@ def test_default_training_writes_ema_and_qat_metadata(tmp_path, small_math, lora
             "--max_train_steps",
             "1",
             "--save_state",
+            *(["--ema_decay", "0.99", "--native_weight_qat"] if enabled else []),
         ]
     )
     train = trainer.train_lora_from_args if lora else trainer.train_from_args
     train(args)
     folder = tmp_path / "output/defaults"
     state = torch.load(folder / "state-step000001/trainer_state.pt", weights_only=True)
-    assert state["ema"]["decay"] == 0.99 and state["ema"]["num_updates"] == 1
+    assert ("ema" in state) == enabled
     config = json.loads((folder / "run_config.json").read_text())["config"]
-    assert config["training"]["ema_decay"] == 0.99
-    assert config["model"]["native_weight_qat"] is True
+    assert config["training"].get("ema_decay") == (0.99 if enabled else None)
+    assert config["model"].get("native_weight_qat", False) == enabled
+    if enabled:
+        assert state["ema"]["decay"] == 0.99 and state["ema"]["num_updates"] == 1
     name = "adapter.safetensors" if lora else "model.safetensors"
     assert (folder / "final" / name).is_file()
-    assert (folder / "final/ema" / name).is_file()
-    assert (folder / "final/native_quantization.json").is_file()
+    assert (folder / "final/ema" / name).is_file() == enabled
+    assert (folder / "final/native_quantization.json").is_file() == enabled
 
 
 @pytest.mark.parametrize("lora", [False, True])
@@ -505,21 +509,22 @@ def test_checkpoint_checksum_rejects_modified_weights(tmp_path, small_math):
         trainer.train_lora_from_args(args)
 
 
-def test_fp32_training_disables_tf32_without_leaking_global_settings(tmp_path, small_math, monkeypatch):
+@pytest.mark.parametrize("enabled", [False, True])
+def test_fp32_training_preserves_external_tf32_settings(tmp_path, small_math, monkeypatch, enabled):
     class CheckPrecision(SmallNR):
         def forward(self, features, geometry):
-            assert not torch.backends.cuda.matmul.allow_tf32
-            assert not torch.backends.cudnn.allow_tf32
+            assert torch.backends.cuda.matmul.allow_tf32 == enabled
+            assert torch.backends.cudnn.allow_tf32 == enabled
             return super().forward(features, geometry)
 
     monkeypatch.setattr(trainer, "NRModel", CheckPrecision)
     matmul, cudnn = torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32
     try:
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cuda.matmul.allow_tf32 = enabled
+        torch.backends.cudnn.allow_tf32 = enabled
         trainer.train_from_args(make_args(tmp_path))
-        assert torch.backends.cuda.matmul.allow_tf32
-        assert torch.backends.cudnn.allow_tf32
+        assert torch.backends.cuda.matmul.allow_tf32 == enabled
+        assert torch.backends.cudnn.allow_tf32 == enabled
     finally:
         torch.backends.cuda.matmul.allow_tf32 = matmul
         torch.backends.cudnn.allow_tf32 = cudnn

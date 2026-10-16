@@ -20,7 +20,7 @@ def diagnostic_protocol():
         "highpass_sigmas_px": list(HIGHPASS_SIGMAS),
         "highpass_operator": "mask_normalized_gaussian_radius_ceil_3sigma_replicate",
         "energy_reduction": "valid_rgb_mean_square",
-        "filter_precision": "float32_no_tf32",
+        "filter_precision": "float32_environment_tf32",
         "sum_dtype": "float64",
         "ratio_energy_floor": RATIO_ENERGY_FLOOR,
         "noise_seed_xor": NOISE_SEED_XOR,

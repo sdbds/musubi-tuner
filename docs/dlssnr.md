@@ -187,10 +187,10 @@ state. Use the same PyTorch version for exact continuation.
 
 ### Parameter EMA
 
-EMA is enabled by default with decay `0.99` in both training entry points.
-Use `--ema_decay` to choose another finite value strictly between zero and one,
-or `--no-ema` to disable it without allocating EMA weights or publishing EMA
-products. These two options are mutually exclusive.
+EMA is disabled by default in both training entry points. Supply `--ema_decay 0.99`
+(or another finite value strictly between zero and one) to enable it. Omitting the
+option or passing `--no-ema` allocates no EMA weights and publishes no EMA products.
+`--ema_decay` and `--no-ema` are mutually exclusive.
 
 The shadow starts from the initial trainable FP32 parameters and follows
 `shadow = decay * shadow + (1 - decay) * parameter` after each successful optimizer
@@ -204,7 +204,7 @@ For LoRA, this averages the trainable adapter factors. In general,
 `EMA(B) @ EMA(A)` is not `EMA(B @ A)`: this is **parameter EMA**, not an exact
 average of merged full-model weights or predictions. Averaging can also move a
 QAT-trained weight back across a native quantization boundary. Neither EMA nor
-the default decay is a claim of better DLL output.
+the example decay is a claim of better DLL output.
 
 The raw optimizer weights stay in `final/` and each periodic checkpoint directory.
 An additional `ema/` subdirectory contains a normal canonical model or LoRA
@@ -495,7 +495,8 @@ sigma 1 and 4 **transformed image pixels**, respectively. For image `x`, mask `m
 and Gaussian filter `G`, the residual is `x - G(m*x)/G(m)`. Filters are separable,
 truncated at `ceil(3*sigma)`, and use replicated boundaries. Masked values are
 removed before filtering, so holes do not create black-mask edges or import
-excluded pixels. The measurements run in FP32 without autocast/TF32; sums use
+excluded pixels. The measurements run in FP32 without autocast; TF32 follows the
+external environment and backend settings. Sums use
 FP64. No further resizing is performed for these diagnostics.
 
 Each scale reports `input_energy`, `target_energy` and `output_energy`: the sum
@@ -561,8 +562,9 @@ with neutral RGB. Patch contributions use average-pooled mask coverage. Frame
 scores are channel-mean squared differences of normalized patch features,
 averaged over valid patch coverage; sequence scores weight frames by their
 original valid RGB mass. The feature network remains in FP32 eval mode without
-TF32 or gradients. Resizing and global attention still limit detection of fine
-or localized changes; a mask does not isolate the network's receptive field.
+gradients; TF32 follows the external environment and backend settings. Resizing
+and global attention still limit detection of fine or localized changes; a mask
+does not isolate the network's receptive field.
 
 Each evaluated case adds `content_preservation` with `dinov3_patch_mse`,
 `valid_rgb_values` and its protocol. Baseline, raw, EMA and native-proxy results
@@ -668,7 +670,7 @@ does not prove compatibility of updated weights.
 
 ### Export-Aligned Weight QAT
 
-Native weight publication is enabled by default in full and LoRA training.
+Native weight publication is disabled by default in full and LoRA training.
 `--native_weight_qat` explicitly enables it; `--no-native_weight_qat` disables it.
 FP32 master weights and optimizer state are retained. Each projection uses the
 storage type declared by the canonical profile: direct FP32 to E4M3FN or FP16,
@@ -727,16 +729,16 @@ controls requires a new comparison. They remain surrogate measurements and recor
 `native_equivalent=false`; game/DLL output acceptance is separate. High flip rates
 or lower target MAE alone do not establish better appearance or temporal stability.
 
-Old runtime-v1 artifacts retain their behavior; enabled QAT is bound to runtime-v2
-metadata in canonical weight headers and LoRA files, and is
+Old runtime-v1 artifacts retain their weight-publication policy; enabled QAT is
+bound to runtime-v2 metadata in canonical weight headers and LoRA files, and is
 restored on inference/merge. `--native_weight_qat` or `--no-native_weight_qat` can
 explicitly override publication in the image/video generators. Saved canonical
 tensors remain the unrounded FP32 masters for continued training and DLL export.
-Resume requires the same QAT setting and implementation identity. To resume a run
-that used the old defaults, explicitly retain `--no-native_weight_qat --no-ema`
-and, for full training, `--prior_lr_multiplier 0.1 --scale_lr_multiplier 0.1`,
-along with its other original settings. To change these policies, start a new run
-from saved weights rather than reusing incompatible optimizer state.
+Resume requires the same QAT setting, EMA decay, parameter-group multipliers and
+implementation identity as the original run. Restore explicit settings from that
+run rather than relying on current defaults. Changes to numerical implementation,
+including the former forced-TF32-off scope, require a new run from saved weights
+rather than reusing incompatible optimizer state.
 
 E4M3 activation fake quantization was already enabled and remains active even with
 weight QAT disabled. These training defaults do not enable `--eval_native` or
@@ -1110,8 +1112,8 @@ Common arguments:
 | `--max_train_steps` / `--gradient_accumulation_steps` / `--seed` | Update count, gradient accumulation and random seed. |
 | `--shuffle_dataset` / `--no-shuffle_dataset` | Seeded epoch shuffling of bucket samples and batch order is enabled by default; no argument is required. The negative flag optionally selects legacy fixed order. |
 | `--max_grad_norm` | Clips gradients at the accumulated update boundary. Default `0` disables clipping. |
-| `--ema_decay` / `--no-ema` | FP32 trainable-parameter EMA defaults to `0.99`; `--no-ema` disables it. Raw and EMA products/evaluation remain separate. |
-| `--native_weight_qat` / `--no-native_weight_qat` | Export-aligned weight QAT is enabled by default. The negative flag disables weight QAT, not the existing E4M3 activation publications. |
+| `--ema_decay` / `--no-ema` | FP32 trainable-parameter EMA is disabled by default; supply a decay such as `0.99` to enable it. Raw and EMA products/evaluation remain separate. |
+| `--native_weight_qat` / `--no-native_weight_qat` | Export-aligned weight QAT is disabled by default. These flags control weight QAT, not the existing E4M3 activation publications. |
 | `--gradient_checkpointing` | Recomputes activations to reduce memory, preserving the default numerical profile. Disabled by default. |
 | `--numerics_profile train_experimental` / `--mixed_precision` | Explicit experimental mode. CUDA precision accepts `no`, `fp16` or `bf16`; master weights remain FP32. |
 | `--fp8_base` / `--fp8_scaled` | LoRA-only frozen-base storage quantization. Scaled requires base, and both require experimental mode. |
@@ -1252,7 +1254,7 @@ mapping automatically.
 ## Unsupported Features
 
 Full FP8 optimizer training, SageAttention training, CPU activation offload, block
-swapping, FSDP/ZeRO/DeepSpeed, multi-node execution and TF32 are unsupported. Unknown
+swapping, FSDP/ZeRO/DeepSpeed and multi-node execution are unsupported. Unknown
 CLI arguments still raise errors. Experimental modes target `float_runtime` only;
 `native_roundtrip` cannot be selected as that runtime mode.
 
@@ -1260,8 +1262,11 @@ History reprojection uses bilinear sampling rather than the original five-tap
 Catmull-Rom. History is stored as FP32 rather than truncated toward zero to float16.
 
 Pixel caching and multi-worker prefetching are not implemented, and dataset TOML
-does not accept placeholder cache fields. FP32 entry points temporarily disable
-TF32 and restore its previous global settings afterward.
+does not accept placeholder cache fields. NR entry points do not set or restore
+TF32 backend flags: TF32 follows the external environment and PyTorch backend
+settings. Numerical metadata records `tf32=environment`, not a forced-off claim.
+Keep those external settings consistent for comparisons and continuation; allowing
+TF32 does not establish native/DLL numerical equivalence.
 
 ## Data Contract
 
