@@ -39,7 +39,7 @@ class NRContentMetric(torch.nn.Module):
             "reference": "input_proxy_rgb",
             "feature_model": deepcopy(feature_loss.identity),
             "frame_weight": "original_valid_rgb_mass",
-            "precision": "float32_no_tf32_float64_frame_reduction",
+            "precision": "float32_environment_tf32_float64_frame_reduction",
         }
         self.eval()
 

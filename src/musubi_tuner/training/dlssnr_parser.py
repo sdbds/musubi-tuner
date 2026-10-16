@@ -44,8 +44,8 @@ def setup_parser(*, lora=False) -> argparse.ArgumentParser:
     parser.add_argument(
         "--native_weight_qat",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Fake-quantize effective weights exactly as native export; keep FP32 masters (enabled by default).",
+        default=False,
+        help="Opt into native-export weight fake quantization; keep FP32 masters (disabled by default).",
     )
     backends = parser.add_mutually_exclusive_group()
     backends.add_argument(
@@ -68,8 +68,8 @@ def setup_parser(*, lora=False) -> argparse.ArgumentParser:
     ema.add_argument(
         "--ema_decay",
         type=float,
-        default=0.99,
-        help="FP32 trainable-parameter EMA decay, strictly between 0 and 1 (default: 0.99); saved and evaluated separately.",
+        default=None,
+        help="Opt into FP32 trainable-parameter EMA with decay strictly between 0 and 1; saved and evaluated separately.",
     )
     ema.add_argument("--no-ema", dest="ema_decay", action="store_const", const=None, help="Disable parameter EMA.")
     parser.add_argument("--gradient_checkpointing", action="store_true", help="Recompute NR blocks during backward to save memory.")

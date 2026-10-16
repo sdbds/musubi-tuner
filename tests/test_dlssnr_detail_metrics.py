@@ -162,7 +162,8 @@ def test_diagnostics_are_fp32_under_autocast_and_never_build_gradients():
     json.dumps(actual, allow_nan=False)
 
 
-def test_diagnostics_do_not_inherit_or_leak_tf32_runtime_flags(monkeypatch):
+@pytest.mark.parametrize("enabled", [False, True])
+def test_diagnostics_preserve_external_tf32_runtime_flags(monkeypatch, enabled):
     module = detail_module()
     real_lowpass = module.masked_gaussian_lowpass
     flags = []
@@ -174,11 +175,11 @@ def test_diagnostics_do_not_inherit_or_leak_tf32_runtime_flags(monkeypatch):
     monkeypatch.setattr(module, "masked_gaussian_lowpass", observed)
     previous = torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32
     try:
-        torch.backends.cuda.matmul.allow_tf32 = torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cuda.matmul.allow_tf32 = torch.backends.cudnn.allow_tf32 = enabled
         image = 0.5 + 0.1 * checkerboard()
         measure(image, image, image)
-        assert flags and all(value == (False, False) for value in flags)
-        assert torch.backends.cuda.matmul.allow_tf32 and torch.backends.cudnn.allow_tf32
+        assert flags and all(value == (enabled, enabled) for value in flags)
+        assert (torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32) == (enabled, enabled)
     finally:
         torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32 = previous
 

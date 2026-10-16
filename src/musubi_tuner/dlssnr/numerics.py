@@ -26,7 +26,7 @@ from musubi_tuner.dlssnr.arithmetic import cosine_half, e4m3_ste, exp_weight, ha
 SURROGATE_FLAGS = {
     "profile": "train_surrogate",
     "compute_dtype": "float32",
-    "tf32": False,
+    "tf32": "environment",
     "operators_version": 2,
     "activation": "mp_cubic_half_ste",
     "softmax": "native_exp_half_tree_e4_window_and_unnormalized_vit",
@@ -59,15 +59,8 @@ def mp_cubic_silu(value: torch.Tensor) -> torch.Tensor:
 
 @contextmanager
 def fp32_execution():
-    """Do not silently replace FP32 products with TF32, or leak backend flags to other models."""
-    matmul, cudnn = torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32
-    try:
-        torch.backends.cuda.matmul.allow_tf32 = False
-        torch.backends.cudnn.allow_tf32 = False
-        yield
-    finally:
-        torch.backends.cuda.matmul.allow_tf32 = matmul
-        torch.backends.cudnn.allow_tf32 = cudnn
+    """Compatibility scope: leave TF32 policy to the environment and PyTorch backend settings."""
+    yield
 
 
 def pool2x2(x: torch.Tensor, out_height: int, out_width: int) -> torch.Tensor:

@@ -21,7 +21,7 @@ def reset_accelerator():
     AcceleratorState._reset_state(reset_partial_state=True)
 
 
-def test_training_runtime_defaults_keep_fp32_compute_and_enable_weight_qat(tmp_path):
+def test_training_runtime_defaults_keep_fp32_compute_without_weight_qat(tmp_path):
     from musubi_tuner.dlssnr.runtime import runtime_policy
 
     policy = runtime_policy(build_train_config(config_args(tmp_path)))
@@ -30,7 +30,24 @@ def test_training_runtime_defaults_keep_fp32_compute_and_enable_weight_qat(tmp_p
     assert policy["attention_backend"] == "native"
     assert not policy["gradient_checkpointing"]
     assert not policy["fp8_base"]
-    assert policy["native_weight_qat"] is True
+    assert not policy.get("native_weight_qat", False)
+
+
+@pytest.mark.parametrize("matmul,cudnn", [(False, False), (True, False), (False, True), (True, True)])
+def test_fp32_execution_preserves_external_tf32_settings_even_on_error(matmul, cudnn):
+    from musubi_tuner.dlssnr.numerics import fp32_execution
+
+    previous = torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32
+    try:
+        torch.backends.cuda.matmul.allow_tf32 = matmul
+        torch.backends.cudnn.allow_tf32 = cudnn
+        with pytest.raises(RuntimeError, match="probe"):
+            with fp32_execution():
+                assert (torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32) == (matmul, cudnn)
+                raise RuntimeError("probe")
+        assert (torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32) == (matmul, cudnn)
+    finally:
+        torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32 = previous
 
 
 @pytest.mark.parametrize("precision", ["fp16", "bf16"])
