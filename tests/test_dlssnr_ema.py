@@ -36,12 +36,11 @@ def assert_ema_state(actual, expected):
 
 
 @pytest.mark.parametrize("lora", [False, True])
-def test_ema_cli_is_disabled_until_a_decay_is_supplied(tmp_path, lora):
+def test_ema_cli_defaults_to_point_99_and_accepts_an_explicit_decay(tmp_path, lora):
     args = config_args(tmp_path, lora=lora)
-    assert hasattr(args, "ema_decay"), "EMA needs an explicit opt-in CLI argument"
-    assert args.ema_decay is None
+    assert args.ema_decay == 0.99
     plain = build_train_config(args, lora=lora)
-    assert "ema_decay" not in plain["training"]
+    assert plain["training"]["ema_decay"] == 0.99
     enabled = build_train_config(config_args(tmp_path, ["--ema_decay", "0.999"], lora=lora), lora=lora)
     assert enabled["training"]["ema_decay"] == 0.999
     assert config_sha256(enabled) != config_sha256(plain)

@@ -105,6 +105,8 @@ def _args(root, name, *, lora=False, distributed=False, dropout=0.0, resume=Fals
             "--save_every_n_steps",
             "1",
             "--save_state",
+            "--no-ema",
+            "--no-native_weight_qat",
         ]
     )
     if lora:

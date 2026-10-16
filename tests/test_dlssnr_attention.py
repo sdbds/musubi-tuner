@@ -66,7 +66,10 @@ def test_global_scope_changes_global_attention_but_not_windows(tmp_path):
     source = torch.rand(1, 32, 3, 5)
     before = {name: module(source) for name, module in model.items()}
     config = build_train_config(
-        make_args(tmp_path, ["--numerics_profile", "train_experimental", "--sdpa", "--attention_scope", "global"])
+        make_args(
+            tmp_path,
+            ["--numerics_profile", "train_experimental", "--sdpa", "--attention_scope", "global", "--no-native_weight_qat"],
+        )
     )
     configure_model_runtime(model, runtime_policy(config), training=True)
     torch.testing.assert_close(model["window"](source), before["window"], rtol=0, atol=0)

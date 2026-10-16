@@ -70,6 +70,7 @@ def test_training_and_network_arguments_are_resolved_from_cli(tmp_path):
         "4",
         "--network_dropout",
         "0.1",
+        "--no-native_weight_qat",
         "--max_train_steps",
         "12",
         "--gradient_accumulation_steps",

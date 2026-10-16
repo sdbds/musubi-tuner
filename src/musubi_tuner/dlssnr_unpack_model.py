@@ -1,23 +1,32 @@
-"""Extract an audited DLSS-NR DLL into this project's canonical training format."""
+"""Extract audited HT canonical weights and/or CC packed records from a DLSS-NR DLL."""
 
 from __future__ import annotations
 
 import argparse
 import json
 
-from musubi_tuner.dlssnr.dll_io import unpack_dll
+from musubi_tuner.dlssnr.dll_models import unpack_models
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Unpack a user-supplied DLSS-NR 310.8.0 DLL into a canonical training directory.")
-    parser.add_argument("--source_dll", "--input", required=True, help="Original DLL containing the audited WEIGHTS_HT resource")
-    parser.add_argument("--output_dir", "--output", required=True, help="New canonical directory; existing paths are refused")
+    parser = argparse.ArgumentParser(description="Unpack DLSS-NR weights: HT canonical FP32 and CC lossless packed records.")
+    parser.add_argument("--source_dll", "--input", required=True, help="Original DLL containing audited HT and/or CC resources")
+    parser.add_argument(
+        "--output_dir", "--output", required=True, help="New output directory; multiple resources get HT/CC subdirectories"
+    )
+    parser.add_argument(
+        "--weights", choices=("all", "HT", "CC"), default="all", help="Weights to extract (default: all supported resources)"
+    )
     args = parser.parse_args()
     try:
-        report = unpack_dll(args.source_dll, args.output_dir)
+        report = unpack_models(args.source_dll, args.output_dir, weights=args.weights)
     except (OSError, ValueError) as error:
         parser.error(str(error))
-    print(json.dumps({key: report[key] for key in ("output_dir", "roundtrip", "logical_parameters", "canonical_sha256")}, indent=2))
+    keys = ("output_dir", "roundtrip", "resource_name", "logical_parameters", "canonical_sha256", "record_count", "training_ready")
+    summary = {key: report[key] for key in keys if key in report}
+    if "models" in report:
+        summary["models"] = {name: {key: child[key] for key in keys if key in child} for name, child in report["models"].items()}
+    print(json.dumps(summary, indent=2))
 
 
 if __name__ == "__main__":

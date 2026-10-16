@@ -143,12 +143,47 @@ def make_args(tmp_path, *, lora=False, accum=2, batch=1, mode="single_frame", ev
         "--save_every_n_steps",
         "1",
         "--save_state",
+        "--no-ema",
+        "--no-native_weight_qat",
     ]
     if lora:
         argv.extend(["--network_dim", "16", "--network_alpha", "16", "--network_dropout", "0.2"])
     if evaluate:
         argv.extend(["--sample_every_n_steps", "1"])
     return setup_parser(lora=lora).parse_args(argv)
+
+
+@pytest.mark.parametrize("lora", [False, True])
+def test_default_training_writes_ema_and_qat_metadata(tmp_path, small_math, lora):
+    data_args = make_args(tmp_path, lora=lora)
+    args = setup_parser(lora=lora).parse_args(
+        [
+            "--dataset_config",
+            str(data_args.dataset_config),
+            "--output_dir",
+            str(tmp_path / "output"),
+            "--output_name",
+            "defaults",
+            "--device",
+            "cpu",
+            "--development_smoke",
+            "--max_train_steps",
+            "1",
+            "--save_state",
+        ]
+    )
+    train = trainer.train_lora_from_args if lora else trainer.train_from_args
+    train(args)
+    folder = tmp_path / "output/defaults"
+    state = torch.load(folder / "state-step000001/trainer_state.pt", weights_only=True)
+    assert state["ema"]["decay"] == 0.99 and state["ema"]["num_updates"] == 1
+    config = json.loads((folder / "run_config.json").read_text())["config"]
+    assert config["training"]["ema_decay"] == 0.99
+    assert config["model"]["native_weight_qat"] is True
+    name = "adapter.safetensors" if lora else "model.safetensors"
+    assert (folder / "final" / name).is_file()
+    assert (folder / "final/ema" / name).is_file()
+    assert (folder / "final/native_quantization.json").is_file()
 
 
 @pytest.mark.parametrize("lora", [False, True])

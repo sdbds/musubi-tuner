@@ -97,7 +97,7 @@ def unpack_dll(source_dll: str | Path, output_dir: str | Path) -> dict:
     with tempfile.TemporaryDirectory(prefix=".dlssnr-unpack-", dir=output.parent) as temporary:
         staging = Path(temporary) / "model"
         report = convert_source(source, staging, verify=True)
-        report.update(source_dll=source.manifest["dll"], output_dir=str(output.resolve()))
+        report.update(source_dll=source.manifest["dll"], output_dir=str(output.resolve()), resource_name="WEIGHTS_HT")
         (staging / "conversion_report.json").write_text(json.dumps(report, indent=2, allow_nan=False), encoding="utf-8")
         if file_sha256(source_path) != source.manifest["dll"]["sha256"]:
             raise ValueError("source DLL changed during unpack")
@@ -260,6 +260,7 @@ def pack_dll(
     totals["max_abs_quantization_error"] = max(row["max_abs_quantization_error"] for row in statistics)
     report = {
         "schema": "dlssnr_dll_export_v1",
+        "resource_name": "WEIGHTS_HT",
         "profile": PROFILE_ID,
         "template_dll": str(template.resolve()),
         "template_sha256": _sha256(original),

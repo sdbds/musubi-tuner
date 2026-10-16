@@ -19,7 +19,7 @@ def _read(data, offset: int, fmt: str, end: int | None = None) -> tuple:
     return struct.unpack_from(fmt, data, offset)
 
 
-def _resource_location(data: bytes) -> tuple[int, int]:
+def _resource_location(data: bytes, resource_name: str = "WEIGHTS_HT", *, required: bool = True) -> tuple[int, int] | None:
     if data[:2] != b"MZ":
         raise ValueError("source is not a PE DLL (missing MZ)")
     pe = _read(data, 0x3C, "<I")[0]
@@ -76,16 +76,23 @@ def _resource_location(data: bytes) -> tuple[int, int]:
         return result
 
     directory = 0
-    for identifier in (10, "WEIGHTS_HT"):
+    for identifier in (10, resource_name):
         matches = [target for key, target in entries(directory) if key == identifier]
+        if not matches and not required:
+            return None
         if len(matches) != 1 or not matches[0] & 0x80000000:
             raise ValueError(f"missing or ambiguous resource directory {identifier}")
         directory = matches[0] & 0x7FFFFFFF
     languages = entries(directory)
     if len(languages) != 1 or languages[0][1] & 0x80000000:
-        raise ValueError("WEIGHTS_HT must have exactly one language/data entry")
+        raise ValueError(f"{resource_name} must have exactly one language/data entry")
     payload_rva, payload_size, _, _ = read(languages[0][1], "<IIII")
     return file_offset(payload_rva, payload_size), payload_size
+
+
+def has_weight_resource(dll: bytes, resource_name: str) -> bool:
+    """Check a resource name without hiding malformed or ambiguous PE directories."""
+    return _resource_location(dll, resource_name, required=False) is not None
 
 
 @dataclass(frozen=True)
@@ -119,9 +126,9 @@ class WeightResource:
         return bytes(result)
 
 
-def read_weights(dll: bytes) -> WeightResource:
+def read_weights(dll: bytes, *, resource_name: str = "WEIGHTS_HT") -> WeightResource:
     """Locate the resource through PE RVAs; preserve every serialized metadata byte."""
-    start, size = _resource_location(dll)
+    start, size = _resource_location(dll, resource_name)
     end = start + size
     if _read(dll, start, "<Q", end)[0] != size:
         raise ValueError("serialized weight map size differs from resource size")
