@@ -1,7 +1,7 @@
 # Portions adapted from OpenDLSS-NR, Copyright (c) 2026 maan (MIT).
 # See LICENSE.OpenDLSS-NR and NOTICE.md in this directory.
 
-"""Canonical DLSS-NR 310.8.0 module.
+"""Canonical DLSS-NR HT/CC module.
 
 Parameter names match the P0 checkpoint exactly. The default FP32 surrogate follows the block order,
 channel widths, head-major QKV, window phases and skip wiring, but not native matrix accumulations.
@@ -17,13 +17,13 @@ from torch.utils.checkpoint import checkpoint
 from musubi_tuner.dlssnr.geometry import Geometry
 from musubi_tuner.dlssnr.arithmetic import cubic_half, e4m3_ste, half_ste
 from musubi_tuner.dlssnr.numerics import apply_linear, global_attention, nearest_upsample, pool2x2, window_attention
-from musubi_tuner.dlssnr.profiles import build_records
+from musubi_tuner.dlssnr.profiles import PROFILE_ID, block_channels, build_records, get_profile
 from musubi_tuner.dlssnr.weight_quantization import native_weight_ste
 
 
-def _phases() -> dict[int, int | None]:
+def _phases(profile: str = PROFILE_ID) -> dict[int, int | None]:
     phases: dict[int, int | None] = {}
-    for record in build_records():
+    for record in build_records(profile):
         phases[record.block] = record.phase
     return phases
 
@@ -163,12 +163,13 @@ class GlobalAttn(nn.Module):
 
 
 class NRModel(nn.Module):
-    def __init__(self) -> None:
+    def __init__(self, profile: str = PROFILE_ID) -> None:
         super().__init__()
-        phases = _phases()
+        self.profile = get_profile(profile).id
+        phases = _phases(profile)
         blocks = nn.ModuleDict()
-        for block in range(71):
-            blocks[str(block)] = self._make_block(block, phases[block])
+        for block in range(get_profile(profile).block_count):
+            blocks[str(block)] = self._make_block(block, phases[block], profile)
         self.blocks = blocks
         self.gradient_checkpointing = False
         self.reset_parameters()
@@ -177,23 +178,24 @@ class NRModel(nn.Module):
         self.gradient_checkpointing = True
 
     @staticmethod
-    def _make_block(block: int, phase: int | None) -> nn.Module:
+    def _make_block(block: int, phase: int | None, profile: str = PROFILE_ID) -> nn.Module:
+        topology = get_profile(profile)
         module = nn.Module()
-        if block == 39:
+        if block == topology.bridge_block:
             module.proj = ChannelLinear(512, 1024)
             module.skip_scale = nn.Parameter(torch.empty(512))
             return module
-        if 31 <= block <= 38:
+        if block in topology.vit_blocks:
             module.ffn = DenseFFN(1024, 4096)
             module.attn = GlobalAttn()
             return module
-        if 23 <= block <= 30 or 40 <= block <= 47:
+        channels = block_channels(block, profile)
+        if channels == 512:
             module.ffn = Split512FFN()
             module.attn = WindowAttn(512, int(phase))
-            if block == 30:
+            if block == topology.vit_blocks.start - 1:
                 module.to_vit = ChannelLinear(1024, 512)
             return module
-        channels = _window_channels(block)
         if channels == 32:
             module.ffn = DenseFFN(32, 128)
         else:
@@ -201,23 +203,11 @@ class NRModel(nn.Module):
         module.attn = WindowAttn(channels, int(phase))
         if block == 0:
             module.input_adapter = ChannelLinear(32, 16)
-        if block == 4:
-            module.down = ChannelLinear(64, 32)
-        elif block == 8:
-            module.down = ChannelLinear(128, 64)
-        elif block == 14:
-            module.down = ChannelLinear(256, 128)
-        elif block == 22:
-            module.down = ChannelLinear(512, 256)
-        if block == 48:
-            _attach_up(module, 256, 512)
-        elif block == 56:
-            _attach_up(module, 128, 256)
-        elif block == 62:
-            _attach_up(module, 64, 128)
-        elif block == 66:
-            _attach_up(module, 32, 64)
-        if block == 70:
+        if any(block == stage.stop - 1 for stage in topology.encoder_blocks[:-1]):
+            module.down = ChannelLinear(channels * 2, channels)
+        if any(block == stage.start for stage in topology.decoder_blocks[1:]):
+            _attach_up(module, channels, channels * 2)
+        if block == topology.head_block:
             module.merge = nn.Module()
             module.merge.up_scale = nn.Parameter(torch.empty(32))
             module.merge.adapter_scale = nn.Parameter(torch.empty(32))
@@ -244,8 +234,9 @@ class NRModel(nn.Module):
 
     def freeze_single_frame(self) -> None:
         """Logit and blend scale have no supervision without history."""
-        self.blocks["70"].head.logit.weight.requires_grad_(False)
-        self.blocks["70"].blend_scale.requires_grad_(False)
+        head = self.blocks[str(get_profile(getattr(self, "profile", PROFILE_ID)).head_block)]
+        head.head.logit.weight.requires_grad_(False)
+        head.blend_scale.requires_grad_(False)
 
     def enforce_lane15(self) -> None:
         weight = self.blocks["0"].input_adapter.weight
@@ -257,12 +248,12 @@ class NRModel(nn.Module):
             weight.grad[:, 15] = 0
 
     def load_canonical(self, path: str) -> None:
-        from safetensors.torch import load_file
+        from musubi_tuner.dlssnr.storage import load_canonical_tensors
 
         if getattr(self, "base_quantization", None) is not None:
             raise ValueError("load canonical weights into a fresh FP32 model before quantizing its frozen base")
-        tensors = load_file(path)
-        for block in range(31, 39):
+        tensors = load_canonical_tensors(path, getattr(self, "profile", PROFILE_ID))
+        for block in get_profile(getattr(self, "profile", PROFILE_ID)).vit_blocks:
             opaque = tensors.pop(f"blocks.{block}.opaque.layer3", None)
             if opaque is not None and (opaque.dtype != torch.uint8 or opaque.shape != (2,)):
                 raise ValueError(f"block {block}: opaque layer3 must contain exactly two bytes")
@@ -276,62 +267,39 @@ class NRModel(nn.Module):
 
     def forward(self, features: torch.Tensor, geometry: Geometry) -> torch.Tensor:
         """features [B, 16, full_h, full_w] -> raw head [B, 4, full_h, full_w]."""
+        topology = get_profile(self.profile)
         levels = geometry.levels
         checkpointing = self.gradient_checkpointing and self.training and torch.is_grad_enabled()
         block0 = self.blocks["0"]
         adapted = half_ste(block0.input_adapter(half_ste(features)))
         full = _run_block(block0, adapted, checkpointing, separate_residual=True)
         state = pool2x2(full, levels[0][1], levels[0][0])
-        state = _run_window_stage(self.blocks, state, range(1, 5), checkpointing=checkpointing)
-        skip32 = state
-        state = self.blocks["4"].down(pool2x2(state, levels[1][1], levels[1][0]))
+        skips = []
+        for level, blocks in enumerate(topology.encoder_blocks):
+            state = _run_window_stage(self.blocks, state, blocks, checkpointing=checkpointing)
+            skips.append(state)
+            pooled = pool2x2(state, levels[level + 1][1], levels[level + 1][0])
+            last = self.blocks[str(blocks[-1])]
+            state = last.to_vit(pooled) if level == 4 else last.down(pooled)
+        state = _run_window_stage(self.blocks, state, topology.vit_blocks, checkpointing=checkpointing)
 
-        state = _run_window_stage(self.blocks, state, range(5, 9), checkpointing=checkpointing)
-        skip64 = state
-        state = self.blocks["8"].down(pool2x2(state, levels[2][1], levels[2][0]))
+        bridge = self.blocks[str(topology.bridge_block)]
+        projected = half_ste(bridge.proj(e4m3_ste(state)))
+        state = _merge_skip(projected, skips[-1], bridge.skip_scale, levels[4])
+        state = _run_window_stage(self.blocks, state, topology.decoder_blocks[0], checkpointing=checkpointing)
+        for level, blocks in zip(range(3, -1, -1), topology.decoder_blocks[1:]):
+            state = _decode_stage(
+                self.blocks, state, blocks.start, blocks, skips[level], levels[level], checkpointing=checkpointing
+            )
 
-        state = _run_window_stage(self.blocks, state, range(9, 15), checkpointing=checkpointing)
-        skip128 = state
-        state = self.blocks["14"].down(pool2x2(state, levels[3][1], levels[3][0]))
-
-        state = _run_window_stage(self.blocks, state, range(15, 23), checkpointing=checkpointing)
-        skip256 = state
-        state = self.blocks["22"].down(pool2x2(state, levels[4][1], levels[4][0]))
-
-        state = _run_window_stage(self.blocks, state, range(23, 31), checkpointing=checkpointing)
-        skip512 = state
-        pooled = pool2x2(state, levels[5][1], levels[5][0])
-        state = self.blocks["30"].to_vit(pooled)
-        state = _run_window_stage(self.blocks, state, range(31, 39), checkpointing=checkpointing)
-
-        block39 = self.blocks["39"]
-        projected = half_ste(block39.proj(e4m3_ste(state)))
-        state = _merge_skip(projected, skip512, block39.skip_scale, levels[4])
-        state = _run_window_stage(self.blocks, state, range(40, 48), checkpointing=checkpointing)
-
-        state = _decode_stage(self.blocks, state, 48, range(48, 56), skip256, levels[3], checkpointing=checkpointing)
-        state = _decode_stage(self.blocks, state, 56, range(56, 62), skip128, levels[2], checkpointing=checkpointing)
-        state = _decode_stage(self.blocks, state, 62, range(62, 66), skip64, levels[1], checkpointing=checkpointing)
-        state = _decode_stage(self.blocks, state, 66, range(66, 70), skip32, levels[0], checkpointing=checkpointing)
-
-        block70 = self.blocks["70"]
+        head = self.blocks[str(topology.head_block)]
         upsampled = nearest_upsample(e4m3_ste(state), geometry.full_height, geometry.full_width)
-        low = half_ste(upsampled * half_ste(block70.merge.up_scale).view(1, -1, 1, 1))
-        merged = half_ste(low + e4m3_ste(full) * half_ste(block70.merge.adapter_scale).view(1, -1, 1, 1))
-        state = _run_block(block70, merged, checkpointing, separate_residual=True)
-        rgb = block70.head.rgb(state)
-        logit = block70.head.logit(state)
+        low = half_ste(upsampled * half_ste(head.merge.up_scale).view(1, -1, 1, 1))
+        merged = half_ste(low + e4m3_ste(full) * half_ste(head.merge.adapter_scale).view(1, -1, 1, 1))
+        state = _run_block(head, merged, checkpointing, separate_residual=True)
+        rgb = head.head.rgb(state)
+        logit = head.head.logit(state)
         return torch.cat((rgb, logit), dim=1)
-
-
-def _window_channels(block: int) -> int:
-    if block <= 4 or block >= 66:
-        return 32
-    if block <= 8 or block >= 62:
-        return 64
-    if block <= 14 or block >= 56:
-        return 128
-    return 256
 
 
 def _attach_up(module: nn.Module, out_channels: int, in_channels: int) -> None:
@@ -368,7 +336,7 @@ def _decode_stage(
     block = blocks[str(first)]
     projected = half_ste(block.up(e4m3_ste(state)))
     state = _merge_skip(projected, skip, block.up.skip_scale, high)
-    if first == 66:
+    if block.up.weight.shape[0] == 32:
         state = _run_block(block, state, checkpointing, separate_residual=True)
         return _run_window_stage(blocks, state, range(first + 1, block_ids.stop), checkpointing=checkpointing)
     return _run_window_stage(blocks, state, block_ids, checkpointing=checkpointing)

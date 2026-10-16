@@ -30,6 +30,7 @@ from musubi_tuner.dlssnr.profiles import (
     RecordLayout,
     Region,
     build_records,
+    get_profile,
 )
 
 
@@ -41,6 +42,7 @@ class LoadedSource:
     stage_sha256: dict[str, str]
     records: tuple[RecordLayout, ...]
     blobs: dict[str, bytes]
+    profile: str = PROFILE_ID
 
 
 def _reject_path(root: Path, relative: str) -> Path:
@@ -215,7 +217,7 @@ def measure_fingerprint(source: LoadedSource) -> dict[str, float | int]:
             elif region.kind == "e4":
                 codes = unpack_e4_codes(piece, region.k, region.n)
                 e4_parts.append(codes.reshape(-1))
-                if record.name == "block39.layer0.layer" and region.offset == 0:
+                if record.block == get_profile(source.profile).bridge_block and region.offset == 0:
                     from_vit_max = float(np.max(np.abs(decode_e4m3(codes))))
             elif region.kind == "prior":
                 prior_values.append(unpack_prior(piece, region.heads).reshape(-1))

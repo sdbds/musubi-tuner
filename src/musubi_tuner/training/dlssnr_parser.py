@@ -3,7 +3,7 @@
 import argparse
 from pathlib import Path
 
-from musubi_tuner.dlssnr.profiles import PROFILE_ID
+from musubi_tuner.dlssnr.profiles import PROFILES
 from musubi_tuner.training.parser_common import add_lr_scheduler_args, add_optimizer_args
 
 
@@ -21,7 +21,12 @@ def setup_parser(*, lora=False) -> argparse.ArgumentParser:
     parser.add_argument(
         "--model_dir", type=Path, help="Pretrained canonical model directory; required outside development smoke runs."
     )
-    parser.add_argument("--profile", default=PROFILE_ID, choices=[PROFILE_ID])
+    parser.add_argument(
+        "--profile",
+        default="auto",
+        choices=["auto", *PROFILES],
+        help="Detect HT/CC from --model_dir by default; explicit profiles must match the checkpoint.",
+    )
     parser.add_argument("--numerics_profile", default="train_surrogate", choices=["train_surrogate", "train_experimental"])
     parser.add_argument("--deployment_target", default="float_runtime", choices=["float_runtime", "native_roundtrip"])
     parser.add_argument(
@@ -163,6 +168,12 @@ def setup_parser(*, lora=False) -> argparse.ArgumentParser:
     parser.add_argument("--output_dir", type=Path, required=True)
     parser.add_argument("--output_name", required=True, help="Run directory name inside output_dir.")
     parser.add_argument("--save_every_n_steps", type=int, default=100)
+    parser.add_argument(
+        "--save_precision",
+        choices=("native", "fp32"),
+        default="native",
+        help="Full/EMA model storage (default: native FP8/FP16/FP32); LoRA and exact resume snapshots remain FP32.",
+    )
     parser.add_argument("--save_state", action="store_true", help="Save optimizer/RNG state as well as weights.")
     parser.add_argument("--resume", type=Path, help="Exact state directory written at an optimizer-update boundary.")
     if lora:

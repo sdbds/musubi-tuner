@@ -143,8 +143,8 @@ def test_trainer_microbatches_load_their_epoch_before_sampling_motion(tmp_path):
 def test_synthetic_only_training_updates_temporal_head_without_allocating_reference(tmp_path, monkeypatch):
     models = []
 
-    def create():
-        model = SmallNR()
+    def create(profile="dlss_nr_310_8_0"):
+        model = SmallNR(profile=profile)
         models.append(model)
         return model
 

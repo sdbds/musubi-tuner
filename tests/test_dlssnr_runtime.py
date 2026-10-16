@@ -55,6 +55,8 @@ def test_experimental_precision_accepts_canonical_training_without_smoke(tmp_pat
     args = config_args(tmp_path, ["--numerics_profile", "train_experimental", "--mixed_precision", precision])
     args.development_smoke = False
     args.model_dir = tmp_path / "converted"
+    args.model_dir.mkdir()
+    (args.model_dir / "model_config.json").write_text(json.dumps({"schema": "dlssnr_canonical_v1", "profile": "dlss_nr_310_8_0"}))
     config = build_train_config(args)
     assert config["precision"]["mixed_precision"] == precision
     assert config["precision"]["master_dtype"] == "float32"
@@ -177,8 +179,8 @@ def test_fp16_overflow_retries_same_batch_without_advancing_rng_or_counters(tmp_
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 @pytest.mark.usefixtures("small_math")
 def test_fp16_unrecoverable_gradient_never_saves_a_success(tmp_path, monkeypatch):
-    def corrupt_model():
-        model = SmallNR()
+    def corrupt_model(profile="dlss_nr_310_8_0"):
+        model = SmallNR(profile=profile)
         model.blocks["70"].head.rgb.weight.register_hook(lambda grad: torch.full_like(grad, float("inf")))
         return model
 

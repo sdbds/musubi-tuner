@@ -128,7 +128,8 @@ def test_resume_matches_an_uninterrupted_run(tmp_path: Path):
     args = _single_args(data, out)
     train_from_args(args)
     out = out / "run"
-    first = out / "final" / "model.safetensors"
+    # Compare unrounded resume masters; native final weights can hide small errors.
+    first = out / "state-step000002" / "model.safetensors"
     saved = tmp_path / "first.safetensors"
     shutil.copyfile(first, saved)
     args.resume = out / "state-step000001"
@@ -138,6 +139,7 @@ def test_resume_matches_an_uninterrupted_run(tmp_path: Path):
     left = load_file(saved)
     right = load_file(first)
     assert left.keys() == right.keys()
+    assert all(value.dtype == torch.float32 for value in left.values())
     worst = max((left[key] - right[key]).abs().max().item() for key in left)
     assert worst < 1e-6, worst
     args.learning_rate = 2e-3

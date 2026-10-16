@@ -12,6 +12,7 @@ from musubi_tuner.dlssnr.dataset import load_single_frame_manifest, load_tempora
 from musubi_tuner.dlssnr.model import NRModel
 from musubi_tuner.dlssnr.numerics import fp32_execution
 from musubi_tuner.dlssnr.pipeline import forward_frame
+from musubi_tuner.dlssnr.profiles import PROFILE_ID
 from musubi_tuner.dlssnr.temporal import stable_frame_seed
 from musubi_tuner.dlssnr.runtime import (
     default_runtime_policy,
@@ -28,7 +29,7 @@ def require_surrogate(numerics_profile: str) -> None:
 
 
 def load_model(model_dir: str | Path, device: str = "auto", *, runtime_overrides=None) -> NRModel:
-    from musubi_tuner.dlssnr.artifacts import inspect_canonical, read_artifact_runtime
+    from musubi_tuner.dlssnr.artifacts import inspect_canonical, read_artifact_runtime, read_canonical_profile
 
     if device not in ("auto", "cpu", "cuda"):
         raise ValueError("device must be auto, cpu or cuda")
@@ -48,7 +49,7 @@ def load_model(model_dir: str | Path, device: str = "auto", *, runtime_overrides
         policy["fp8_scaled"] = False
     validate_runtime_policy(policy)
     validate_runtime_device(policy, torch.device(device))
-    model = NRModel().to(dtype=torch.float32)
+    model = NRModel(profile=read_canonical_profile(model_dir)).to(dtype=torch.float32)
     model.load_canonical(str(Path(model_dir) / "model.safetensors"))
     model.requires_grad_(False)
     if policy["fp8_base"]:
@@ -99,6 +100,7 @@ def _write_inference_metadata(model, output, seed, width, height, manifest):
         output / "inference_metadata.json",
         {
             "schema": "dlssnr_inference_v1",
+            "profile": getattr(model, "profile", PROFILE_ID),
             "runtime_policy": getattr(model, "runtime_policy", default_runtime_policy()),
             "runtime_provenance": getattr(model, "runtime_provenance", None),
             "source_identity": getattr(model, "source_identity", None),

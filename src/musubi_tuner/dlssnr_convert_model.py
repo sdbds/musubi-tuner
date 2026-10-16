@@ -1,4 +1,4 @@
-"""Convert a DLSS-NR 310.8.0 model directory into canonical FP32 tensors."""
+"""Convert a DLSS-NR 310.8.0 model directory into canonical tensors."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ def main() -> None:
     parser.add_argument("--profile", default=PROFILE_ID)
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--verify_roundtrip", action="store_true")
+    parser.add_argument("--save_precision", choices=("native", "fp32"), default="native")
     args = parser.parse_args()
     if args.profile != PROFILE_ID:
         raise SystemExit(f"unsupported profile {args.profile}; this build knows {PROFILE_ID}")
@@ -22,7 +23,7 @@ def main() -> None:
     source = load_source(args.source_dir)
     assert_source_fingerprint(measure_fingerprint(source))
     assert_auxiliary_fingerprint(source)
-    report = convert_source(source, args.output_dir, verify=args.verify_roundtrip)
+    report = convert_source(source, args.output_dir, verify=args.verify_roundtrip, save_precision=args.save_precision)
     print(f"wrote {args.output_dir} roundtrip={report['roundtrip']} parameters={report['logical_parameters']}")
 
 

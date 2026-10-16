@@ -1,8 +1,8 @@
-# DLSS-NR 310.8.0 Training Support
+# DLSS-NR HT / CC Training Support
 
 ## Overview
 
-This is an experimental, standalone supervised-training path for DLSS-NR 310.8.0,
+This is an experimental, standalone supervised-training path for DLSS-NR HT (310.8.0/310.9.16) and CC (310.9.16),
 not a diffusion trainer. Native DLL equivalence remains unverified. It provides
 canonical weight conversion, checked DLL weight import/export, default FP32
 full/LoRA training, still/closed-loop inference, adapter merging and checked
@@ -35,6 +35,12 @@ Training writes all artifacts under `output_dir/output_name/`. A new run refuses
 an existing run directory; use `--resume` for a matching checkpoint. Sample IDs
 must be portable filenames, unique without regard to case. The commands and
 manifest contract below apply to both full and LoRA training.
+
+Training defaults to `--profile auto`, reading the architecture from
+`--model_dir/model_config.json`; inference and LoRA merging do the same.
+The explicit profiles are `dlss_nr_310_8_0` (HT) and `dlss_nr_310_9_16_cc` (CC).
+An explicit training profile must match the checkpoint. Without a model directory,
+development smoke mode still defaults to HT. HT and CC adapters are not interchangeable.
 
 Use `--dataset_config` for a **dataset-only TOML** with `[general]` and one or more
 `[[datasets]]` entries. Model, optimizer, LoRA, loss, evaluation and output settings
@@ -732,8 +738,9 @@ or lower target MAE alone do not establish better appearance or temporal stabili
 Old runtime-v1 artifacts retain their weight-publication policy; enabled QAT is
 bound to runtime-v2 metadata in canonical weight headers and LoRA files, and is
 restored on inference/merge. `--native_weight_qat` or `--no-native_weight_qat` can
-explicitly override publication in the image/video generators. Saved canonical
-tensors remain the unrounded FP32 masters for continued training and DLL export.
+explicitly override publication in the image/video generators. Ordinary saved
+canonical tensors default to native mixed precision. Use `--save_precision fp32`
+to retain unrounded masters; `--save_state` always retains them for exact resume.
 Resume requires the same QAT setting, EMA decay, parameter-group multipliers and
 implementation identity as the original run. Restore explicit settings from that
 run rather than relying on current defaults. Changes to numerical implementation,
@@ -887,7 +894,7 @@ establish capability or quality acceptance.
 
 ## DLL Unpacking and Repacking
 
-The existing unpack/pack scripts support HT canonical training weights and CC
+The existing unpack/pack scripts support HT/CC canonical training weights and CC
 lossless packed records. By default, unpacking selects every supported resource
 present in the DLL:
 
@@ -913,11 +920,41 @@ models/dlssnr/
       block30.layer0.blend_scale.bin
 ```
 
-`HT/` retains the existing canonical FP32 format and training provenance files.
+`HT/` retains the canonical layout and training provenance files, with native
+mixed-precision storage by default.
 `CC/` contains 77 raw records across 31 blocks, totaling 113,887,490 payload bytes.
-CC is **not a trainable canonical checkpoint**. Its serialized dtype and dimensions
+This raw CC output is **not a trainable canonical checkpoint**. Its serialized dtype and dimensions
 describe the packed container, not homogeneous FP8/FP16 logical tensors. Do not
 reinterpret or scale entire record files as one numeric dtype.
+
+For CC training or inference, request canonical conversion explicitly:
+
+```bash
+python dlssnr_unpack_model.py --source_dll /path/to/original/nvngx_dlssnr.dll --weights CC --cc_format canonical --output_dir models/canonical_cc
+python dlssnr_train.py --model_dir models/canonical_cc --dataset_config configs/dlssnr_dataset_single.toml --output_dir output/full --output_name cc
+python dlssnr_train_network.py --model_dir models/canonical_cc --dataset_config configs/dlssnr_dataset_single.toml --output_dir output/lora --output_name cc
+```
+
+`--cc_format canonical` decodes the mixed E4M3, FP16 and FP32 regions into
+`model.safetensors` and writes the same provenance files as HT. It also works
+with `--weights all`, producing canonical HT and CC children. The legacy default
+`--cc_format records` keeps the raw-record workflow unchanged.
+
+Canonical conversion and ordinary full/EMA/merged model saves default to
+`--save_precision native`: E4M3FN matrices, the original FP16 fields, and FP32
+temperatures. Loading expands numeric tensors into FP32 model parameters; this
+does not enable experimental `--fp8_base` execution. Legacy FP32 checkpoints remain
+readable. `--save_precision fp32` keeps all numeric weights unrounded. Storage
+policy is bound to both `model_config.json` and the safetensors header.
+
+CC contains 113,342,367 logical parameters: two window blocks per multiscale
+encoder/decoder stage, ViT blocks 11-18, the bridge at 19 and the output head at 30.
+The channel widths and per-block packing layouts match the corresponding HT
+types. Layout decoding/re-encoding is byte-verified against the audited resource;
+the forward graph reuses the existing surrogate operators and per-resolution
+window-phase progression. This is not native forward, native loader or image-quality
+certification. CC saves, LoRA targets, temporal freezing and native-weight QAT use
+the CC block numbering, while existing HT artifacts keep their original profile.
 
 If the DLL contains only HT, unpacking keeps the original single-directory behavior:
 `model.safetensors` is written directly under `--output_dir`. Explicit selection
@@ -947,14 +984,19 @@ python dlssnr_pack_model.py --template_dll /path/to/original/nvngx_dlssnr.dll --
 python dlssnr_pack_model.py --template_dll /path/to/original/nvngx_dlssnr.dll --model_dir models/dlssnr/HT --output_dll output/ht/nvngx_dlssnr.dll
 ```
 
-For CC, edit only the files in `records/`, keeping each file's size unchanged.
+For raw CC record directories, edit only the files in `records/`, keeping each file's size unchanged.
 Keep `manifest.json` unchanged: it records the original payload hashes, names,
 sizes and serialized metadata. Repacking replaces only CC payload bytes and
 preserves HT, resource headers, PE data and overlay bytes. The report lists changed
 records and byte counts. An unedited extraction rebuilds the whole DLL identically.
 Same-size edits are not validated for numerical meaning, image quality or native
-execution. CC rejects nondefault mix/strength settings and LoRA options;
+execution. Raw CC record directories reject nondefault mix/strength settings and LoRA options;
 `--record_dir` is an alias for `--model_dir`.
+
+Canonical CC directories support the same `--mix`, `--strength`, and
+`--merge_lora` options as HT. The packer selects the resource from the canonical
+profile and preserves the other weight resource. The original audited DLL is
+still required as the template.
 
 After full training, or after merging LoRA separately, repack the complete model directory:
 
@@ -1004,7 +1046,10 @@ Repacking rounds FP32 directly to the E4M3FN, FP16 or FP32 storage required by e
 original resource region, using nearest/ties-to-even. It adds no scale and never
 silently clips overflow. NaN/Inf, out-of-range values, missing/extra tensors,
 shape/dtype mismatches, nonzero input lane 15, modified opaque data and source
-mismatches are rejected. Quantization never overwrites the original FP32 training artifact.
+mismatches are rejected. Quantization never overwrites the input training artifact.
+Use FP32 model saves when experimenting with several `mix`/`strength` settings:
+native saves have already rounded off-grid updates. Inline `--merge_lora` keeps
+its temporary merge in FP32, so mix/strength precede the single export rounding.
 
 Both the output DLL and `<output_dll>.report.json` must be new paths. Only same-sized
 weight payloads are replaced; PE structure, resource metadata and all other content
@@ -1113,6 +1158,7 @@ Common arguments:
 | `--shuffle_dataset` / `--no-shuffle_dataset` | Seeded epoch shuffling of bucket samples and batch order is enabled by default; no argument is required. The negative flag optionally selects legacy fixed order. |
 | `--max_grad_norm` | Clips gradients at the accumulated update boundary. Default `0` disables clipping. |
 | `--ema_decay` / `--no-ema` | FP32 trainable-parameter EMA is disabled by default; supply a decay such as `0.99` to enable it. Raw and EMA products/evaluation remain separate. |
+| `--save_precision native\|fp32` | Full/EMA/merged checkpoints default to native FP8/FP16/FP32 storage. Exact resume snapshots and LoRA deltas remain FP32. |
 | `--native_weight_qat` / `--no-native_weight_qat` | Export-aligned weight QAT is disabled by default. These flags control weight QAT, not the existing E4M3 activation publications. |
 | `--gradient_checkpointing` | Recomputes activations to reduce memory, preserving the default numerical profile. Disabled by default. |
 | `--numerics_profile train_experimental` / `--mixed_precision` | Explicit experimental mode. CUDA precision accepts `no`, `fp16` or `bf16`; master weights remain FP32. |
@@ -1361,16 +1407,20 @@ base; older LoRA can be merged into a canonical base first, but this does not re
 the original optimizer or adapter parameterization. Do not edit checkpoint identity
 markers manually.
 
-Full-training `final/` contains FP32 weights, canonical configuration, the source
+Full-training `final/` contains native mixed-precision weights by default, canonical configuration, the source
 manifest, original opaque records, numerics/preprocessing information and training
 metadata. Runtime policy is bound to both required model config and safetensors
 headers. Missing or inconsistent bindings are rejected; reproducing the policy does
 not depend on an optional training sidecar. LoRA v2 stores the adapter,
 rank/alpha/targets, complete base identity and required runtime/quantization metadata.
 Conforming v1 FP32 adapters remain readable. FP8 adapter merging reconstructs and
-verifies the quantized base, then exports ordinary FP32 base-plus-delta weights marked
-as materialized. Default loading does not quantize them again. Merging preserves
-canonical provenance and opaque data.
+verifies the quantized base, then materializes base-plus-delta weights before saving.
+The default native save rounds these effective weights; scaled FP8 bases and
+off-grid training updates are not losslessly preserved. `storage_quantization` in
+the training/conversion report records rounded values, maximum absolute error and
+stored bytes. Choose `--save_precision fp32` for unrounded merged weights and exact
+adapter/merge comparisons. Loading does not apply frozen-base quantization again.
+Merging preserves canonical provenance and opaque data; LoRA delta files stay FP32.
 
 LoRA forward computation uses `W + alpha/r * B@A` on the weight side, following
 the same projection computation as merged weights. Real-weight tests found that
@@ -1381,6 +1431,8 @@ consistency at the cost of temporary matrices and backward work. Artifacts recor
 `canonical_weight_plus_delta_v1`.
 
 `--save_state` creates `state-stepNNNNNN/` at periodic and final update boundaries.
+Full-model weights and EMA products in those state directories stay FP32 regardless
+of `--save_precision`; optimizer state alone cannot restore rounded master weights.
 State includes the optimizer, actual global consumed-sample count, each rank's
 CPU/current-CUDA-device/Python/NumPy RNG, FP16 scaler, resolved configuration and
 data/batch-plan/base/implementation fingerprints, plus parameter EMA state when

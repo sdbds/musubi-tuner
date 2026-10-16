@@ -1,4 +1,4 @@
-"""Write selected HT canonical weights or CC packed records into a copy of an original DLL."""
+"""Write HT/CC canonical weights or CC packed records into a copy of an original DLL."""
 
 from __future__ import annotations
 
@@ -19,27 +19,27 @@ def setup_parser() -> argparse.ArgumentParser:
         "--record_dir",
         "--input",
         required=True,
-        help="HT canonical checkpoint, CC record directory, or multi-model output with --weights",
+        help="HT/CC canonical checkpoint, CC record directory, or multi-model output with --weights",
     )
     parser.add_argument(
         "--weights", choices=("HT", "CC"), help="Select a bundle child; otherwise inferred from the model directory"
     )
     parser.add_argument("--output_dll", "--output", required=True, help="New DLL path; also writes <path>.report.json")
     parser.add_argument(
-        "--mix", type=float, default=1.0, help="HT only: template/trained interpolation in [0,1]; 0=template, 1=trained (default)"
+        "--mix", type=float, default=1.0, help="Canonical weights: template/trained interpolation in [0,1]; default 1=trained"
     )
     parser.add_argument(
         "--strength",
         "--multiplier",
         type=float,
         default=1.0,
-        help="HT only: scale ALL numeric weights after mixing (default 1); not visual effect strength. Opaque bytes are unchanged.",
+        help="Canonical weights: scale ALL numeric weights after mixing (default 1); not visual effect strength.",
     )
     parser.add_argument(
-        "--merge_lora", "--lora_weight", help="HT only: DLSS-NR adapter.safetensors to merge into --model_dir before packing"
+        "--merge_lora", "--lora_weight", help="DLSS-NR adapter.safetensors to merge into a canonical --model_dir before packing"
     )
     parser.add_argument(
-        "--lora_multiplier", type=float, default=1.0, help="HT only: scale the LoRA delta before mixing (default 1)"
+        "--lora_multiplier", type=float, default=1.0, help="Canonical weights: scale the LoRA delta before mixing (default 1)"
     )
     return parser
 

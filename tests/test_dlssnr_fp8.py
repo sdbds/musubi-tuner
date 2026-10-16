@@ -14,8 +14,8 @@ from test_dlssnr_training import SmallNR
 
 
 class TinyFP8NR(SmallNR):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, profile="dlss_nr_310_8_0"):
+        super().__init__(profile=profile)
         block = torch.nn.Module()
         block.ffn = torch.nn.Module()
         block.ffn.fc1 = ChannelLinear(64, 32)
@@ -134,7 +134,8 @@ def test_fp8_rejects_trainable_base_matrices():
 
 
 @pytest.mark.parametrize("scaled", [False, True])
-def test_saved_fp8_adapter_merge_materializes_once_and_records_runtime(tmp_path, monkeypatch, scaled):
+@pytest.mark.parametrize("save_precision", ["native", "fp32"])
+def test_saved_fp8_adapter_merge_materializes_once_and_records_runtime(tmp_path, monkeypatch, scaled, save_precision):
     from musubi_tuner.dlssnr.fp8 import quantize_frozen_base
     from musubi_tuner.networks import lora_dlssnr
     from test_dlssnr_artifacts import make_canonical
@@ -161,11 +162,19 @@ def test_saved_fp8_adapter_merge_materializes_once_and_records_runtime(tmp_path,
     save_adapter(network, adapter, identity)
     monkeypatch.setattr(lora_dlssnr, "NRModel", TinyFP8NR)
     output = tmp_path / "merged"
-    lora_dlssnr.merge_to_directory(base_dir, adapter, output)
+    lora_dlssnr.merge_to_directory(base_dir, adapter, output, save_precision=save_precision)
     merged = TinyFP8NR()
-    merged.load_state_dict(load_file(output / "model.safetensors"), strict=True)
+    merged.load_canonical(str(output / "model.safetensors"))
     source = torch.rand(1, 16, 6, 9)
-    torch.testing.assert_close(merged(source, None), model(source, None), rtol=0, atol=0)
+    if save_precision == "fp32":
+        torch.testing.assert_close(merged(source, None), model(source, None), rtol=0, atol=0)
+    else:
+        from musubi_tuner.dlssnr.fp8 import materialize_state_dict
+        from musubi_tuner.dlssnr.storage import encode_canonical_tensors
+
+        effective = merge_adapter(materialize_state_dict(model), network)
+        expected, _, _ = encode_canonical_tensors(effective, model.profile)
+        torch.testing.assert_close(merged.state_dict(), {name: value.float() for name, value in expected.items()}, rtol=0, atol=0)
     metadata = json.loads((output / "training_metadata.json").read_text())
     assert metadata["runtime_policy"]["fp8_base"] is False
     assert metadata["base_quantization"]["effective_base_sha256"] == network.base_quantization["effective_base_sha256"]
