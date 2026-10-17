@@ -40,7 +40,7 @@ from musubi_tuner.dlssnr.profiles import PROFILE_ID, get_profile
 from musubi_tuner.dlssnr.temporal import SEED_POLICY, stable_frame_seed
 from musubi_tuner.dlssnr.synthetic_temporal import NRSyntheticTemporalDataset
 from musubi_tuner.dlssnr.training_step import loss_denominators, training_loss
-from musubi_tuner.dlssnr.weight_quantization import capture_native_reference, native_quantization_report
+from musubi_tuner.dlssnr.weight_quantization import capture_native_reference, native_quantization_report, native_weight_validation
 from musubi_tuner.training.dlssnr_ema import NRParameterEMA
 from musubi_tuner.training.dlssnr_services import (
     assert_finite_gradients,
@@ -705,16 +705,20 @@ class NRSupervisedTrainer:
                 if attempt:
                     restore_rng(attempt_rng)
                 metrics = {}
-                for batch, seeds in microbatches:
-                    with accelerator.accumulate(wrapped):
-                        loss, measured = coordinated_call(
-                            accelerator, lambda: wrapped(move_batch(batch, accelerator.device), seeds, denominators)
-                        )
-                        # Undo Accelerate's accumulation division and DDP's gradient averaging.
-                        accelerator.backward(loss * accum * world)
-                    del loss
-                    for name, value in measured.items():
-                        metrics[name] = max(metrics.get(name, 0), value) if name == "blend_max" else metrics.get(name, 0) + value
+                validation_scope = coordinated_call(accelerator, lambda: native_weight_validation(model))
+                with validation_scope:
+                    for batch, seeds in microbatches:
+                        with accelerator.accumulate(wrapped):
+                            loss, measured = coordinated_call(
+                                accelerator, lambda: wrapped(move_batch(batch, accelerator.device), seeds, denominators)
+                            )
+                            # Undo Accelerate's accumulation division and DDP's gradient averaging.
+                            accelerator.backward(loss * accum * world)
+                        del loss
+                        for name, value in measured.items():
+                            metrics[name] = (
+                                max(metrics.get(name, 0), value) if name == "blend_max" else metrics.get(name, 0) + value
+                            )
                 if not accelerator.sync_gradients:
                     raise RuntimeError("optimizer update is not at an accumulation boundary")
                 model.enforce_lane15()

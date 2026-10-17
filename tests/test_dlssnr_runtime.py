@@ -135,12 +135,25 @@ def test_amp_runner_resumes_scaler_weights_and_successful_counters(tmp_path, pre
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+@pytest.mark.parametrize("qat", [False, True])
 @pytest.mark.usefixtures("small_math")
-def test_fp16_overflow_retries_same_batch_without_advancing_rng_or_counters(tmp_path, monkeypatch):
+def test_fp16_overflow_retries_same_batch_without_advancing_rng_or_counters(tmp_path, monkeypatch, qat):
+    from test_dlssnr_qat_validation import SmallCheckpointNR
+
     from musubi_tuner.training import dlssnr_services as services
 
     real_create = services.create_accelerator
-    for name, initial_scale in (("clean", 1.0), ("overflow", 2**32)):
+    if qat:
+        monkeypatch.setattr(trainer, "NRModel", SmallCheckpointNR)
+    for name in ("overflow", "clean"):
+        # Use the successful retry's scale for the reference, isolating retries from FP16 rounding.
+        initial_scale = (
+            2**32
+            if name == "overflow"
+            else torch.load(tmp_path / "overflow/output/dlssnr/state-step000001/trainer_state.pt", weights_only=True)[
+                "rank_states"
+            ][0]["scaler"]["scale"]
+        )
 
         def create(training, precision=None, initial_scale=initial_scale):
             accelerator = real_create(training, precision)
@@ -156,20 +169,27 @@ def test_fp16_overflow_retries_same_batch_without_advancing_rng_or_counters(tmp_
             return accelerator
 
         monkeypatch.setattr(trainer, "create_accelerator", create)
-        args = make_args(tmp_path / name, lora=True)
+        args = make_args(tmp_path / name, lora=not qat)
         args.device, args.numerics_profile, args.mixed_precision = "cuda", "train_experimental", "fp16"
         args.max_overflow_retries = 40
-        trainer.train_lora_from_args(args)
+        if qat:
+            args.native_weight_qat, args.ema_decay, args.gradient_checkpointing = True, 0.5, True
+            args.gradient_checkpointing_min_pixels = 1000
+        (trainer.train_from_args if qat else trainer.train_lora_from_args)(args)
         AcceleratorState._reset_state(reset_partial_state=True)
     clean = tmp_path / "clean/output/dlssnr"
     overflow = tmp_path / "overflow/output/dlssnr"
-    left, right = [load_file(folder / "final/adapter.safetensors") for folder in (clean, overflow)]
-    # Loss scaling changes rounding, not the selected samples or dropout RNG stream.
-    torch.testing.assert_close(left, right, rtol=0.02, atol=5e-5)
+    filename = "model.safetensors" if qat else "adapter.safetensors"
+    left, right = [load_file(folder / "final" / filename) for folder in (clean, overflow)]
+    torch.testing.assert_close(left, right, rtol=0, atol=0)
     first = torch.load(clean / "state-step000002/trainer_state.pt", weights_only=True)
     last = torch.load(overflow / "state-step000002/trainer_state.pt", weights_only=True)
     assert last["global_update"] == first["global_update"] == 2
     assert last["consumed_samples"] == first["consumed_samples"] == 4
+    assert last["scheduler"] == first["scheduler"]
+    if qat:
+        assert last["ema"]["num_updates"] == first["ema"]["num_updates"] == 2
+        torch.testing.assert_close(last["ema"]["shadow"], first["ema"]["shadow"], rtol=0, atol=0)
     torch.testing.assert_close(last["rank_states"][0]["rng"]["torch"], first["rank_states"][0]["rng"]["torch"], rtol=0, atol=0)
     torch.testing.assert_close(last["rank_states"][0]["rng"]["cuda"], first["rank_states"][0]["rng"]["cuda"], rtol=0, atol=0)
     records = [json.loads(line) for line in (overflow / "metrics.jsonl").read_text().splitlines()]

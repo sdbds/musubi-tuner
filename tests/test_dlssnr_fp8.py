@@ -137,6 +137,7 @@ def test_fp8_rejects_trainable_base_matrices():
 @pytest.mark.parametrize("save_precision", ["native", "fp32"])
 def test_saved_fp8_adapter_merge_materializes_once_and_records_runtime(tmp_path, monkeypatch, scaled, save_precision):
     from musubi_tuner.dlssnr.fp8 import quantize_frozen_base
+    from musubi_tuner.dlssnr.runtime import default_runtime_policy
     from musubi_tuner.networks import lora_dlssnr
     from test_dlssnr_artifacts import make_canonical
 
@@ -149,7 +150,7 @@ def test_saved_fp8_adapter_merge_materializes_once_and_records_runtime(tmp_path,
     with torch.no_grad():
         network.adapters[0].lora_up.fill_(0.015)
     network.runtime_policy = {
-        "schema": "dlssnr_runtime_v1",
+        **default_runtime_policy(),
         "numerics_profile": "train_experimental",
         "mixed_precision": "no",
         "gradient_checkpointing": True,

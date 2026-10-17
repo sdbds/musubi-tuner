@@ -19,6 +19,7 @@ from musubi_tuner.dlssnr.infer import add_runtime_arguments
 from musubi_tuner.dlssnr.numerics import fp32_execution
 from musubi_tuner.dlssnr.profiles import PROFILE_ID
 from musubi_tuner.dlssnr.runtime import runtime_policy, validate_runtime_device, validate_runtime_policy
+from musubi_tuner.dlssnr.weight_quantization import native_weight_validation
 from musubi_tuner.training.dlssnr_services import (
     assert_finite_parameters,
     capture_rng,
@@ -43,6 +44,7 @@ def setup_parser():
     parser.add_argument("--network_dim", type=int, default=16)
     parser.add_argument("--learning_rate", type=float, default=None)
     parser.add_argument("--gradient_checkpointing", action="store_true")
+    parser.add_argument("--gradient_checkpointing_min_pixels", type=int, default=0)
     add_runtime_arguments(parser)
     parser.set_defaults(
         numerics_profile="train_surrogate",
@@ -88,6 +90,7 @@ def benchmark_config(args):
             "device": "cuda",
             "gradient_accumulation_steps": 1,
             "gradient_checkpointing": args.gradient_checkpointing,
+            "gradient_checkpointing_min_pixels": args.gradient_checkpointing_min_pixels,
             "max_overflow_retries": 16,
         },
         "optimizer": {
@@ -144,9 +147,10 @@ def measure(args):
                 optimizer.zero_grad(set_to_none=True)
                 if attempt:
                     restore_rng(rng)
-                loss, metrics = wrapped(batch, seeds)
-                accelerator.backward(loss)
-                del loss
+                with native_weight_validation(model):
+                    loss, metrics = wrapped(batch, seeds)
+                    accelerator.backward(loss)
+                    del loss
                 model.enforce_lane15()
                 if optimizer_update(accelerator, owner, optimizer, 0.0):
                     break

@@ -63,7 +63,7 @@ def test_weight_ste_does_not_hide_unexportable_weights(kind, value):
 def qat_policy(**changes):
     from musubi_tuner.dlssnr.runtime import default_runtime_policy
 
-    return {**default_runtime_policy(), "schema": "dlssnr_runtime_v2", "native_weight_qat": True, **changes}
+    return {**default_runtime_policy(), "native_weight_qat": True, **changes}
 
 
 def test_runtime_assigns_native_storage_without_changing_masters():
@@ -85,8 +85,8 @@ def test_qat_cli_is_opt_in_and_requires_zero_lora_dropout(tmp_path):
     from test_dlssnr_config import make_args
 
     normal = runtime_policy(build_train_config(make_args(tmp_path)))
-    assert normal["schema"] == "dlssnr_runtime_v1"
-    assert "native_weight_qat" not in normal
+    assert normal["schema"] == "dlssnr_runtime_v3"
+    assert normal["native_weight_qat"] is False
     args = make_args(tmp_path, ["--native_weight_qat"])
     assert runtime_policy(build_train_config(args)) == qat_policy()
     args = make_args(tmp_path, ["--native_weight_qat", "--network_dropout", "0.2"], lora=True)

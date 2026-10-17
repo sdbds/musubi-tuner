@@ -11,7 +11,7 @@ from musubi_tuner.dlssnr.numerics import SURROGATE_FLAGS, fp32_execution
 from musubi_tuner.dlssnr.profiles import PROFILE_ID
 from musubi_tuner.dlssnr.weight_quantization import native_storage_kinds
 
-RUNTIME_SCHEMA = "dlssnr_runtime_v1"
+RUNTIME_SCHEMA = "dlssnr_runtime_v3"
 COMPUTE_DTYPES = {"no": None, "fp16": torch.float16, "bf16": torch.bfloat16}
 
 
@@ -21,10 +21,12 @@ def default_runtime_policy() -> dict:
         "numerics_profile": "train_surrogate",
         "mixed_precision": "no",
         "gradient_checkpointing": False,
+        "gradient_checkpointing_min_pixels": 0,
         "attention_backend": "native",
         "attention_scope": "all",
         "fp8_base": False,
         "fp8_scaled": False,
+        "native_weight_qat": False,
     }
 
 
@@ -34,6 +36,7 @@ def runtime_policy(config: dict) -> dict:
         "numerics_profile": config["model"]["numerics_profile"],
         "mixed_precision": config["precision"]["mixed_precision"],
         "gradient_checkpointing": config["training"]["gradient_checkpointing"],
+        "gradient_checkpointing_min_pixels": config["training"].get("gradient_checkpointing_min_pixels", 0),
         "attention_backend": config["model"].get("attention_backend", "native"),
         "attention_scope": config["model"].get("attention_scope", "all"),
         "fp8_base": config["precision"].get("fp8_base", False),
@@ -46,26 +49,25 @@ def with_native_weight_qat(policy: dict, enabled: bool) -> dict:
     policy = dict(policy)
     if type(enabled) is not bool:
         raise ValueError("native_weight_qat must be a boolean")
-    policy["schema"] = "dlssnr_runtime_v2" if enabled else RUNTIME_SCHEMA
-    if enabled:
-        policy["native_weight_qat"] = True
-    else:
-        policy.pop("native_weight_qat", None)
+    policy["native_weight_qat"] = enabled
     return policy
 
 
 def validate_runtime_policy(policy: dict, *, training=False) -> None:
     if not isinstance(policy, dict):
         raise ValueError("NR runtime policy must be an object")
-    qat_schema = policy.get("schema") == "dlssnr_runtime_v2"
-    expected = set(default_runtime_policy()) | ({"native_weight_qat"} if qat_schema else set())
-    if set(policy) != expected:
+    if policy.get("schema") != RUNTIME_SCHEMA:
+        raise ValueError("unsupported NR runtime policy schema")
+    if set(policy) != set(default_runtime_policy()):
         raise ValueError("NR runtime policy has missing or unsupported fields")
-    for field in ("gradient_checkpointing", "fp8_base", "fp8_scaled", *(("native_weight_qat",) if qat_schema else ())):
+    for field in ("gradient_checkpointing", "fp8_base", "fp8_scaled", "native_weight_qat"):
         if type(policy[field]) is not bool:
             raise ValueError(f"runtime policy {field} must be a boolean")
-    if policy.get("schema") not in (RUNTIME_SCHEMA, "dlssnr_runtime_v2"):
-        raise ValueError("unsupported NR runtime policy schema")
+    minimum_pixels = policy["gradient_checkpointing_min_pixels"]
+    if type(minimum_pixels) is not int or minimum_pixels < 0:
+        raise ValueError("gradient_checkpointing_min_pixels must be a nonnegative integer")
+    if minimum_pixels and not policy["gradient_checkpointing"]:
+        raise ValueError("gradient_checkpointing_min_pixels requires gradient_checkpointing")
     if policy.get("numerics_profile") not in ("train_surrogate", "train_experimental"):
         raise ValueError("unsupported NR runtime numerics_profile")
     if policy.get("mixed_precision") not in COMPUTE_DTYPES:
@@ -130,6 +132,7 @@ def configure_model_runtime(model, policy: dict, *, training=False) -> None:
         model.enable_gradient_checkpointing()
     elif hasattr(model, "gradient_checkpointing"):
         model.gradient_checkpointing = False
+    model.gradient_checkpointing_min_pixels = policy["gradient_checkpointing_min_pixels"] if training else 0
     model.runtime_policy = dict(policy)
     model.native_weight_qat = policy.get("native_weight_qat", False)
 
@@ -168,7 +171,8 @@ def native_weight_runtime(model):
     """Evaluate exportable weights with native attention, without changing masters or optimizer state."""
     missing = object()
     saved = [
-        (model, name, getattr(model, name, missing)) for name in ("runtime_policy", "gradient_checkpointing", "native_weight_qat")
+        (model, name, getattr(model, name, missing))
+        for name in ("runtime_policy", "gradient_checkpointing", "gradient_checkpointing_min_pixels", "native_weight_qat")
     ]
     for module in model.modules():
         for name in ("compute_dtype", "attention_backend", "native_weight_kind"):

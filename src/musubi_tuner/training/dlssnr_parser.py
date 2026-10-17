@@ -78,6 +78,12 @@ def setup_parser(*, lora=False) -> argparse.ArgumentParser:
     )
     ema.add_argument("--no-ema", dest="ema_decay", action="store_const", const=None, help="Disable parameter EMA.")
     parser.add_argument("--gradient_checkpointing", action="store_true", help="Recompute NR blocks during backward to save memory.")
+    parser.add_argument(
+        "--gradient_checkpointing_min_pixels",
+        type=int,
+        default=0,
+        help="Checkpoint only blocks with feature-map H*W above this threshold (0: all); requires --gradient_checkpointing.",
+    )
     parser.add_argument("--sequence_length", type=int, default=None, help="Temporal mode requires all three clip-length arguments.")
     parser.add_argument("--burn_in", type=int, default=None)
     parser.add_argument("--tbptt_length", type=int, default=None)

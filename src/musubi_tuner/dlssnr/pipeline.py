@@ -44,7 +44,7 @@ def forward_frame(
     neural = preclamp.clamp(0, 1)
     blend = model.blocks[str(get_profile(getattr(model, "profile", PROFILE_ID)).head_block)].blend_scale
     if getattr(model, "native_weight_qat", False):
-        blend = native_weight_ste(blend, "f16")
+        blend = native_weight_ste(blend, "f16", validation=getattr(model, "_native_blend_validation", None))
     if history is None or usable is None:
         weight = neural.new_zeros(source_proxy.shape[0], 1, geometry.valid_height, geometry.valid_width)
         rendered = neural

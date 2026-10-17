@@ -308,6 +308,18 @@ def test_rank_zero_output_failure_is_reported_to_both_ranks_without_hanging(tmp_
     assert sentinel.read_text() == "preserve me"
 
 
+def test_qat_preflight_failure_reaches_both_ranks_before_forward_collectives(tmp_path):
+    _data(tmp_path)
+    (tmp_path / "qat").touch()
+    (tmp_path / "fail_qat_preflight").touch()
+    codes, logs = _launch(tmp_path, failure=True)
+    assert codes == [0, 0], logs
+    for rank in range(2):
+        message = json.loads((tmp_path / f"rank{rank}.json").read_text())["error"]
+        assert "rank 1" in message and "finite" in message
+    assert not list(tmp_path.rglob("trainer_state.pt"))
+
+
 def test_fp8_frozen_buffers_support_ddp_resume_without_fp8_collectives(tmp_path):
     _data(tmp_path)
     (tmp_path / "fp8").touch()
@@ -325,6 +337,16 @@ def _worker(root, rank, lora, dropout, resume, failure):
 
     trainer.NRModel = SmallNR
     lora_dlssnr.inject = small_inject
+    if (root / "fail_qat_preflight").exists():
+        original_validation = trainer.native_weight_validation
+
+        def invalid_preflight(model):
+            if rank == 1:
+                with torch.no_grad():
+                    model.blocks["0"].input_adapter.weight[0, 0] = float("nan")
+            return original_validation(model)
+
+        trainer.native_weight_validation = invalid_preflight
     if (root / "fail_synthetic_sample").exists():
         from musubi_tuner.dlssnr.synthetic_temporal import NRSyntheticTemporalDataset
 
