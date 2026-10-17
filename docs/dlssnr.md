@@ -692,6 +692,13 @@ separate projection branch, not a single exportable weight. Frozen FP8 base stor
 can still be used with its existing experimental-mode restrictions; QAT runs after
 that effective base is materialized and the adapter is added.
 
+Full-model training batches finite/range checks before each optimizer attempt,
+including every overflow retry. That validation remains active through backward
+recomputation and ends before optimizer or EMA updates. Quantized weights are
+still rebuilt on every publication; no quantized-weight cache crosses attempts.
+LoRA keeps per-publication checks on its fused effective weights. The batched
+path does not support untracked `.data` mutations during forward/backward.
+
 To isolate deployment mismatch first, add these arguments to an existing training
 command (the dataset must include a held-out `validation_manifest` or
 `sequence_manifest` for `--eval_native`):
@@ -735,13 +742,14 @@ controls requires a new comparison. They remain surrogate measurements and recor
 `native_equivalent=false`; game/DLL output acceptance is separate. High flip rates
 or lower target MAE alone do not establish better appearance or temporal stability.
 
-Old runtime-v1 artifacts retain their weight-publication policy; enabled QAT is
-bound to runtime-v2 metadata in canonical weight headers and LoRA files, and is
-restored on inference/merge. `--native_weight_qat` or `--no-native_weight_qat` can
+Runtime metadata uses one format, `dlssnr_runtime_v3`, with explicit QAT and
+checkpoint-threshold fields. Older runtime formats are rejected. The policy is
+stored in canonical weight headers and LoRA files and restored on inference/merge.
+`--native_weight_qat` or `--no-native_weight_qat` can
 explicitly override publication in the image/video generators. Ordinary saved
 canonical tensors default to native mixed precision. Use `--save_precision fp32`
 to retain unrounded masters; `--save_state` always retains them for exact resume.
-Resume requires the same QAT setting, EMA decay, parameter-group multipliers and
+Resume requires the same QAT setting, checkpoint threshold, EMA decay, parameter-group multipliers and
 implementation identity as the original run. Restore explicit settings from that
 run rather than relying on current defaults. Changes to numerical implementation,
 including the former forced-TF32-off scope, require a new run from saved weights
@@ -774,6 +782,45 @@ the encoder, ViT and decoder. Burn-in and evaluation are not recomputed. Full an
 LoRA training both support it; frozen inputs do not cut off LoRA gradients, and
 dropout RNG state is restored during recomputation. It is disabled by default and
 does not require a different numerical profile.
+
+To trade more activation memory for less recomputation, add a feature-map area
+threshold:
+
+```text
+--gradient_checkpointing --gradient_checkpointing_min_pixels 20000
+```
+
+Only blocks whose input feature map has `H * W > 20000` are checkpointed. Smaller
+blocks retain their activations. This measures each block's padded feature map,
+not the source image or batch size. The default threshold is `0`, which retains
+all-block checkpointing when `--gradient_checkpointing` is enabled. A positive
+threshold requires that flag. Higher thresholds can exhaust VRAM; measure a short
+run at the intended resolution and batch size. Changing this setting requires a
+new run rather than exact resume. Inference does not checkpoint blocks.
+
+Dynamic Gaussian noise uses broadcast coordinates and bounded row chunks. It
+preserves the original published FP32 values for the same size and seed and does
+not consume the Python, NumPy or Torch RNG streams. Noise is still generated for
+each requested seed; this does not introduce a dataset or pixel cache.
+
+An isolated RTX 4090 check on 2026-10-17 used the full CC model, one 1024 x 1024
+image pair, batch size 1, FP16, global FlashAttention, native-weight QAT,
+AdamW_adv and EMA 0.99. Each timing run warmed up for 3 updates and measured 10;
+data preparation and optimizer/EMA work were included, exports and evaluation
+were not. No measured update retried an overflow.
+
+| Runtime | Median Seconds/Update | Peak Reserved GiB |
+| --- | ---: | ---: |
+| Original noise and individual QAT checks, baseline / repeat | 1.865 / 1.894 | 12.72 |
+| Tiled noise and batched QAT checks | 1.724 | 12.73 |
+| Above plus checkpoint threshold 20000 | 1.473 | 17.73 |
+
+The combined setting reduced update time by about 21-22% in this workload at a
+cost of about 5 GiB reserved memory. These are not RTX 5090 speedup estimates.
+In a separate deterministic-kernel check, all three updates matched the original
+path bit for bit in outputs, gradients, parameters, optimizer, EMA, scheduler,
+scaler and RNG state. Normal timing runs, including the repeated baseline, were
+not bitwise reproducible; their speed measurements do not establish model quality.
 
 For other options, select experimental mode explicitly:
 
@@ -1161,6 +1208,7 @@ Common arguments:
 | `--save_precision native\|fp32` | Full/EMA/merged checkpoints default to native FP8/FP16/FP32 storage. Exact resume snapshots and LoRA deltas remain FP32. |
 | `--native_weight_qat` / `--no-native_weight_qat` | Export-aligned weight QAT is disabled by default. These flags control weight QAT, not the existing E4M3 activation publications. |
 | `--gradient_checkpointing` | Recomputes activations to reduce memory, preserving the default numerical profile. Disabled by default. |
+| `--gradient_checkpointing_min_pixels` | Checkpoint only blocks with input feature-map `H * W` above this nonnegative threshold. Default `0` keeps all-block checkpointing; positive values require `--gradient_checkpointing`. |
 | `--numerics_profile train_experimental` / `--mixed_precision` | Explicit experimental mode. CUDA precision accepts `no`, `fp16` or `bf16`; master weights remain FP32. |
 | `--fp8_base` / `--fp8_scaled` | LoRA-only frozen-base storage quantization. Scaled requires base, and both require experimental mode. |
 | `--sdpa` / `--xformers` / `--flash_attn` / `--attention_scope` | Explicit experimental attention and its scope; restrictions are listed above. |

@@ -39,7 +39,9 @@ class ChannelLinear(nn.Module):
         return self.project(self.published_weight(self.materialized_weight()), x)
 
     def published_weight(self, weight: torch.Tensor) -> torch.Tensor:
-        return native_weight_ste(weight, self.native_weight_kind) if self.native_weight_kind is not None else weight
+        if self.native_weight_kind is None:
+            return weight
+        return native_weight_ste(weight, self.native_weight_kind, validation=getattr(self, "_native_weight_validation", None))
 
     def materialized_weight(self) -> torch.Tensor:
         weight = self.weight.float() if self.weight.dtype == torch.float8_e4m3fn else self.weight
@@ -172,10 +174,14 @@ class NRModel(nn.Module):
             blocks[str(block)] = self._make_block(block, phases[block], profile)
         self.blocks = blocks
         self.gradient_checkpointing = False
+        self.gradient_checkpointing_min_pixels = 0
         self.reset_parameters()
 
-    def enable_gradient_checkpointing(self) -> None:
+    def enable_gradient_checkpointing(self, min_pixels: int = 0) -> None:
+        if type(min_pixels) is not int or min_pixels < 0:
+            raise ValueError("gradient_checkpointing_min_pixels must be a nonnegative integer")
         self.gradient_checkpointing = True
+        self.gradient_checkpointing_min_pixels = min_pixels
 
     @staticmethod
     def _make_block(block: int, phase: int | None, profile: str = PROFILE_ID) -> nn.Module:
@@ -270,33 +276,43 @@ class NRModel(nn.Module):
         topology = get_profile(self.profile)
         levels = geometry.levels
         checkpointing = self.gradient_checkpointing and self.training and torch.is_grad_enabled()
+        min_pixels = self.gradient_checkpointing_min_pixels
         block0 = self.blocks["0"]
         adapted = half_ste(block0.input_adapter(half_ste(features)))
-        full = _run_block(block0, adapted, checkpointing, separate_residual=True)
+        full = _run_block(block0, adapted, checkpointing, separate_residual=True, min_pixels=min_pixels)
         state = pool2x2(full, levels[0][1], levels[0][0])
         skips = []
         for level, blocks in enumerate(topology.encoder_blocks):
-            state = _run_window_stage(self.blocks, state, blocks, checkpointing=checkpointing)
+            state = _run_window_stage(self.blocks, state, blocks, checkpointing=checkpointing, min_pixels=min_pixels)
             skips.append(state)
             pooled = pool2x2(state, levels[level + 1][1], levels[level + 1][0])
             last = self.blocks[str(blocks[-1])]
             state = last.to_vit(pooled) if level == 4 else last.down(pooled)
-        state = _run_window_stage(self.blocks, state, topology.vit_blocks, checkpointing=checkpointing)
+        state = _run_window_stage(self.blocks, state, topology.vit_blocks, checkpointing=checkpointing, min_pixels=min_pixels)
 
         bridge = self.blocks[str(topology.bridge_block)]
         projected = half_ste(bridge.proj(e4m3_ste(state)))
         state = _merge_skip(projected, skips[-1], bridge.skip_scale, levels[4])
-        state = _run_window_stage(self.blocks, state, topology.decoder_blocks[0], checkpointing=checkpointing)
+        state = _run_window_stage(
+            self.blocks, state, topology.decoder_blocks[0], checkpointing=checkpointing, min_pixels=min_pixels
+        )
         for level, blocks in zip(range(3, -1, -1), topology.decoder_blocks[1:]):
             state = _decode_stage(
-                self.blocks, state, blocks.start, blocks, skips[level], levels[level], checkpointing=checkpointing
+                self.blocks,
+                state,
+                blocks.start,
+                blocks,
+                skips[level],
+                levels[level],
+                checkpointing=checkpointing,
+                min_pixels=min_pixels,
             )
 
         head = self.blocks[str(topology.head_block)]
         upsampled = nearest_upsample(e4m3_ste(state), geometry.full_height, geometry.full_width)
         low = half_ste(upsampled * half_ste(head.merge.up_scale).view(1, -1, 1, 1))
         merged = half_ste(low + e4m3_ste(full) * half_ste(head.merge.adapter_scale).view(1, -1, 1, 1))
-        state = _run_block(head, merged, checkpointing, separate_residual=True)
+        state = _run_block(head, merged, checkpointing, separate_residual=True, min_pixels=min_pixels)
         rgb = head.head.rgb(state)
         logit = head.head.logit(state)
         return torch.cat((rgb, logit), dim=1)
@@ -307,21 +323,23 @@ def _attach_up(module: nn.Module, out_channels: int, in_channels: int) -> None:
     module.up.skip_scale = nn.Parameter(torch.empty(out_channels))
 
 
-def _run_block(block, state, checkpointing, *, separate_residual=False):
+def _run_block(block, state, checkpointing, *, separate_residual=False, min_pixels=0):
     # Bind this block outside the stage loop so backward cannot replay a later block.
     def forward(value):
         hidden = block.ffn(value, residual=value) if separate_residual else block.ffn(value)
         return block.attn(hidden)
 
-    if checkpointing and block.training and torch.is_grad_enabled():
+    if checkpointing and block.training and torch.is_grad_enabled() and state.shape[-2] * state.shape[-1] > min_pixels:
         return checkpoint(forward, state, use_reentrant=False, preserve_rng_state=True)
     return forward(state)
 
 
-def _run_window_stage(blocks: nn.ModuleDict, state: torch.Tensor, block_ids: range, *, checkpointing=False) -> torch.Tensor:
+def _run_window_stage(
+    blocks: nn.ModuleDict, state: torch.Tensor, block_ids: range, *, checkpointing=False, min_pixels=0
+) -> torch.Tensor:
     for block_id in block_ids:
         block = blocks[str(block_id)]
-        state = _run_block(block, state, checkpointing)
+        state = _run_block(block, state, checkpointing, min_pixels=min_pixels)
     return state
 
 
@@ -331,12 +349,14 @@ def _merge_skip(projected: torch.Tensor, skip: torch.Tensor, scale: torch.Tensor
 
 
 def _decode_stage(
-    blocks, state, first: int, block_ids: range, skip: torch.Tensor, high: tuple[int, int], *, checkpointing=False
+    blocks, state, first: int, block_ids: range, skip: torch.Tensor, high: tuple[int, int], *, checkpointing=False, min_pixels=0
 ) -> torch.Tensor:
     block = blocks[str(first)]
     projected = half_ste(block.up(e4m3_ste(state)))
     state = _merge_skip(projected, skip, block.up.skip_scale, high)
     if block.up.weight.shape[0] == 32:
-        state = _run_block(block, state, checkpointing, separate_residual=True)
-        return _run_window_stage(blocks, state, range(first + 1, block_ids.stop), checkpointing=checkpointing)
-    return _run_window_stage(blocks, state, block_ids, checkpointing=checkpointing)
+        state = _run_block(block, state, checkpointing, separate_residual=True, min_pixels=min_pixels)
+        return _run_window_stage(
+            blocks, state, range(first + 1, block_ids.stop), checkpointing=checkpointing, min_pixels=min_pixels
+        )
+    return _run_window_stage(blocks, state, block_ids, checkpointing=checkpointing, min_pixels=min_pixels)

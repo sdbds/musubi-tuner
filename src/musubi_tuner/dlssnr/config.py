@@ -242,8 +242,12 @@ def build_train_config(args, *, lora=False) -> dict:
         "gradient_accumulation_steps": args.gradient_accumulation_steps,
         "max_train_steps": args.max_train_steps,
         "gradient_checkpointing": args.gradient_checkpointing,
+        "gradient_checkpointing_min_pixels": args.gradient_checkpointing_min_pixels,
         "max_overflow_retries": args.max_overflow_retries,
     }
+    _integer(args.gradient_checkpointing_min_pixels, "--gradient_checkpointing_min_pixels", 0)
+    if args.gradient_checkpointing_min_pixels and not args.gradient_checkpointing:
+        raise ValueError("--gradient_checkpointing_min_pixels requires --gradient_checkpointing")
     if args.ema_decay is not None:
         _number(args.ema_decay, "--ema_decay", positive=True)
         if args.ema_decay >= 1:

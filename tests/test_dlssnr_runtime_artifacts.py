@@ -9,6 +9,7 @@ from safetensors.torch import load_file, save_file
 
 from musubi_tuner.dlssnr import infer
 from musubi_tuner.dlssnr.artifacts import save_canonical
+from musubi_tuner.dlssnr.runtime import default_runtime_policy
 from musubi_tuner.networks import lora_dlssnr
 from test_dlssnr_artifacts import make_canonical
 from test_dlssnr_fp8 import TinyFP8NR, tiny_fp8_inject
@@ -17,14 +18,7 @@ from test_dlssnr_training import SmallNR, make_args
 
 def _policy(**changes):
     return {
-        "schema": "dlssnr_runtime_v1",
-        "numerics_profile": "train_surrogate",
-        "mixed_precision": "no",
-        "gradient_checkpointing": False,
-        "attention_backend": "native",
-        "attention_scope": "all",
-        "fp8_base": False,
-        "fp8_scaled": False,
+        **default_runtime_policy(),
         **changes,
     }
 

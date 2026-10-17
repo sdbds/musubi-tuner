@@ -65,24 +65,27 @@ def test_bound_blocks_replay_forward_gradients_and_dropout_rng(lora):
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
-def test_real_model_checkpoints_stem_encoder_vit_decoder_and_final_block():
+@pytest.mark.parametrize("minimum_pixels", [0, 20000])
+def test_real_model_checkpoints_stem_encoder_vit_decoder_and_final_block(minimum_pixels):
     torch.manual_seed(12)
     model = NRModel()
-    model.enable_gradient_checkpointing()
+    model.enable_gradient_checkpointing(min_pixels=minimum_pixels)
     model.freeze_single_frame()
     geometry = resolve_geometry(48, 48)
     source = torch.rand(1, 16, geometry.full_height, geometry.full_width)
     visits = {str(index): 0 for index in (0, 4, 14, 30, 31, 38, 40, 48, 62, 66, 70)}
+    areas = {}
     hooks = []
     for key in visits:
 
         def count(module, inputs, key=key):
             visits[key] += 1
+            areas[key] = inputs[0].shape[-2] * inputs[0].shape[-1]
 
         hooks.append(model.blocks[key].ffn.register_forward_pre_hook(count))
     try:
         model(source, geometry).square().mean().backward()
-        assert all(count >= 2 for count in visits.values()), visits
+        assert all(count == (2 if areas[key] > minimum_pixels else 1) for key, count in visits.items()), visits
         assert torch.count_nonzero(model.blocks["70"].head.rgb.weight.grad)
         model.zero_grad(set_to_none=True)
         visits.update({key: 0 for key in visits})
@@ -149,3 +152,102 @@ def test_reconfiguring_checkpointing_off_stops_recomputation():
             model.zero_grad(set_to_none=True)
     finally:
         hook.remove()
+
+
+def test_selective_checkpoint_cli_is_explicit_and_defaults_to_all_blocks(tmp_path):
+    from musubi_tuner.dlssnr.runtime import runtime_policy, validate_runtime_policy, with_native_weight_qat
+
+    default = build_train_config(make_args(tmp_path, ["--gradient_checkpointing"]))
+    assert default["training"]["gradient_checkpointing_min_pixels"] == 0
+    assert runtime_policy(default)["gradient_checkpointing_min_pixels"] == 0
+    assert runtime_policy(default)["schema"] == "dlssnr_runtime_v3"
+    options = ["--gradient_checkpointing", "--gradient_checkpointing_min_pixels", "20000", "--native_weight_qat"]
+    selected = build_train_config(make_args(tmp_path, options))
+    assert selected["training"]["gradient_checkpointing_min_pixels"] == 20000
+    policy = runtime_policy(selected)
+    assert policy["schema"] == "dlssnr_runtime_v3"
+    assert policy["gradient_checkpointing_min_pixels"] == 20000
+    validate_runtime_policy(policy, training=True)
+    disabled_qat = with_native_weight_qat(policy, False)
+    assert disabled_qat["schema"] == "dlssnr_runtime_v3" and not disabled_qat["native_weight_qat"]
+    validate_runtime_policy(disabled_qat, training=True)
+
+
+@pytest.mark.parametrize("threshold", [-1, True, 1.5, None])
+def test_runtime_rejects_invalid_checkpoint_threshold(threshold):
+    from musubi_tuner.dlssnr.runtime import default_runtime_policy, validate_runtime_policy
+
+    policy = {**default_runtime_policy(), "gradient_checkpointing": True, "gradient_checkpointing_min_pixels": threshold}
+    with pytest.raises(ValueError, match="gradient_checkpointing_min_pixels"):
+        validate_runtime_policy(policy)
+
+
+@pytest.mark.parametrize("schema", ["dlssnr_runtime_v1", "dlssnr_runtime_v2"])
+def test_runtime_accepts_only_the_current_format(schema):
+    from musubi_tuner.dlssnr.runtime import default_runtime_policy, validate_runtime_policy
+
+    with pytest.raises(ValueError, match="schema"):
+        validate_runtime_policy({**default_runtime_policy(), "schema": schema})
+
+
+@pytest.mark.parametrize("threshold", [-1, True, 1.5])
+def test_selective_checkpoint_rejects_invalid_threshold(tmp_path, threshold):
+    args = make_args(tmp_path, ["--gradient_checkpointing"])
+    args.gradient_checkpointing_min_pixels = threshold
+    with pytest.raises(ValueError, match="gradient_checkpointing_min_pixels"):
+        build_train_config(args)
+
+
+def test_selective_checkpoint_requires_checkpointing(tmp_path):
+    args = make_args(tmp_path)
+    args.gradient_checkpointing_min_pixels = 20000
+    with pytest.raises(ValueError, match="gradient_checkpointing"):
+        build_train_config(args)
+
+
+@pytest.mark.parametrize("height,width,expected_visits", [(4, 4, 1), (4, 5, 2)])
+def test_selective_checkpoint_replays_only_blocks_above_the_area_threshold(height, width, expected_visits):
+    from musubi_tuner.dlssnr.model import _run_block
+
+    blocks = _blocks()
+    source = torch.rand(1, 32, height, width)
+    expected = _run_block(blocks["0"], source, False)
+    expected.square().mean().backward()
+    gradients = {name: value.grad.clone() for name, value in blocks["0"].named_parameters()}
+    blocks.zero_grad(set_to_none=True)
+    visits = []
+    hook = blocks["0"].ffn.register_forward_pre_hook(lambda *_: visits.append(True))
+    try:
+        actual = _run_block(blocks["0"], source, True, min_pixels=16)
+        actual.square().mean().backward()
+        assert len(visits) == expected_visits
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        torch.testing.assert_close({name: value.grad for name, value in blocks["0"].named_parameters()}, gradients, rtol=0, atol=0)
+    finally:
+        hook.remove()
+
+
+def test_native_evaluation_restores_selective_checkpoint_settings():
+    from test_dlssnr_training import SmallNR
+
+    from musubi_tuner.dlssnr.runtime import configure_model_runtime, default_runtime_policy, native_weight_runtime
+
+    class SmallCheckpointNR(SmallNR):
+        enable_gradient_checkpointing = NRModel.enable_gradient_checkpointing
+
+    model = SmallCheckpointNR()
+    policy = {
+        **default_runtime_policy(),
+        "schema": "dlssnr_runtime_v3",
+        "native_weight_qat": True,
+        "gradient_checkpointing": True,
+        "gradient_checkpointing_min_pixels": 20000,
+    }
+    configure_model_runtime(model, policy, training=True)
+    assert model.gradient_checkpointing_min_pixels == 20000
+    with pytest.raises(RuntimeError, match="probe"), native_weight_runtime(model):
+        assert not model.gradient_checkpointing
+        assert model.gradient_checkpointing_min_pixels == 0
+        raise RuntimeError("probe")
+    assert model.gradient_checkpointing and model.gradient_checkpointing_min_pixels == 20000
+    assert model.runtime_policy == policy
