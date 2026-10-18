@@ -26,6 +26,7 @@ from musubi_tuner.dataset.architectures import (
     ARCHITECTURE_MAGE_FLOW,
     ARCHITECTURE_MAGE_FLOW_EDIT,
     ARCHITECTURE_MINIMAX_H3,
+    ARCHITECTURE_MOSS_IMAGE,
     ARCHITECTURE_QWEN_IMAGE,
     ARCHITECTURE_QWEN_IMAGE_21,
     ARCHITECTURE_QWEN_IMAGE_EDIT,
@@ -86,6 +87,7 @@ class BucketSelector:
         ARCHITECTURE_MAGE_FLOW_EDIT: RESOLUTION_STEPS_MAGE_FLOW,
         ARCHITECTURE_MINIMAX_H3: RESOLUTION_STEPS_MINIMAX_H3,
         ARCHITECTURE_DLSSNR: RESOLUTION_STEPS_DLSSNR,
+        ARCHITECTURE_MOSS_IMAGE: 16,
     }
 
     def __init__(
@@ -276,13 +278,19 @@ class BucketBatchManager:
         batch_tensor_data = {}
         varlen_keys = set()
         for item_info in items:
-            sd_latent = load_file(item_info.latent_cache_path)
-            if self.architecture == ARCHITECTURE_LENS:
-                from musubi_tuner.lens.lens_text_cache import load_lens_text_cache
+            if self.architecture == ARCHITECTURE_MOSS_IMAGE:
+                from musubi_tuner.moss_image.cache import load_cache
 
-                sd_te = load_lens_text_cache(item_info.text_encoder_output_cache_path)
+                sd_latent = load_cache(item_info.latent_cache_path, "latent", expected_size=item_info.bucket_size)
+                sd_te = load_cache(item_info.text_encoder_output_cache_path, "text")
             else:
-                sd_te = load_file(item_info.text_encoder_output_cache_path)
+                sd_latent = load_file(item_info.latent_cache_path)
+                if self.architecture == ARCHITECTURE_LENS:
+                    from musubi_tuner.lens.lens_text_cache import load_lens_text_cache
+
+                    sd_te = load_lens_text_cache(item_info.text_encoder_output_cache_path)
+                else:
+                    sd_te = load_file(item_info.text_encoder_output_cache_path)
             sd = {**sd_latent, **sd_te}
 
             # TODO refactor this

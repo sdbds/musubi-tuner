@@ -29,6 +29,7 @@ from musubi_tuner.dataset.image_video_dataset import (
     ARCHITECTURE_MAGE_FLOW,
     ARCHITECTURE_MAGE_FLOW_EDIT,
     ARCHITECTURE_MINIMAX_H3,
+    ARCHITECTURE_MOSS_IMAGE,
     ARCHITECTURE_Z_IMAGE,
 )
 
@@ -265,6 +266,9 @@ def build_metadata(
     elif architecture == ARCHITECTURE_MINIMAX_H3:
         arch = ARCH_MINIMAX_H3
         impl = IMPL_MINIMAX_H3
+    elif architecture == ARCHITECTURE_MOSS_IMAGE:
+        arch = "moss-image-base"
+        impl = "https://huggingface.co/OpenMOSS-Team/MOSS-Image-Base"
     else:
         raise ValueError(f"Unknown architecture: {architecture}")
 

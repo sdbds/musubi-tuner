@@ -76,6 +76,7 @@ class AutoEncoderParams:
     ch_mult: list[int] = field(default_factory=lambda: [1, 2, 4, 4])
     num_res_blocks: int = 2
     z_channels: int = 32
+    decoder_ch: int | None = None
 
 
 def swish(x: Tensor) -> Tensor:
@@ -344,7 +345,7 @@ class AutoEncoder(nn.Module):
         self.decoder = Decoder(
             resolution=params.resolution,
             in_channels=params.in_channels,
-            ch=params.ch,
+            ch=params.ch if params.decoder_ch is None else params.decoder_ch,
             out_ch=params.out_ch,
             ch_mult=params.ch_mult,
             num_res_blocks=params.num_res_blocks,

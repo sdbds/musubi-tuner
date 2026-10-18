@@ -42,6 +42,7 @@ from musubi_tuner.dataset.architectures import (  # explicit imports for local u
     ARCHITECTURE_MAGE_FLOW_EDIT_FULL,
     ARCHITECTURE_MAGE_FLOW_FULL,
     ARCHITECTURE_MINIMAX_H3,
+    ARCHITECTURE_MOSS_IMAGE,
     ARCHITECTURE_QWEN_IMAGE_EDIT,
     ARCHITECTURE_QWEN_IMAGE_21,
     ARCHITECTURE_WAN,
@@ -655,8 +656,14 @@ class ImageDataset(BaseDataset):
             if expected_cache_architecture is not None:
                 _validate_mage_cache_metadata(cache_file, expected_cache_architecture)
                 _validate_mage_cache_metadata(text_encoder_output_cache_file, expected_cache_architecture)
+            if self.architecture == ARCHITECTURE_MOSS_IMAGE:
+                from musubi_tuner.moss_image.cache import load_cache
+
+                load_cache(text_encoder_output_cache_file, "text", header_only=True)
 
             bucket_reso = bucket_selector.get_bucket_resolution(image_size)
+            if self.architecture == ARCHITECTURE_MOSS_IMAGE:
+                load_cache(cache_file, "latent", header_only=True, expected_size=bucket_reso)
 
             if self.architecture == ARCHITECTURE_FRAMEPACK or self.architecture == ARCHITECTURE_WAN:
                 # we need to split the bucket with latent window size and optional 1f clean indices, zero post
@@ -704,8 +711,14 @@ class ImageDataset(BaseDataset):
 
     def shuffle_buckets(self):
         # set random seed for this epoch
-        random.seed(self.seed + self.current_epoch)
-        self.batch_manager.shuffle()
+        rng_state = random.getstate() if self.architecture == ARCHITECTURE_MOSS_IMAGE else None
+        try:
+            random.seed(self.seed + self.current_epoch)
+            self.batch_manager.shuffle()
+        finally:
+            # Replaying MOSS dataset order on resume must not reset the training sampler RNG.
+            if rng_state is not None:
+                random.setstate(rng_state)
 
     def __len__(self):
         if self.batch_manager is None:

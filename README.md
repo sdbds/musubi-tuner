@@ -42,7 +42,9 @@
 
 ## Introduction
 
-This repository provides scripts for training LoRA (Low-Rank Adaptation) models with HunyuanVideo, Wan2.1/2.2, FramePack, FLUX.1 Kontext, FLUX.2 dev/klein, Qwen-Image, Z-Image, Lens, and MiniMax-H3 architectures.
+This repository provides scripts for training LoRA (Low-Rank Adaptation) models with HunyuanVideo, Wan2.1/2.2, FramePack, FLUX.1 Kontext, FLUX.2 dev/klein, Qwen-Image, Z-Image, Lens, MiniMax-H3, and MOSS-Image architectures.
+
+MOSS-Image also supports full DiT fine-tuning, native caches, resumable training and image generation. See the [MOSS-Image guide](./docs/moss_image.md).
 
 This repository is unofficial and not affiliated with the official repositories of these architectures.
 
