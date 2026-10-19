@@ -1223,6 +1223,16 @@ Common arguments:
 | `--forward_validation_report` | Optional base-validation evidence, checked only when explicitly supplied. It is not a training prerequisite. |
 | `--development_smoke` | Developer tests only: explicitly permits incomplete provenance or random initialization. Normal training does not need it. |
 
+Multiscale rank limits follow the narrowest target in each width group: `32` for
+widths 32/64/128/256, `64` for width 512, and `1024` for the ViT width 1024.
+Oversized entries in `rank_by_width` are capped automatically, with alpha reduced
+by the same factor to preserve `alpha / rank`. For example, requesting `128/64`
+for every group produces `32/16`, `32/16`, `32/16`, `32/16`, `64/32`, `128/64`.
+Omitted alpha still follows rank, and already-valid values are unchanged.
+Adjustments are logged; resolved run configuration and adapter metadata store
+the effective rank and alpha. This does not enable a single `--network_dim` for
+multiscale or alter strict `vit_only` and saved-adapter loading checks.
+
 For example, `--optimizer_type SGD --optimizer_args momentum=0.9 weight_decay=0.0`
 constructs an actual SGD optimizer rather than changing only a configuration label.
 Adafactor requires explicit `--optimizer_args relative_step=False warmup_init=False`.
