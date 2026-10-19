@@ -5,7 +5,9 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import logging
 import math
+from fractions import Fraction
 from pathlib import Path
 
 import toml
@@ -17,6 +19,9 @@ from musubi_tuner.dlssnr.geometry import resolve_geometry
 from musubi_tuner.dlssnr.profiles import PROFILE_ID, PROFILES
 from musubi_tuner.dlssnr.temporal import AUGMENTATION_SEED_POLICY
 from musubi_tuner.dlssnr.synthetic_temporal import validate_max_shift
+
+
+logger = logging.getLogger(__name__)
 
 
 def _integer(value, name: str, minimum: int = 1) -> None:
@@ -89,19 +94,35 @@ def validate_lora(table: dict) -> None:
         if "rank" in table or "alpha" in table:
             raise ValueError("multiscale uses the width table, not a single rank/alpha")
         defaults = {"32": 2, "64": 4, "128": 8, "256": 8, "512": 16, "1024": 16}
-        table.setdefault("rank_by_width", defaults.copy())
-        table.setdefault("alpha_by_width", table["rank_by_width"].copy())
-        for field in ("rank_by_width", "alpha_by_width"):
-            values = table[field]
+        ranks = table.get("rank_by_width", defaults)
+        alphas = table.get("alpha_by_width", ranks)
+        for field, values in (("rank_by_width", ranks), ("alpha_by_width", alphas)):
             if not isinstance(values, dict) or set(values) != set(defaults):
                 raise ValueError(f"lora.{field} requires exactly widths {list(defaults)}")
             for width, value in values.items():
                 if field == "rank_by_width":
                     _integer(value, f"lora.{field}.{width}")
-                    if value > {"512": 64, "1024": 1024}.get(width, 32):
-                        raise ValueError(f"rank exceeds a target's input/output width at C={width}")
                 else:
                     _number(value, f"lora.{field}.{width}", positive=True)
+        effective_ranks, effective_alphas = ranks.copy(), alphas.copy()
+        for width, rank in ranks.items():
+            # One rank per width group must fit its narrowest FFN/attention target.
+            limit = {"512": 64, "1024": 1024}.get(width, 32)
+            if rank > limit:
+                # Avoid intermediate rounding that changes an equivalent config's resume identity.
+                scaled = Fraction(alphas[width]) * limit / rank
+                alpha = scaled.numerator if type(alphas[width]) is int and scaled.denominator == 1 else float(scaled)
+                _number(alpha, f"lora.alpha_by_width.{width} after rank clamping", positive=True)
+                effective_ranks[width], effective_alphas[width] = limit, alpha
+                logger.warning(
+                    "Clamping multiscale LoRA at C=%s: rank %d -> %d, alpha %g -> %g (preserving alpha/rank)",
+                    width,
+                    rank,
+                    limit,
+                    alphas[width],
+                    alpha,
+                )
+        table.update(rank_by_width=effective_ranks, alpha_by_width=effective_alphas)
     else:
         raise ValueError(f"unknown LoRA profile {profile}")
     table.setdefault("dropout", 0.0)

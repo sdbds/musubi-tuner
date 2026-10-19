@@ -190,7 +190,8 @@ def setup_parser(*, lora=False) -> argparse.ArgumentParser:
             "--network_args",
             nargs="*",
             default=None,
-            help="NR adapter options: profile=vit_only|multiscale, qkv_mode, rank_by_width and alpha_by_width.",
+            help="NR adapter options: profile=vit_only|multiscale, qkv_mode, rank_by_width and alpha_by_width. "
+            "Oversized multiscale ranks are capped per width group; alpha scales proportionally.",
         )
     else:
         for name, default in (("prior_lr_multiplier", 1.0), ("scale_lr_multiplier", 1.0), ("temporal_blend_lr_multiplier", 0.1)):

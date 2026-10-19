@@ -113,6 +113,14 @@ class DLSSNRLoRA(nn.Module):
 
 def inject(model: nn.Module, table: dict) -> DLSSNRLoRA:
     profile = table["profile"]
+    if profile == "multiscale":
+        from musubi_tuner.dlssnr.config import validate_lora
+
+        table = dict(table)
+        for field in ("rank_by_width", "alpha_by_width"):
+            if isinstance(table.get(field), dict):
+                table[field] = {str(width): value for width, value in table[field].items()}
+        validate_lora(table)
     dropout = float(table.get("dropout", 0.0))
     if table.get("qkv_mode", "fused_head_major") != "fused_head_major":
         raise ValueError("only qkv_mode = fused_head_major is implemented")
