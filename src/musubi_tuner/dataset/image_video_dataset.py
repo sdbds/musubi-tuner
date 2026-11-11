@@ -172,6 +172,7 @@ class BaseDataset(torch.utils.data.Dataset):
         self.debug_dataset = debug_dataset
         self.architecture = architecture
         self.seed = None
+        self.deterministic_training = False
         self.current_epoch = 0
         self.shared_epoch = None
         # position in the owning DatasetGroup (stamped by the group), carried by every ItemInfo
@@ -194,6 +195,10 @@ class BaseDataset(torch.utils.data.Dataset):
 
     def get_all_latent_cache_files(self):
         return glob.glob(os.path.join(self.cache_directory, f"*_{self.architecture}.safetensors"))
+
+    def _training_latent_cache_files(self):
+        paths = self.get_all_latent_cache_files()
+        return sorted(paths) if self.deterministic_training else paths
 
     def get_all_text_encoder_output_cache_files(self):
         return glob.glob(os.path.join(self.cache_directory, f"*_{self.architecture}_te.safetensors"))
@@ -252,9 +257,10 @@ class BaseDataset(torch.utils.data.Dataset):
                 " The cache directory must not be shared between datasets (see docs/dataset_config.md)."
             )
 
-    def set_seed(self, seed: int, shared_epoch: SharedEpoch):
+    def set_seed(self, seed: int, shared_epoch: SharedEpoch, *, deterministic_training: bool = False):
         self.seed = seed
         self.shared_epoch = shared_epoch
+        self.deterministic_training = deterministic_training
 
     def set_current_epoch(self, epoch):
         assert self.shared_epoch is not None, "shared_epoch is None"
@@ -265,6 +271,14 @@ class BaseDataset(torch.utils.data.Dataset):
 
     def shuffle_buckets(self):
         raise NotImplementedError
+
+    def _shuffle_training_buckets(self, *, preserve_rng: bool = False):
+        seed = self.seed + self.current_epoch
+        if self.deterministic_training or preserve_rng:
+            self.batch_manager.shuffle(random.Random(seed))
+        else:
+            random.seed(seed)
+            self.batch_manager.shuffle()
 
     def __len__(self):
         return NotImplementedError
@@ -633,8 +647,7 @@ class ImageDataset(BaseDataset):
             ARCHITECTURE_MAGE_FLOW_EDIT: ARCHITECTURE_MAGE_FLOW_EDIT_FULL,
         }.get(self.architecture)
 
-        # glob cache files
-        latent_cache_files = glob.glob(os.path.join(self.cache_directory, f"*_{self.architecture}.safetensors"))
+        latent_cache_files = self._training_latent_cache_files()
 
         # assign cache files to item info
         # (width, height) -> [ItemInfo] or (width, height, other conds...) -> [ItemInfo]
@@ -710,15 +723,7 @@ class ImageDataset(BaseDataset):
         self.num_train_items = sum([len(bucket) for bucket in bucketed_item_info.values()])
 
     def shuffle_buckets(self):
-        # set random seed for this epoch
-        rng_state = random.getstate() if self.architecture == ARCHITECTURE_MOSS_IMAGE else None
-        try:
-            random.seed(self.seed + self.current_epoch)
-            self.batch_manager.shuffle()
-        finally:
-            # Replaying MOSS dataset order on resume must not reset the training sampler RNG.
-            if rng_state is not None:
-                random.setstate(rng_state)
+        self._shuffle_training_buckets(preserve_rng=self.architecture == ARCHITECTURE_MOSS_IMAGE)
 
     def __len__(self):
         if self.batch_manager is None:
@@ -1084,8 +1089,7 @@ class VideoDataset(BaseDataset):
     def prepare_for_training(self, num_timestep_buckets: Optional[int] = None):
         bucket_selector = BucketSelector(self.resolution, self.enable_bucket, self.bucket_no_upscale, self.architecture)
 
-        # glob cache files
-        latent_cache_files = glob.glob(os.path.join(self.cache_directory, f"*_{self.architecture}.safetensors"))
+        latent_cache_files = self._training_latent_cache_files()
 
         # assign cache files to item info
         bucketed_item_info: dict[tuple[int, int, int], list[ItemInfo]] = {}  # (width, height, frame_count) -> [ItemInfo]
@@ -1134,9 +1138,7 @@ class VideoDataset(BaseDataset):
         self.num_train_items = sum([len(bucket) for bucket in bucketed_item_info.values()])
 
     def shuffle_buckets(self):
-        # set random seed for this epoch
-        random.seed(self.seed + self.current_epoch)
-        self.batch_manager.shuffle()
+        self._shuffle_training_buckets()
 
     def __len__(self):
         if self.batch_manager is None:

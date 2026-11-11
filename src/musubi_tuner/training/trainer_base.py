@@ -10,7 +10,7 @@ wan_train_network.py, ...).
 import asyncio
 import importlib
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 import math
 import os
 import sys
@@ -32,6 +32,7 @@ from accelerate.utils import set_seed
 from accelerate import Accelerator, PartialState
 from safetensors.torch import load_file
 from musubi_tuner.training.lr_scheduler import create_lr_scheduler
+from musubi_tuner.training.local_resume import LocalTrainingState, load_resume_rng, save_local_training_state, verify_restored_rng
 
 from musubi_tuner.dataset import config_utils
 from musubi_tuner.dataset.architectures import round_down_frame_count
@@ -120,6 +121,8 @@ class NetworkTrainer:
 
     def __init__(self):
         self.blocks_to_swap = None
+        self._deterministic_training = False
+        self._local_training_state: LocalTrainingState | None = None
         self.timestep_range_pool = []
         self.num_timestep_buckets: Optional[int] = None  # for get_bucketed_timestep()
         self.vae_frame_stride = 4  # legacy frame-grid fallback; some architectures set 1 or use a custom formula
@@ -1512,9 +1515,10 @@ class NetworkTrainer:
         if not self._validate_args_and_init(args):
             return
 
+        accelerator, weight_dtype, dit_dtype, dit_weight_dtype, vae_dtype = self._prepare_accelerator_and_dtypes(args)
+        self._configure_local_resume(args, accelerator)
         session_id, training_started_at = self._init_session(args)
         train_dataset_group, collator, current_epoch = self._build_dataset(args)
-        accelerator, weight_dtype, dit_dtype, dit_weight_dtype, vae_dtype = self._prepare_accelerator_and_dtypes(args)
         sample_parameters, sample_resources = self.prepare_sampling(args, accelerator, vae_dtype)
         transformer = self._load_dit_and_swap(args, accelerator, dit_weight_dtype)
         # the network factories take a LyCORIS-compatible vae argument; the sampling
@@ -1626,13 +1630,41 @@ class NetworkTrainer:
 
         return True
 
+    def _configure_local_resume(self, args, accelerator):
+        self._deterministic_training = False
+        self._local_training_state = None
+        if args.resume_from_huggingface:
+            return
+
+        supported = accelerator.num_processes == 1 and accelerator.device.type in {"cpu", "cuda"}
+        if args.resume:
+            args.resume = os.path.expanduser(args.resume)
+            state = LocalTrainingState.read(args.resume)
+            if state is None:
+                if accelerator.is_main_process:
+                    logger.warning(
+                        "No trainer progress in %s; counters restart and max_train_steps counts additional steps.", args.resume
+                    )
+                return
+            if not supported:
+                raise ValueError("This local training checkpoint requires a single CPU or CUDA process for --resume.")
+            if state.plan["device"] != str(accelerator.device):
+                raise ValueError(f"Local resume requires the original device {state.plan['device']}, got {accelerator.device}")
+            if args.seed is not None and args.seed != state.seed:
+                raise ValueError(f"Local resume requires the same seed: checkpoint has {state.seed}, current run has {args.seed}")
+            args.seed = state.seed
+            self._local_training_state = state
+            self.timestep_range_pool = list(state.timestep_range_pool)
+
+        self._deterministic_training = supported
+
     def _init_session(self, args):
         session_id = random.randint(0, 2**32)
         training_started_at = time.time()
         # setup_logging(args, reset=True)
 
         if args.seed is None:
-            args.seed = random.randint(0, 2**32)
+            args.seed = random.randint(0, 2**32 - 1)
         set_seed(args.seed)
         return session_id, training_started_at
 
@@ -1654,6 +1686,7 @@ class NetworkTrainer:
             num_timestep_buckets=self.num_timestep_buckets,
             shared_epoch=current_epoch,
             audio_spec=self.audio_spec,
+            deterministic_training=self._deterministic_training,
         )
 
         if train_dataset_group.num_train_items == 0:
@@ -1821,6 +1854,7 @@ class NetworkTrainer:
             collate_fn=collator,
             num_workers=n_workers,
             persistent_workers=args.persistent_data_loader_workers,
+            generator=torch.Generator().manual_seed(args.seed) if self._deterministic_training else None,
         )
 
         # calculate max_train_steps
@@ -1831,6 +1865,13 @@ class NetworkTrainer:
             accelerator.print(
                 f"override steps. steps for {args.max_train_epochs} epochs is / 指定エポックまでのステップ数: {args.max_train_steps}"
             )
+
+        if self._deterministic_training:
+            current = LocalTrainingState.start(args, len(train_dataloader), train_dataset_group.datasets, accelerator.device)
+            if self._local_training_state is None:
+                self._local_training_state = current
+            else:
+                self._local_training_state.validate_plan(current)
 
         # send max_train_steps to train_dataset_group
         train_dataset_group.set_max_train_steps(args.max_train_steps)
@@ -1898,6 +1939,9 @@ class NetworkTrainer:
             transformer = self.compile_transformer(args, transformer)
             transformer.__dict__["_orig_mod"] = transformer  # for annoying accelerator checks
 
+        if self._deterministic_training:
+            accelerator.dataloader_config.use_seedable_sampler = True
+            accelerator.dataloader_config.data_seed = args.seed
         network, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(network, optimizer, train_dataloader, lr_scheduler)
         training_model = network
 
@@ -1948,8 +1992,14 @@ class NetworkTrainer:
         accelerator.register_save_state_pre_hook(save_model_hook)
         accelerator.register_load_state_pre_hook(load_model_hook)
 
-        # resume from local or huggingface. accelerator.step is set
-        self.resume_from_local_or_hf_if_specified(accelerator, args)  # accelerator.load_state(args.resume)
+        if args.resume and self._local_training_state is not None:
+            # Accelerate's NumPy allowlist omits this dynamic dtype on NumPy <1.25.
+            with torch.serialization.safe_globals([type(np.dtype(np.uint32))]):
+                saved_rng = load_resume_rng(accelerator, args.resume, self._local_training_state)
+                self.resume_from_local_or_hf_if_specified(accelerator, args)
+            verify_restored_rng(accelerator, saved_rng)
+        else:
+            self.resume_from_local_or_hf_if_specified(accelerator, args)
 
     def _run_training_loop(
         self,
@@ -1976,6 +2026,19 @@ class NetworkTrainer:
         network_dtype,
     ):
         is_main_process = accelerator.is_main_process
+
+        training_state = self._local_training_state
+        epoch_to_start = training_state.epoch if training_state is not None else 0
+        global_step = training_state.global_step if training_state is not None else 0
+        batch_to_start = training_state.batch_index if training_state is not None else 0
+        if global_step > 0:
+            accelerator.print(
+                f"Resuming training at step {global_step}/{args.max_train_steps}, epoch {epoch_to_start + 1}, batch {batch_to_start}."
+            )
+            if global_step == args.max_train_steps:
+                accelerator.print("The checkpoint has already reached the planned total; no training to run.")
+                accelerator.end_training()
+                return
 
         self.on_train_start(args, accelerator, network, transformer, optimizer)
 
@@ -2103,11 +2166,13 @@ class NetworkTrainer:
                 init_kwargs=init_kwargs,
             )
 
-        # TODO skip until initial step
-        progress_bar = tqdm(range(args.max_train_steps), smoothing=0, disable=not accelerator.is_local_main_process, desc="steps")
-
-        epoch_to_start = 0
-        global_step = 0
+        progress_bar = tqdm(
+            total=args.max_train_steps,
+            initial=global_step,
+            smoothing=0,
+            disable=not accelerator.is_local_main_process,
+            desc="steps",
+        )
         last_sampled_step = None
         noise_scheduler = FlowMatchDiscreteScheduler(shift=args.discrete_flow_shift, reverse=True, solver="euler")
 
@@ -2173,27 +2238,47 @@ class NetworkTrainer:
                 accelerator.print(f"removing old checkpoint: {old_ckpt_file}")
                 os.remove(old_ckpt_file)
 
+        def save_training_state(directory):
+            if training_state is not None:
+                training_state.timestep_range_pool = list(self.timestep_range_pool)
+            save_local_training_state(accelerator, directory, training_state)
+
         def _do_sample(epoch_arg, steps_arg):
             if not should_sample_images(args, steps_arg, epoch_arg):
                 return
-            self.on_before_sample_images(
-                accelerator, args, epoch_arg, steps_arg, sample_resources, transformer, network, sample_parameters, dit_dtype
-            )
-            try:
-                self.sample_images(
-                    accelerator, args, epoch_arg, steps_arg, sample_resources, transformer, sample_parameters, dit_dtype
-                )
-            finally:
-                self.on_after_sample_images(
+            with ExitStack() as rng:
+                if training_state is not None:
+                    # An epoch-boundary resume can skip previews made after the state was saved.
+                    devices = [accelerator.device] if accelerator.device.type == "cuda" else []
+                    rng.callback(random.setstate, random.getstate())
+                    rng.callback(np.random.set_state, np.random.get_state())
+                    rng.enter_context(torch.random.fork_rng(devices=devices))
+                self.on_before_sample_images(
                     accelerator, args, epoch_arg, steps_arg, sample_resources, transformer, network, sample_parameters, dit_dtype
                 )
+                try:
+                    self.sample_images(
+                        accelerator, args, epoch_arg, steps_arg, sample_resources, transformer, sample_parameters, dit_dtype
+                    )
+                finally:
+                    self.on_after_sample_images(
+                        accelerator,
+                        args,
+                        epoch_arg,
+                        steps_arg,
+                        sample_resources,
+                        transformer,
+                        network,
+                        sample_parameters,
+                        dit_dtype,
+                    )
 
         # For --sample_at_first
-        if should_sample_images(args, global_step, epoch=0):
+        if global_step == 0 and should_sample_images(args, global_step, epoch=0):
             optimizer_eval_fn()
             _do_sample(0, global_step)
             optimizer_train_fn()
-        if len(accelerator.trackers) > 0:
+        if global_step == 0 and len(accelerator.trackers) > 0:
             # log empty object to commit the sample images to wandb
             accelerator.log({}, step=0)
 
@@ -2216,9 +2301,16 @@ class NetworkTrainer:
 
             metadata["ss_epoch"] = str(epoch + 1)
 
+            if training_state is not None:
+                train_dataloader.generator.manual_seed(args.seed + epoch)
+                train_dataloader.set_epoch(epoch)
             accelerator.unwrap_model(network).on_epoch_start(transformer)
 
-            for step, batch in enumerate(train_dataloader):
+            start_batch = batch_to_start if epoch == epoch_to_start else 0
+            epoch_dataloader = accelerator.skip_first_batches(train_dataloader, start_batch) if start_batch else train_dataloader
+            if start_batch:
+                epoch_dataloader.set_epoch(epoch)
+            for step, batch in enumerate(epoch_dataloader, start=start_batch):
                 # torch.compiler.cudagraph_mark_step_begin() # for cudagraphs
 
                 latents = batch["latents"]
@@ -2281,6 +2373,8 @@ class NetworkTrainer:
                 if accelerator.sync_gradients:
                     progress_bar.update(1)
                     global_step += 1
+                    if training_state is not None:
+                        training_state.advance(global_step, epoch, step + 1)
 
                     # to avoid calling optimizer_eval_fn() too frequently, we call it only when we need to sample images or save the model
                     should_sampling = should_sample_images(args, global_step, epoch=None)
@@ -2299,7 +2393,9 @@ class NetworkTrainer:
                                 save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch)
 
                                 if args.save_state:
-                                    train_utils.save_and_remove_state_stepwise(args, accelerator, global_step)
+                                    train_utils.save_and_remove_state_stepwise(
+                                        args, accelerator, global_step, save_state_fn=save_training_state
+                                    )
 
                                 remove_step_no = train_utils.get_remove_step_no(args, global_step)
                                 if remove_step_no is not None:
@@ -2352,7 +2448,9 @@ class NetworkTrainer:
                         remove_model(remove_ckpt_name)
 
                     if args.save_state:
-                        train_utils.save_and_remove_state_on_epoch_end(args, accelerator, epoch + 1)
+                        train_utils.save_and_remove_state_on_epoch_end(
+                            args, accelerator, epoch + 1, save_state_fn=save_training_state
+                        )
 
             if should_sample_at_epoch_end(global_step, last_sampled_step):
                 _do_sample(epoch + 1, global_step)
@@ -2370,7 +2468,7 @@ class NetworkTrainer:
         optimizer_eval_fn()
 
         if is_main_process and (args.save_state or args.save_state_on_train_end):
-            train_utils.save_state_on_train_end(args, accelerator)
+            train_utils.save_state_on_train_end(args, accelerator, save_state_fn=save_training_state)
 
         if is_main_process:
             ckpt_name = train_utils.get_last_ckpt_name(args.output_name)

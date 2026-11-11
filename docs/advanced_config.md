@@ -6,6 +6,7 @@
 
 - [DINOv3 auxiliary perceptual loss](#dinov3-auxiliary-perceptual-loss--dinov3補助知覚loss)
 - [Using configuration files to specify training options](#using-configuration-files-to-specify-training-options--設定ファイルを使用した学習オプションの指定)
+- [Resume from a local training state](#resume-from-a-local-training-state)
 - [How to specify `network_args`](#how-to-specify-network_args--network_argsの指定方法)
 - [LoRA+](#lora)
 - [Select the target modules of LoRA](#select-the-target-modules-of-lora--loraの対象モジュールを選択する)
@@ -126,6 +127,31 @@ accelerate launch --mixed_precision bf16 src/musubi_tuner/hv_train_network.py --
 ```
 
 </details>
+
+## Resume from a local training state
+
+For LoRA trainers using the shared training loop, a single-process CPU or CUDA run with
+`--save_state` (or `--save_state_on_train_end`) writes `trainer_state.json` in
+the state directory. Pass the directory, not the exported `.safetensors`
+weights, to `--resume`. The training loop resumes at the next unprocessed batch
+without repeating `--sample_at_first`.
+
+Use the original device, dataset, caches, model, optimizer, and training options. Keep
+the original **total** `--max_train_steps` (or `--max_train_epochs`), not the
+remaining steps. For example, resume a step-400 state from a 1000-step run with
+`--max_train_steps 1000`, not `600`. A state already at the target does not
+train further. The saved seed is used when `--seed` is omitted. The trainer
+checks the seed, batch layout, accumulation, total steps, and relevant
+optimizer, scheduler, and timestep options; it does not verify the contents
+of the model or dataset. Incomplete state saves and mismatched RNG files are
+rejected rather than resumed.
+
+States without this metadata, including legacy checkpoints, still load the
+Accelerate state and restart the trainer counters; the limit then counts
+additional steps. This progress restore is local and single-process CPU/CUDA only.
+Hugging Face resume, distributed runs without the metadata, and trainers
+with their own loops keep their existing behavior. Loss averages start fresh
+from batches seen after the restart.
 
 ## How to specify `network_args` / `network_args`の指定方法
 

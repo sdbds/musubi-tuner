@@ -76,22 +76,25 @@ def reset_progress_bar_timing(progress_bar) -> None:
 
 class LossRecorder:
     def __init__(self):
-        self.loss_list: list[float] = []
+        self.loss_list: list[float | None] = []
         self.loss_total: float = 0.0
+        self.loss_count = 0
 
     def add(self, *, epoch: int, step: int, loss: float) -> None:
-        if epoch == 0:
-            self.loss_list.append(loss)
+        # After a mid-epoch resume, skipped slots are unknown, not zero.
+        while len(self.loss_list) <= step:
+            self.loss_list.append(None)
+        previous = self.loss_list[step]
+        if previous is None:
+            self.loss_count += 1
         else:
-            while len(self.loss_list) <= step:
-                self.loss_list.append(0.0)
-            self.loss_total -= self.loss_list[step]
-            self.loss_list[step] = loss
+            self.loss_total -= previous
+        self.loss_list[step] = loss
         self.loss_total += loss
 
     @property
     def moving_average(self) -> float:
-        return self.loss_total / len(self.loss_list)
+        return self.loss_total / self.loss_count
 
 
 def get_epoch_ckpt_name(model_name, epoch_no: int):
@@ -129,7 +132,9 @@ def get_remove_step_no(args: argparse.Namespace, step_no: int):
     return remove_step_no
 
 
-def save_and_remove_state_on_epoch_end(args: argparse.Namespace, accelerator: accelerate.Accelerator, epoch_no: int):
+def save_and_remove_state_on_epoch_end(
+    args: argparse.Namespace, accelerator: accelerate.Accelerator, epoch_no: int, *, save_state_fn=None
+):
     model_name = args.output_name
 
     logger.info("")
@@ -137,7 +142,7 @@ def save_and_remove_state_on_epoch_end(args: argparse.Namespace, accelerator: ac
     os.makedirs(args.output_dir, exist_ok=True)
 
     state_dir = os.path.join(args.output_dir, EPOCH_STATE_NAME.format(model_name, epoch_no))
-    accelerator.save_state(state_dir)
+    (save_state_fn or accelerator.save_state)(state_dir)
     if args.save_state_to_huggingface:
         logger.info("uploading state to huggingface.")
         huggingface_utils.upload(args, state_dir, "/" + EPOCH_STATE_NAME.format(model_name, epoch_no))
@@ -151,7 +156,9 @@ def save_and_remove_state_on_epoch_end(args: argparse.Namespace, accelerator: ac
             shutil.rmtree(state_dir_old)
 
 
-def save_and_remove_state_stepwise(args: argparse.Namespace, accelerator: accelerate.Accelerator, step_no: int):
+def save_and_remove_state_stepwise(
+    args: argparse.Namespace, accelerator: accelerate.Accelerator, step_no: int, *, save_state_fn=None
+):
     model_name = args.output_name
 
     logger.info("")
@@ -159,7 +166,7 @@ def save_and_remove_state_stepwise(args: argparse.Namespace, accelerator: accele
     os.makedirs(args.output_dir, exist_ok=True)
 
     state_dir = os.path.join(args.output_dir, STEP_STATE_NAME.format(model_name, step_no))
-    accelerator.save_state(state_dir)
+    (save_state_fn or accelerator.save_state)(state_dir)
     if args.save_state_to_huggingface:
         logger.info("uploading state to huggingface.")
         huggingface_utils.upload(args, state_dir, "/" + STEP_STATE_NAME.format(model_name, step_no))
@@ -177,7 +184,7 @@ def save_and_remove_state_stepwise(args: argparse.Namespace, accelerator: accele
                 shutil.rmtree(state_dir_old)
 
 
-def save_state_on_train_end(args: argparse.Namespace, accelerator: accelerate.Accelerator):
+def save_state_on_train_end(args: argparse.Namespace, accelerator: accelerate.Accelerator, *, save_state_fn=None):
     model_name = args.output_name
 
     logger.info("")
@@ -185,7 +192,7 @@ def save_state_on_train_end(args: argparse.Namespace, accelerator: accelerate.Ac
     os.makedirs(args.output_dir, exist_ok=True)
 
     state_dir = os.path.join(args.output_dir, LAST_STATE_NAME.format(model_name))
-    accelerator.save_state(state_dir)
+    (save_state_fn or accelerator.save_state)(state_dir)
 
     if args.save_state_to_huggingface:
         logger.info("uploading last state to huggingface.")

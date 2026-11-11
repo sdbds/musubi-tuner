@@ -274,6 +274,8 @@ def generate_dataset_group_by_blueprint(
     num_timestep_buckets: Optional[int] = None,
     shared_epoch: SharedEpoch = None,
     audio_spec: Optional["AudioSpec"] = None,
+    *,
+    deterministic_training: bool = False,
 ) -> DatasetGroup:
     datasets: List[Union[ImageDataset, VideoDataset]] = []
 
@@ -360,7 +362,7 @@ def generate_dataset_group_by_blueprint(
     seed = random.randint(0, 2**31)  # actual seed is seed + epoch_no
     for i, dataset in enumerate(datasets):
         # logger.info(f"[Dataset {i}]")
-        dataset.set_seed(seed, shared_epoch)
+        dataset.set_seed(seed, shared_epoch, deterministic_training=deterministic_training)
         if training:
             dataset.prepare_for_training(num_timestep_buckets=num_timestep_buckets)
 
