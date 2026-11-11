@@ -351,8 +351,8 @@ class Krea2NetworkTrainer(NetworkTrainer):
         self._turbo_lora_network = turbo_network
         return turbo_network
 
-    def _build_network(self, args, accelerator, transformer, vae, weight_dtype):
-        network = super()._build_network(args, accelerator, transformer, vae, weight_dtype)
+    def _build_network(self, args, accelerator, transformer, vae, weight_dtype, train_dataset_group):
+        network = super()._build_network(args, accelerator, transformer, vae, weight_dtype, train_dataset_group)
         if network is not None and getattr(args, "turbo_lora", None):
             self._build_turbo_lora_network(args, accelerator, transformer)
         return network

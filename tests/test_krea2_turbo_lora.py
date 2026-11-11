@@ -229,13 +229,19 @@ def test_build_network_eagerly_builds_turbo_lora(tiny_k2_model, tmp_path, monkey
     lora_path = tmp_path / "turbo_lora.safetensors"
     save_file(trainee.state_dict(), str(lora_path))
 
-    monkeypatch.setattr(NetworkTrainer, "_build_network", lambda self, args, accelerator, transformer, vae, weight_dtype: trainee)
+    dataset_group = object()
+
+    def build_trainee(self, args, accelerator, transformer, vae, weight_dtype, train_dataset_group):
+        assert train_dataset_group is dataset_group
+        return trainee
+
+    monkeypatch.setattr(NetworkTrainer, "_build_network", build_trainee)
 
     trainer = Krea2NetworkTrainer()
     args = _trainer_args(turbo_lora=str(lora_path), compile=True)
     accelerator = _FakeAccelerator()
 
-    result = trainer._build_network(args, accelerator, model, None, torch.float32)
+    result = trainer._build_network(args, accelerator, model, None, torch.float32, dataset_group)
 
     assert result is trainee
     assert trainer._turbo_lora_network is not None
@@ -250,14 +256,16 @@ def test_build_network_skips_turbo_lora_when_not_set(tiny_k2_model, monkeypatch)
 
     model = tiny_k2_model
     monkeypatch.setattr(
-        NetworkTrainer, "_build_network", lambda self, args, accelerator, transformer, vae, weight_dtype: "stub-network"
+        NetworkTrainer,
+        "_build_network",
+        lambda self, args, accelerator, transformer, vae, weight_dtype, train_dataset_group: "stub-network",
     )
 
     trainer = Krea2NetworkTrainer()
     args = _trainer_args(turbo_lora=None)
     accelerator = _FakeAccelerator()
 
-    result = trainer._build_network(args, accelerator, model, None, torch.float32)
+    result = trainer._build_network(args, accelerator, model, None, torch.float32, object())
 
     assert result == "stub-network"
     assert trainer._turbo_lora_network is None
